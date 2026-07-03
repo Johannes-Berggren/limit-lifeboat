@@ -16,6 +16,8 @@ open dist/LLMUsageMonitor.app
 2. Click `Connect Next` until the accounts you want to monitor are signed in.
 3. Click `Refresh Usage` in the menu-bar popover.
 
+Google sign-in can reject embedded app browser windows. If that happens, use `Open in Browser` from the dashboard window, sign in there, press Command-A then Command-C on the dashboard page, then click `Import Browser Text`.
+
 CLI switching is optional and hidden under `Advanced CLI switching` in the account setup rows. Browser, Claude Desktop, ChatGPT Desktop, and CLI sessions are separate; dashboard login is what the usage monitor reads.
 
 The menu bar shows compact provider usage without opening the popover: `C` is Claude and `G` is ChatGPT/Codex. Usage turns orange near 80% used and red when depleted; local notifications are sent on those threshold changes.

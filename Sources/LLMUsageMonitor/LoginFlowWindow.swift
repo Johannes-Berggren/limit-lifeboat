@@ -102,7 +102,7 @@ struct LoginFlowView: View {
                 }
             }
 
-            Text("Use the main button to connect accounts one at a time. The dashboard window reads the page after login; use Read Page only if the visible status does not update.")
+            Text("Use the main button to connect accounts one at a time. If Google sign-in fails in the app window, use Open in Browser from that window and import the copied dashboard text.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
