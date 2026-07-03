@@ -55,7 +55,7 @@ struct DashboardContainerView: View {
                 Button {
                     captureSignal += 1
                 } label: {
-                    Label("Capture Usage", systemImage: "text.viewfinder")
+                    Label("Read Page", systemImage: "text.viewfinder")
                 }
             }
             .padding(10)

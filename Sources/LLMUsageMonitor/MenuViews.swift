@@ -52,10 +52,10 @@ struct MenuRootView: View {
                         ProgressView()
                             .controlSize(.small)
                     } else {
-                        Image(systemName: "arrow.clockwise")
+                        Label("Refresh Usage", systemImage: "arrow.clockwise")
                     }
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.bordered)
                 .help("Refresh usage")
                 .disabled(state.isRefreshing)
             }
@@ -99,14 +99,6 @@ struct MenuRootView: View {
                     .font(.subheadline.weight(.semibold))
 
                 Spacer()
-
-                Button {
-                    state.copyLoginCommand(for: provider)
-                } label: {
-                    Image(systemName: "rectangle.on.rectangle")
-                }
-                .buttonStyle(.borderless)
-                .help("Copy login command and open Terminal")
             }
 
             ForEach(profiles) { profile in
@@ -115,14 +107,8 @@ struct MenuRootView: View {
                     snapshot: state.snapshots[profile.id],
                     hasSnapshot: state.hasStoredSnapshot(for: profile),
                     activeLoginPresent: state.validateActiveLogin(provider: provider),
-                    refresh: {
-                        Task { await state.refresh(profile) }
-                    },
                     openDashboard: {
                         state.openDashboard(for: profile)
-                    },
-                    captureCLI: {
-                        state.captureCLISnapshot(for: profile)
                     },
                     switchCLI: {
                         state.switchCLI(to: profile)
@@ -138,9 +124,7 @@ struct AccountRowView: View {
     let snapshot: UsageSnapshot?
     let hasSnapshot: Bool
     let activeLoginPresent: Bool
-    let refresh: () -> Void
     let openDashboard: () -> Void
-    let captureCLI: () -> Void
     let switchCLI: () -> Void
 
     var body: some View {
@@ -182,30 +166,16 @@ struct AccountRowView: View {
 
             HStack(spacing: 8) {
                 Button {
-                    refresh()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .help("Refresh this account")
-
-                Button {
                     openDashboard()
                 } label: {
-                    Image(systemName: "safari")
+                    Label("Dashboard", systemImage: "safari")
                 }
                 .help("Open dashboard")
 
                 Button {
-                    captureCLI()
-                } label: {
-                    Image(systemName: "key")
-                }
-                .help("Capture current CLI login for this account")
-
-                Button {
                     switchCLI()
                 } label: {
-                    Image(systemName: "arrow.triangle.2.circlepath")
+                    Label("Switch CLI", systemImage: "arrow.triangle.2.circlepath")
                 }
                 .help("Switch CLI to this account")
                 .disabled(!hasSnapshot)
@@ -216,7 +186,7 @@ struct AccountRowView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.bordered)
         }
         .padding(10)
         .background(Color(nsColor: .controlBackgroundColor))

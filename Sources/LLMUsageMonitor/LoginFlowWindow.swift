@@ -87,18 +87,11 @@ struct LoginFlowView: View {
                 Button {
                     state.importCurrentCLIForPrimaryAccounts()
                 } label: {
-                    Label("Import Current CLI Logins", systemImage: "square.and.arrow.down")
+                    Label("Use Current CLI Logins", systemImage: "square.and.arrow.down")
                 }
-
-                Button {
-                    Task { await state.refreshAll() }
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .disabled(state.isRefreshing)
             }
 
-            Text("Primary accounts use the app's default web profile and automatically save currently logged-in local CLI credentials when possible. Additional accounts stay isolated and need manual dashboard and CLI login.")
+            Text("Use this screen only to connect accounts and save CLI snapshots. Usage refresh is controlled from the main menu; dashboard windows read the page after login and when you click Read Page.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
