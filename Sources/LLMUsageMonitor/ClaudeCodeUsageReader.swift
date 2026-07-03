@@ -69,9 +69,22 @@ private func runExpectProbe(
 
     let process = Process()
     process.executableURL = expectURL
-    process.currentDirectoryURL = homeDirectory
-    process.environment = environment()
-    process.arguments = ["-c", expectScript]
+    process.currentDirectoryURL = trustedClaudeWorkingDirectory(
+        homeDirectory: homeDirectory,
+        fileManager: fileManager
+    )
+    let environment = environment(homeDirectory: homeDirectory)
+    process.environment = environment
+    process.arguments = [
+        "-c",
+        try expectScript(
+            command: resolveClaudeCommand(
+                homeDirectory: homeDirectory,
+                fileManager: fileManager,
+                environment: environment
+            )
+        )
+    ]
 
     let outputPipe = Pipe()
     let errorPipe = Pipe()
@@ -110,10 +123,125 @@ private func runExpectProbe(
     return output + "\n" + errorOutput
 }
 
-private let expectScript = #"""
+private struct ClaudeCommand {
+    var executableURL: URL
+    var arguments: [String]
+}
+
+private func resolveClaudeCommand(
+    homeDirectory: URL,
+    fileManager: FileManager,
+    environment: [String: String]
+) throws -> ClaudeCommand {
+    let candidates = [
+        homeDirectory.appendingPathComponent(".local/bin/claude"),
+        URL(fileURLWithPath: "/opt/homebrew/bin/claude"),
+        URL(fileURLWithPath: "/usr/local/bin/claude")
+    ]
+
+    for candidate in candidates where fileManager.isExecutableFile(atPath: candidate.path) {
+        let help = commandOutput(executableURL: candidate, arguments: ["--help"], environment: environment)
+        return ClaudeCommand(
+            executableURL: candidate,
+            arguments: supportedArguments(fromHelp: help)
+        )
+    }
+
+    return ClaudeCommand(
+        executableURL: URL(fileURLWithPath: "/usr/bin/env"),
+        arguments: ["claude"]
+    )
+}
+
+private func supportedArguments(fromHelp help: String) -> [String] {
+    var arguments: [String] = []
+    if help.contains("--safe-mode") {
+        arguments.append("--safe-mode")
+    }
+    if help.contains("--ax-screen-reader") {
+        arguments.append("--ax-screen-reader")
+    }
+    if help.contains("--no-chrome") {
+        arguments.append("--no-chrome")
+    }
+    if help.contains("--permission-mode") {
+        arguments.append(contentsOf: ["--permission-mode", "default"])
+    }
+    return arguments
+}
+
+private func commandOutput(executableURL: URL, arguments: [String], environment: [String: String]) -> String {
+    let process = Process()
+    process.executableURL = executableURL
+    process.arguments = arguments
+    process.environment = environment
+    let outputPipe = Pipe()
+    let errorPipe = Pipe()
+    process.standardOutput = outputPipe
+    process.standardError = errorPipe
+
+    do {
+        try process.run()
+        process.waitUntilExit()
+        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+        return String(decoding: outputData + errorData, as: UTF8.self)
+    } catch {
+        return ""
+    }
+}
+
+private func trustedClaudeWorkingDirectory(homeDirectory: URL, fileManager: FileManager) -> URL {
+    let claudeJSONURL = homeDirectory.appendingPathComponent(".claude.json")
+    guard let data = try? Data(contentsOf: claudeJSONURL),
+          let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let projects = object["projects"] as? [String: Any] else {
+        return homeDirectory
+    }
+
+    let trustedProjects = projects.compactMap { path, value -> (url: URL, lastStartTime: Double)? in
+        guard let dictionary = value as? [String: Any],
+              dictionary["hasTrustDialogAccepted"] as? Bool == true else {
+            return nil
+        }
+
+        let url = URL(fileURLWithPath: path)
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return nil
+        }
+
+        return (url, number(dictionary["lastStartTime"]) ?? 0)
+    }
+
+    return trustedProjects
+        .max { left, right in left.lastStartTime < right.lastStartTime }?
+        .url ?? homeDirectory
+}
+
+private func number(_ value: Any?) -> Double? {
+    if let value = value as? Double {
+        return value
+    }
+    if let value = value as? Int {
+        return Double(value)
+    }
+    if let value = value as? String {
+        return Double(value)
+    }
+    return nil
+}
+
+private func expectScript(command: ClaudeCommand) throws -> String {
+    let commandList = ([command.executableURL.path] + command.arguments)
+        .map(tclQuotedString)
+        .joined(separator: " ")
+
+    return #"""
 set timeout 6
 log_user 1
-spawn -noecho /usr/bin/env claude --safe-mode --ax-screen-reader --no-chrome --permission-mode default
+set command [list \#(commandList)]
+eval spawn -noecho $command
 set child [exp_pid]
 expect {
     -re {\$} {}
@@ -139,10 +267,21 @@ catch {exec kill -KILL $child}
 after 200
 exit 0
 """#
+}
 
-private func environment() -> [String: String] {
+private func tclQuotedString(_ value: String) -> String {
+    let escaped = value
+        .replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\"", with: "\\\"")
+        .replacingOccurrences(of: "$", with: "\\$")
+        .replacingOccurrences(of: "[", with: "\\[")
+        .replacingOccurrences(of: "]", with: "\\]")
+    return "\"\(escaped)\""
+}
+
+private func environment(homeDirectory: URL) -> [String: String] {
     var values = ProcessInfo.processInfo.environment
-    let fallbackPath = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    let fallbackPath = "\(homeDirectory.path)/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     if let existingPath = values["PATH"], !existingPath.isEmpty {
         values["PATH"] = "\(fallbackPath):\(existingPath)"
     } else {
@@ -172,7 +311,7 @@ private func killHelperClaudeProcesses() {
     process.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
     process.arguments = [
         "-f",
-        "claude --safe-mode --ax-screen-reader --no-chrome --permission-mode default"
+        "claude .*--ax-screen-reader.*--no-chrome.*--permission-mode default"
     ]
     process.standardOutput = Pipe()
     process.standardError = Pipe()

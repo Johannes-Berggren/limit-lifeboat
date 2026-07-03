@@ -29,6 +29,7 @@ final class AppState: ObservableObject {
     private let parser = UsageTextParser()
     private let identityExtractor = AccountIdentityExtractor()
     private let codexIdentityReader = CodexIdentityReader()
+    private let claudeIdentityReader = ClaudeIdentityReader()
     private let codexLocalUsageReader = CodexLocalUsageReader()
     private let claudeCodeUsageReader = ClaudeCodeUsageReader()
     private let webUsageRefresher = WebUsageRefresher()
@@ -349,7 +350,8 @@ final class AppState: ObservableObject {
 
         do {
             let report = try await claudeCodeUsageReader.readUsage()
-            guard let targetIndex = targetClaudeProfileIndex(for: report.identity) else {
+            let currentIdentity = claudeIdentityReader.readIdentity() ?? report.identity
+            guard let targetIndex = targetClaudeProfileIndex(for: currentIdentity) else {
                 return nil
             }
 
@@ -364,7 +366,7 @@ final class AppState: ObservableObject {
                 }
             }
 
-            if let identity = report.identity {
+            if let identity = currentIdentity {
                 let merged = mergedIdentity(existing: profiles[targetIndex].identity, new: identity)
                 if profiles[targetIndex].identity != merged {
                     profiles[targetIndex].identity = merged
@@ -408,12 +410,13 @@ final class AppState: ObservableObject {
                 return match
             }
 
-            if let emptyProfile = claudeIndices.first(where: { profiles[$0].identity == nil }) {
-                return emptyProfile
+            if let activeProfile = claudeIndices.first(where: { profiles[$0].isActiveCLI }) {
+                return activeProfile
             }
         }
 
         return claudeIndices.first { profiles[$0].isActiveCLI }
+            ?? claudeIndices.first { profiles[$0].identity == nil }
             ?? claudeIndices.first
     }
 

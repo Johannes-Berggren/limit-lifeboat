@@ -185,3 +185,44 @@ public struct CodexIdentityReader {
         return organization?["title"] as? String
     }
 }
+
+public struct ClaudeIdentityReader {
+    private let fileManager: FileManager
+    private let homeDirectory: URL
+
+    public init(
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        fileManager: FileManager = .default
+    ) {
+        self.homeDirectory = homeDirectory
+        self.fileManager = fileManager
+    }
+
+    public func readIdentity(now: Date = Date()) -> AccountIdentity? {
+        let configURL = homeDirectory.appendingPathComponent(".claude.json")
+        guard fileManager.fileExists(atPath: configURL.path),
+              let data = try? Data(contentsOf: configURL),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let account = object["oauthAccount"] as? [String: Any] else {
+            return nil
+        }
+
+        let email = account["emailAddress"] as? String
+        let displayName = account["displayName"] as? String
+        let organization = account["organizationName"] as? String
+        let accountID = account["accountUuid"] as? String
+
+        guard email != nil || displayName != nil || organization != nil || accountID != nil else {
+            return nil
+        }
+
+        return AccountIdentity(
+            email: email,
+            displayName: displayName,
+            organization: organization,
+            accountID: accountID,
+            source: .claudeCodeUsage,
+            updatedAt: now
+        )
+    }
+}

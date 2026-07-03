@@ -34,6 +34,31 @@ final class AccountIdentityExtractorTests: XCTestCase {
         XCTAssertEqual(identity.accountID, "acct_123")
         XCTAssertEqual(identity.source, .codexIDToken)
     }
+
+    func testReadsClaudeIdentityFromLocalAccountMetadata() throws {
+        let fixture = try TemporaryIdentityFixture()
+        defer { fixture.cleanup() }
+
+        let configURL = fixture.home.appendingPathComponent(".claude.json")
+        try """
+        {
+          "oauthAccount": {
+            "accountUuid": "account-1",
+            "displayName": "Johannes",
+            "emailAddress": "berggren@findable.ai",
+            "organizationName": "berggren@findable.ai's Organization"
+          }
+        }
+        """.data(using: .utf8)!.write(to: configURL)
+
+        let identity = try XCTUnwrap(ClaudeIdentityReader(homeDirectory: fixture.home).readIdentity())
+
+        XCTAssertEqual(identity.email, "berggren@findable.ai")
+        XCTAssertEqual(identity.displayName, "Johannes")
+        XCTAssertEqual(identity.organization, "berggren@findable.ai's Organization")
+        XCTAssertEqual(identity.accountID, "account-1")
+        XCTAssertEqual(identity.source, .claudeCodeUsage)
+    }
 }
 
 private struct TemporaryIdentityFixture {

@@ -25,7 +25,7 @@ final class ClaudeCodeUsageParserTests: XCTestCase {
         Approximate, based on local sessions on this machine - does not include other devices or claude.ai
         Usage credits
         63% 63% used
-        $315.15 / $500.00 spent - Resets Aug 1 (Europe/Oslo)
+        $315.15 / $500.00 spent - Resets Aug 1 (Europe/Oslo) Esc to cancelLast 24h - these are independent characteristics
         """
 
         let report = try XCTUnwrap(
@@ -33,7 +33,7 @@ final class ClaudeCodeUsageParserTests: XCTestCase {
         )
 
         XCTAssertEqual(report.identity?.email, "berggren@findable.ai")
-        XCTAssertEqual(report.identity?.organization, "Fable")
+        XCTAssertNil(report.identity?.organization)
         XCTAssertEqual(report.identity?.source, .claudeCodeUsage)
         XCTAssertEqual(report.limits.count, 3)
         XCTAssertEqual(report.limits[0].name, "Current session")

@@ -203,7 +203,10 @@ public struct ClaudeCodeUsageOutputParser: Sendable {
             #"(?i)\bCurrent week\b"#,
             #"(?i)\bApproximate\b"#,
             #"(?i)\bbased on\b"#,
-            #"(?i)\bdoes not include\b"#
+            #"(?i)\bdoes not include\b"#,
+            #"(?i)Esc to cancel"#,
+            #"(?i)\bLast 24h\b"#,
+            #"(?i)\bScanning local sessions\b"#
         ]
         for pattern in stopPatterns {
             if let range = value.range(of: pattern, options: .regularExpression) {
@@ -219,8 +222,7 @@ public struct ClaudeCodeUsageOutputParser: Sendable {
             #"(?i)\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b"#,
             in: text
         )
-        let organization = organizationFromLimits(limits)
-            ?? possessiveOrganization(in: text)
+        let organization = possessiveOrganization(in: text)
 
         guard email != nil || organization != nil else {
             return nil
@@ -262,19 +264,6 @@ public struct ClaudeCodeUsageOutputParser: Sendable {
         }
 
         return parts.isEmpty ? nil : parts.joined(separator: " - ")
-    }
-
-    private func organizationFromLimits(_ limits: [ClaudeCodeUsageLimit]) -> String? {
-        for limit in limits {
-            guard let value = firstCapture(#"\(([^)]+)\)"#, in: limit.name) else {
-                continue
-            }
-            let lower = value.lowercased()
-            if lower != "all" && lower != "all models" {
-                return value
-            }
-        }
-        return nil
     }
 
     private func possessiveOrganization(in text: String) -> String? {
