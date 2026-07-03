@@ -29,6 +29,7 @@ final class AppState: ObservableObject {
     private let parser = UsageTextParser()
     private let identityExtractor = AccountIdentityExtractor()
     private let codexIdentityReader = CodexIdentityReader()
+    private let codexLocalUsageReader = CodexLocalUsageReader()
     private let webUsageRefresher = WebUsageRefresher()
     private let dashboardWindowManager = DashboardWindowManager()
     private let loginFlowWindowManager = LoginFlowWindowManager()
@@ -73,6 +74,15 @@ final class AppState: ObservableObject {
     }
 
     func refresh(_ profile: AccountProfile) async {
+        if let localSnapshot = codexLocalUsageSnapshot(for: profile) {
+            snapshots[profile.id] = localSnapshot
+            updateMenuBarSummary()
+            usageAlertController.handle(snapshot: localSnapshot, profile: profile)
+            saveSnapshots()
+            statusMessage = "\(profile.label): \(localSnapshot.message)"
+            return
+        }
+
         var fallbackSnapshot: UsageSnapshot?
 
         do {
@@ -276,6 +286,48 @@ final class AppState: ObservableObject {
             return
         }
         updateIdentity(identity, for: profile)
+    }
+
+    private func codexLocalUsageSnapshot(for profile: AccountProfile) -> UsageSnapshot? {
+        guard profile.provider == .codex,
+              codexTerminalLoginMatches(profile),
+              let snapshot = codexLocalUsageReader.readUsage(for: profile) else {
+            return nil
+        }
+        return snapshot
+    }
+
+    private func codexTerminalLoginMatches(_ profile: AccountProfile) -> Bool {
+        guard let currentIdentity = codexIdentityReader.readIdentity() else {
+            return profile.isActiveCLI
+        }
+
+        if let identity = profile.identity, identitiesMatch(identity, currentIdentity) {
+            return true
+        }
+
+        if profile.isActiveCLI {
+            updateIdentity(currentIdentity, for: profile)
+            return true
+        }
+
+        return false
+    }
+
+    private func identitiesMatch(_ left: AccountIdentity, _ right: AccountIdentity) -> Bool {
+        if let leftAccountID = left.accountID,
+           let rightAccountID = right.accountID,
+           leftAccountID == rightAccountID {
+            return true
+        }
+
+        if let leftEmail = left.email?.lowercased(),
+           let rightEmail = right.email?.lowercased(),
+           leftEmail == rightEmail {
+            return true
+        }
+
+        return false
     }
 
     private func updateIdentity(_ identity: AccountIdentity, for profile: AccountProfile) {

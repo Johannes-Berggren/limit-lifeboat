@@ -102,7 +102,7 @@ struct LoginFlowView: View {
                 }
             }
 
-            Text("Use the main button to connect accounts one at a time. If Google sign-in fails in the app window, use Open in Browser from that window and import the copied dashboard text.")
+            Text("Codex terminal usage is read automatically when local rate-limit logs are available. For Claude or missing Codex logs, connect accounts one at a time. If Google sign-in fails, use Open in Browser and import the copied dashboard text.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
