@@ -72,11 +72,17 @@ public enum ParseConfidence: String, Codable, Sendable {
     case none
 }
 
+public enum WebDataStoreKind: String, Codable, Sendable {
+    case appDefault
+    case isolated
+}
+
 public struct AccountProfile: Codable, Identifiable, Hashable, Sendable {
     public var id: UUID
     public var provider: Provider
     public var label: String
     public var planLabel: String
+    public var webDataStoreKind: WebDataStoreKind
     public var webDataStoreID: UUID
     public var isActiveCLI: Bool
     public var createdAt: Date
@@ -87,6 +93,7 @@ public struct AccountProfile: Codable, Identifiable, Hashable, Sendable {
         provider: Provider,
         label: String,
         planLabel: String = "",
+        webDataStoreKind: WebDataStoreKind = .isolated,
         webDataStoreID: UUID = UUID(),
         isActiveCLI: Bool = false,
         createdAt: Date = Date(),
@@ -96,19 +103,58 @@ public struct AccountProfile: Codable, Identifiable, Hashable, Sendable {
         self.provider = provider
         self.label = label
         self.planLabel = planLabel
+        self.webDataStoreKind = webDataStoreKind
         self.webDataStoreID = webDataStoreID
         self.isActiveCLI = isActiveCLI
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case provider
+        case label
+        case planLabel
+        case webDataStoreKind
+        case webDataStoreID
+        case isActiveCLI
+        case createdAt
+        case updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(UUID.self, forKey: .id)
+        self.provider = try container.decode(Provider.self, forKey: .provider)
+        self.label = try container.decode(String.self, forKey: .label)
+        self.planLabel = try container.decode(String.self, forKey: .planLabel)
+        self.webDataStoreKind = try container.decodeIfPresent(WebDataStoreKind.self, forKey: .webDataStoreKind) ?? .isolated
+        self.webDataStoreID = try container.decode(UUID.self, forKey: .webDataStoreID)
+        self.isActiveCLI = try container.decode(Bool.self, forKey: .isActiveCLI)
+        self.createdAt = try container.decode(Date.self, forKey: .createdAt)
+        self.updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(provider, forKey: .provider)
+        try container.encode(label, forKey: .label)
+        try container.encode(planLabel, forKey: .planLabel)
+        try container.encode(webDataStoreKind, forKey: .webDataStoreKind)
+        try container.encode(webDataStoreID, forKey: .webDataStoreID)
+        try container.encode(isActiveCLI, forKey: .isActiveCLI)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
     }
 }
 
 public extension AccountProfile {
     static func defaultProfiles(now: Date = Date()) -> [AccountProfile] {
         [
-            AccountProfile(provider: .claude, label: "Claude 1", createdAt: now, updatedAt: now),
+            AccountProfile(provider: .claude, label: "Claude 1", webDataStoreKind: .appDefault, createdAt: now, updatedAt: now),
             AccountProfile(provider: .claude, label: "Claude 2", createdAt: now, updatedAt: now),
-            AccountProfile(provider: .codex, label: "ChatGPT/Codex 1", createdAt: now, updatedAt: now),
+            AccountProfile(provider: .codex, label: "ChatGPT/Codex 1", webDataStoreKind: .appDefault, createdAt: now, updatedAt: now),
             AccountProfile(provider: .codex, label: "ChatGPT/Codex 2", createdAt: now, updatedAt: now)
         ]
     }

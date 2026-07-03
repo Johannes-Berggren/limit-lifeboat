@@ -45,7 +45,12 @@ public final class ProfileRepository {
         }
 
         let data = try Data(contentsOf: profilesURL)
-        return try JSONDecoder.appDecoder.decode([AccountProfile].self, from: data)
+        let profiles = try JSONDecoder.appDecoder.decode([AccountProfile].self, from: data)
+        let migrated = migratePrimaryProfilesToDefaultStore(profiles)
+        if migrated != profiles {
+            try saveProfiles(migrated)
+        }
+        return migrated
     }
 
     public func saveProfiles(_ profiles: [AccountProfile]) throws {
@@ -74,6 +79,26 @@ public final class ProfileRepository {
 
     private func ensureDirectory() throws {
         try fileManager.createDirectory(at: applicationSupportDirectory, withIntermediateDirectories: true)
+    }
+
+    private func migratePrimaryProfilesToDefaultStore(_ profiles: [AccountProfile]) -> [AccountProfile] {
+        var migrated = profiles
+        var seenProviders: Set<Provider> = []
+
+        for index in migrated.indices {
+            let provider = migrated[index].provider
+            if seenProviders.insert(provider).inserted {
+                if migrated[index].webDataStoreKind != .appDefault {
+                    migrated[index].webDataStoreKind = .appDefault
+                    migrated[index].updatedAt = Date()
+                }
+            } else if migrated[index].webDataStoreKind != .isolated {
+                migrated[index].webDataStoreKind = .isolated
+                migrated[index].updatedAt = Date()
+            }
+        }
+
+        return migrated
     }
 }
 

@@ -77,18 +77,31 @@ struct LoginFlowView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 12) {
-            Label("Account Setup", systemImage: "person.2.badge.gearshape")
-                .font(.title3.weight(.semibold))
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Label("Account Setup", systemImage: "person.2.badge.gearshape")
+                    .font(.title3.weight(.semibold))
 
-            Spacer()
+                Spacer()
 
-            Button {
-                Task { await state.refreshAll() }
-            } label: {
-                Label("Refresh", systemImage: "arrow.clockwise")
+                Button {
+                    state.importCurrentCLIForPrimaryAccounts()
+                } label: {
+                    Label("Import Current CLI Logins", systemImage: "square.and.arrow.down")
+                }
+
+                Button {
+                    Task { await state.refreshAll() }
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .disabled(state.isRefreshing)
             }
-            .disabled(state.isRefreshing)
+
+            Text("Primary accounts use the app's default web profile and automatically save currently logged-in local CLI credentials when possible. Additional accounts stay isolated and need manual dashboard and CLI login.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
     }
@@ -124,6 +137,7 @@ struct LoginAccountSetupRow: View {
 
                 Spacer()
 
+                statusPill(text: profile.webDataStoreKind == .appDefault ? "Primary" : "Isolated", systemImage: profile.webDataStoreKind == .appDefault ? "person.crop.circle.fill" : "person.crop.circle.badge.plus", color: profile.webDataStoreKind == .appDefault ? .blue : .secondary)
                 statusPill(text: dashboardStatus.text, systemImage: dashboardStatus.image, color: dashboardStatus.color)
                 statusPill(text: hasCLISnapshot ? "CLI saved" : "CLI missing", systemImage: hasCLISnapshot ? "key.fill" : "key", color: hasCLISnapshot ? .green : .secondary)
             }

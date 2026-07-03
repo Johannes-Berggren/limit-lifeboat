@@ -38,6 +38,7 @@ final class AppState: ObservableObject {
         self.cliSwitcher = cliSwitcher
         self.profiles = try repository.loadProfiles()
         self.snapshots = try repository.loadUsageSnapshots()
+        autoImportPrimaryCLISnapshots()
         updateMenuBarSummary()
         usageAlertController.requestAuthorization()
     }
@@ -106,6 +107,10 @@ final class AppState: ObservableObject {
 
     func openLoginFlow() {
         loginFlowWindowManager.open(state: self)
+    }
+
+    func importCurrentCLIForPrimaryAccounts() {
+        autoImportPrimaryCLISnapshots(force: true)
     }
 
     func captureCLISnapshot(for profile: AccountProfile) {
@@ -180,6 +185,50 @@ final class AppState: ObservableObject {
     private func openTerminal() {
         let terminalURL = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
         NSWorkspace.shared.openApplication(at: terminalURL, configuration: NSWorkspace.OpenConfiguration())
+    }
+
+    private func autoImportPrimaryCLISnapshots(force: Bool = false) {
+        var importedLabels: [String] = []
+
+        for provider in Provider.allCases {
+            guard let index = profiles.firstIndex(where: { $0.provider == provider }) else {
+                continue
+            }
+
+            let profile = profiles[index]
+            if !force, (try? cliSwitcher.hasStoredSnapshot(for: profile)) == true {
+                continue
+            }
+
+            guard cliSwitcher.validateActiveLogin(provider: provider) else {
+                continue
+            }
+
+            do {
+                _ = try cliSwitcher.captureAndStoreSnapshot(for: profile)
+                profiles[index].isActiveCLI = true
+                profiles[index].updatedAt = Date()
+                importedLabels.append(profile.label)
+            } catch {
+                if force {
+                    statusMessage = "Could not import \(profile.label): \(error.localizedDescription)"
+                }
+            }
+        }
+
+        guard !importedLabels.isEmpty else {
+            if force && statusMessage.isEmpty {
+                statusMessage = "No active CLI logins found to import."
+            }
+            return
+        }
+
+        do {
+            try repository.saveProfiles(profiles)
+            statusMessage = "Imported current CLI login for \(importedLabels.joined(separator: ", "))."
+        } catch {
+            statusMessage = "Imported CLI snapshots, but could not save active profile state: \(error.localizedDescription)"
+        }
     }
 
     private func runTerminalCommand(_ command: String) -> Bool {

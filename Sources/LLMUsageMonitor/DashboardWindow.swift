@@ -78,7 +78,7 @@ struct DashboardWebView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = WKWebsiteDataStore(forIdentifier: profile.webDataStoreID)
+        configuration.websiteDataStore = WebDataStoreFactory.makeDataStore(for: profile)
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         context.coordinator.webView = webView

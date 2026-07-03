@@ -41,7 +41,7 @@ private final class WebPageTextLoader: NSObject, WKNavigationDelegate {
             self.continuation = continuation
 
             let configuration = WKWebViewConfiguration()
-            configuration.websiteDataStore = WKWebsiteDataStore(forIdentifier: profile.webDataStoreID)
+            configuration.websiteDataStore = WebDataStoreFactory.makeDataStore(for: profile)
             let webView = WKWebView(frame: .init(x: 0, y: 0, width: 1100, height: 900), configuration: configuration)
             webView.navigationDelegate = self
             self.webView = webView
