@@ -87,6 +87,11 @@ public final class ProfileRepository {
 
         for index in migrated.indices {
             let provider = migrated[index].provider
+            if migrated[index].identity?.isLikelyValid == false {
+                migrated[index].identity = nil
+                migrated[index].updatedAt = Date()
+            }
+
             if seenProviders.insert(provider).inserted {
                 if migrated[index].webDataStoreKind != .appDefault {
                     migrated[index].webDataStoreKind = .appDefault

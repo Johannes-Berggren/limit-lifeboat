@@ -27,6 +27,8 @@ final class AppState: ObservableObject {
     private let repository: ProfileRepository
     private let cliSwitcher: CLISwitcher
     private let parser = UsageTextParser()
+    private let identityExtractor = AccountIdentityExtractor()
+    private let codexIdentityReader = CodexIdentityReader()
     private let webUsageRefresher = WebUsageRefresher()
     private let dashboardWindowManager = DashboardWindowManager()
     private let loginFlowWindowManager = LoginFlowWindowManager()
@@ -71,9 +73,24 @@ final class AppState: ObservableObject {
     }
 
     func refresh(_ profile: AccountProfile) async {
+        var fallbackSnapshot: UsageSnapshot?
+
         do {
-            let text = try await webUsageRefresher.fetchVisibleText(for: profile)
-            ingestDashboardText(text, for: profile, source: profile.provider.dashboardURL.absoluteString)
+            for url in profile.provider.dashboardURLs {
+                let text = try await webUsageRefresher.fetchVisibleText(for: profile, url: url)
+                let snapshot = ingestDashboardText(text, for: profile, source: url.absoluteString)
+                if snapshot.parseConfidence != .none || snapshot.riskLevel == .stale {
+                    return
+                }
+                fallbackSnapshot = snapshot
+            }
+
+            if let fallbackSnapshot {
+                snapshots[profile.id] = fallbackSnapshot
+                updateMenuBarSummary()
+                saveSnapshots()
+                statusMessage = "\(profile.label): \(fallbackSnapshot.message)"
+            }
         } catch {
             let snapshot = UsageSnapshot(
                 accountID: profile.id,
@@ -90,13 +107,19 @@ final class AppState: ObservableObject {
         }
     }
 
-    func ingestDashboardText(_ text: String, for profile: AccountProfile, source: String) {
+    @discardableResult
+    func ingestDashboardText(_ text: String, for profile: AccountProfile, source: String) -> UsageSnapshot {
+        if let identity = identityExtractor.extractFromDashboardText(text) {
+            updateIdentity(identity, for: profile)
+        }
+
         let snapshot = parser.parse(text: text, account: profile, source: source)
         snapshots[profile.id] = snapshot
         updateMenuBarSummary()
         usageAlertController.handle(snapshot: snapshot, profile: profile)
         saveSnapshots()
         statusMessage = "\(profile.label): \(snapshot.message)"
+        return snapshot
     }
 
     func openDashboard(for profile: AccountProfile) {
@@ -116,6 +139,7 @@ final class AppState: ObservableObject {
     func captureCLISnapshot(for profile: AccountProfile) {
         do {
             _ = try cliSwitcher.captureAndStoreSnapshot(for: profile)
+            updateIdentityFromCurrentCLI(for: profile)
             statusMessage = "Captured \(profile.provider.displayName) CLI snapshot for \(profile.label)."
             objectWillChange.send()
         } catch {
@@ -189,6 +213,7 @@ final class AppState: ObservableObject {
 
     private func autoImportPrimaryCLISnapshots(force: Bool = false) {
         var importedLabels: [String] = []
+        var updatedProfiles = false
 
         for provider in Provider.allCases {
             guard let index = profiles.firstIndex(where: { $0.provider == provider }) else {
@@ -196,6 +221,14 @@ final class AppState: ObservableObject {
             }
 
             let profile = profiles[index]
+            if provider == .codex,
+               profiles[index].identity == nil,
+               let identity = codexIdentityReader.readIdentity() {
+                profiles[index].identity = identity
+                profiles[index].updatedAt = Date()
+                updatedProfiles = true
+            }
+
             if !force, (try? cliSwitcher.hasStoredSnapshot(for: profile)) == true {
                 continue
             }
@@ -208,6 +241,10 @@ final class AppState: ObservableObject {
                 _ = try cliSwitcher.captureAndStoreSnapshot(for: profile)
                 profiles[index].isActiveCLI = true
                 profiles[index].updatedAt = Date()
+                updatedProfiles = true
+                if provider == .codex, let identity = codexIdentityReader.readIdentity() {
+                    profiles[index].identity = identity
+                }
                 importedLabels.append(profile.label)
             } catch {
                 if force {
@@ -216,7 +253,7 @@ final class AppState: ObservableObject {
             }
         }
 
-        guard !importedLabels.isEmpty else {
+        guard !importedLabels.isEmpty || updatedProfiles else {
             if force && statusMessage.isEmpty {
                 statusMessage = "No active CLI logins found to import."
             }
@@ -225,10 +262,50 @@ final class AppState: ObservableObject {
 
         do {
             try repository.saveProfiles(profiles)
-            statusMessage = "Imported current CLI login for \(importedLabels.joined(separator: ", "))."
+            if !importedLabels.isEmpty {
+                statusMessage = "Imported current CLI login for \(importedLabels.joined(separator: ", "))."
+            }
         } catch {
             statusMessage = "Imported CLI snapshots, but could not save active profile state: \(error.localizedDescription)"
         }
+    }
+
+    private func updateIdentityFromCurrentCLI(for profile: AccountProfile) {
+        guard profile.provider == .codex,
+              let identity = codexIdentityReader.readIdentity() else {
+            return
+        }
+        updateIdentity(identity, for: profile)
+    }
+
+    private func updateIdentity(_ identity: AccountIdentity, for profile: AccountProfile) {
+        guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else {
+            return
+        }
+
+        profiles[index].identity = mergedIdentity(existing: profiles[index].identity, new: identity)
+        profiles[index].updatedAt = Date()
+
+        do {
+            try repository.saveProfiles(profiles)
+        } catch {
+            statusMessage = "Could not save account identity: \(error.localizedDescription)"
+        }
+    }
+
+    private func mergedIdentity(existing: AccountIdentity?, new: AccountIdentity) -> AccountIdentity {
+        guard let existing else {
+            return new
+        }
+
+        return AccountIdentity(
+            email: new.email ?? existing.email,
+            displayName: new.displayName ?? existing.displayName,
+            organization: new.organization ?? existing.organization,
+            accountID: new.accountID ?? existing.accountID,
+            source: new.source,
+            updatedAt: new.updatedAt
+        )
     }
 
     private func runTerminalCommand(_ command: String) -> Bool {

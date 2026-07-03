@@ -50,7 +50,7 @@ final class UsageParserTests: XCTestCase {
     func testDetectsLoggedOutDashboard() {
         let account = AccountProfile(provider: .codex, label: "Codex")
         let snapshot = parser.parse(
-            text: "Sign in Continue with Google Continue with Microsoft",
+            text: "Log in Sign up Continue with Google Continue with Microsoft Usage",
             account: account
         )
 
@@ -69,5 +69,6 @@ final class UsageParserTests: XCTestCase {
         XCTAssertNil(snapshot.includedLimit)
         XCTAssertEqual(snapshot.riskLevel, .unknown)
         XCTAssertEqual(snapshot.parseConfidence, .none)
+        XCTAssertEqual(snapshot.message, "Account page loaded, but usage limits are not visible.")
     }
 }

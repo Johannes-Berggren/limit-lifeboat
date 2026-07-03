@@ -18,8 +18,8 @@ enum WebUsageRefresherError: Error, LocalizedError {
 
 @MainActor
 final class WebUsageRefresher {
-    func fetchVisibleText(for profile: AccountProfile) async throws -> String {
-        let loader = WebPageTextLoader(profile: profile)
+    func fetchVisibleText(for profile: AccountProfile, url: URL? = nil) async throws -> String {
+        let loader = WebPageTextLoader(profile: profile, url: url ?? profile.provider.dashboardURL)
         return try await loader.load()
     }
 }
@@ -27,13 +27,15 @@ final class WebUsageRefresher {
 @MainActor
 private final class WebPageTextLoader: NSObject, WKNavigationDelegate {
     private let profile: AccountProfile
+    private let url: URL
     private var webView: WKWebView?
     private var continuation: CheckedContinuation<String, Error>?
     private var timeoutTask: Task<Void, Never>?
     private var didFinish = false
 
-    init(profile: AccountProfile) {
+    init(profile: AccountProfile, url: URL) {
         self.profile = profile
+        self.url = url
     }
 
     func load() async throws -> String {
@@ -45,7 +47,7 @@ private final class WebPageTextLoader: NSObject, WKNavigationDelegate {
             let webView = WKWebView(frame: .init(x: 0, y: 0, width: 1100, height: 900), configuration: configuration)
             webView.navigationDelegate = self
             self.webView = webView
-            webView.load(URLRequest(url: profile.provider.dashboardURL))
+            webView.load(URLRequest(url: url))
 
             timeoutTask = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 30_000_000_000)

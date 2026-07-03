@@ -164,6 +164,11 @@ struct AccountRowView: View {
                         }
                     }
 
+                    Text(identityText)
+                        .font(.caption)
+                        .foregroundStyle(profile.identity == nil ? .tertiary : .secondary)
+                        .lineLimit(1)
+
                     Text(statusText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -255,6 +260,24 @@ struct AccountRowView: View {
             return "snapshot saved"
         }
         return "no snapshot"
+    }
+
+    private var identityText: String {
+        guard let identity = profile.identity else {
+            return profile.webDataStoreKind == .appDefault ? "Primary profile, identity not read yet" : "Sign in to identify this account"
+        }
+
+        var parts: [String] = []
+        if let primary = identity.primaryLabel {
+            parts.append(primary)
+        }
+        if let organization = identity.organization, !organization.isEmpty {
+            parts.append(organization)
+        } else {
+            parts.append("Org not read")
+        }
+        parts.append(identity.source == .codexIDToken ? "CLI" : "Dashboard")
+        return parts.joined(separator: " • ")
     }
 
     private var riskColor: Color {

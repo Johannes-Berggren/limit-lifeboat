@@ -76,7 +76,7 @@ public struct UsageTextParser: Sendable {
             source: source,
             lastRefreshed: now,
             parseConfidence: confidence,
-            message: confidence == .none ? "Usage data was not recognized." : message
+            message: confidence == .none ? unknownUsageMessage(lower: lower) : message
         )
     }
 
@@ -87,6 +87,13 @@ public struct UsageTextParser: Sendable {
     }
 
     private func looksLoggedOut(_ lower: String) -> Bool {
+        if lower.contains("log in")
+            && lower.contains("sign up")
+            && !lower.contains("log out")
+            && firstMatch(#"(?i)\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b"#, in: lower) == nil {
+            return true
+        }
+
         let loginPhrases = [
             "log in",
             "sign in",
@@ -98,6 +105,18 @@ public struct UsageTextParser: Sendable {
             return false
         }
         return !lower.contains("usage") && !lower.contains("remaining") && !lower.contains("limit")
+    }
+
+    private func unknownUsageMessage(lower: String) -> String {
+        if lower.contains("usage limit") || lower.contains("current limits") || lower.contains("analytics") {
+            return "Dashboard loaded, but current remaining usage was not found."
+        }
+
+        if lower.contains("settings") || lower.contains("account") || lower.contains("profile") {
+            return "Account page loaded, but usage limits are not visible."
+        }
+
+        return "Dashboard loaded, but usage data was not recognized."
     }
 
     private func riskLevel(from lower: String, remaining: Double?, limit: Double?) -> RiskLevel {

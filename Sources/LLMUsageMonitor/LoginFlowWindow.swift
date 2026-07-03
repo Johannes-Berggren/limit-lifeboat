@@ -133,6 +133,10 @@ struct LoginAccountSetupRow: View {
                     Text(profile.provider.displayName)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    Text(identityText)
+                        .font(.caption)
+                        .foregroundStyle(profile.identity == nil ? .tertiary : .secondary)
+                        .lineLimit(1)
                 }
 
                 Spacer()
@@ -201,6 +205,30 @@ struct LoginAccountSetupRow: View {
 
     private var providerColor: Color {
         profile.provider == .claude ? .purple : .blue
+    }
+
+    private var identityText: String {
+        guard let identity = profile.identity else {
+            return "No email or organization read yet"
+        }
+
+        var parts: [String] = []
+        if let email = identity.email {
+            parts.append(email)
+        } else if let name = identity.displayName {
+            parts.append(name)
+        } else if let accountID = identity.accountID {
+            parts.append(accountID)
+        }
+
+        if let organization = identity.organization, !organization.isEmpty {
+            parts.append("Org: \(organization)")
+        } else {
+            parts.append("Org not read")
+        }
+
+        parts.append(identity.source == .codexIDToken ? "from CLI" : "from dashboard")
+        return parts.joined(separator: " • ")
     }
 
     private func statusPill(text: String, systemImage: String, color: Color) -> some View {
