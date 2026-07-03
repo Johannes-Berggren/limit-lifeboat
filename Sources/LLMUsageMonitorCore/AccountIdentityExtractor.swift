@@ -134,6 +134,7 @@ public struct CodexIdentityReader {
         let organization = (payload?["organization"] as? String)
             ?? (payload?["org"] as? String)
             ?? (payload?["workspace"] as? String)
+            ?? defaultOrganizationTitle(from: payload)
 
         guard email != nil || name != nil || organization != nil || accountID != nil else {
             return nil
@@ -168,5 +169,19 @@ public struct CodexIdentityReader {
             return nil
         }
         return payload
+    }
+
+    private func defaultOrganizationTitle(from payload: [String: Any]?) -> String? {
+        guard let auth = payload?["https://api.openai.com/auth"] as? [String: Any],
+              let organizations = auth["organizations"] as? [[String: Any]] else {
+            return nil
+        }
+
+        let defaultOrganization = organizations.first { organization in
+            (organization["is_default"] as? Bool) == true
+        }
+        let organization = defaultOrganization ?? organizations.first
+
+        return organization?["title"] as? String
     }
 }

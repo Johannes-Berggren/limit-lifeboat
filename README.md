@@ -16,7 +16,9 @@ open dist/LLMUsageMonitor.app
 2. Click `Connect Next` until the accounts you want to monitor are signed in.
 3. Click `Refresh Usage` in the menu-bar popover.
 
-For the active terminal Codex login, the app also reads recent local Codex session logs for rate-limit usage and reset timing. Claude Code stores local token activity and OAuth material, but not a stable subscription remaining-limit snapshot, so Claude usage still comes from the dashboard/manual import path.
+For the active terminal Codex login, the app also reads recent local Codex session logs for rate-limit usage and reset timing, and maps the current CLI identity to the matching Codex profile. Claude Code stores local token activity and OAuth material, but not a stable subscription remaining-limit snapshot, so Claude usage still comes from the dashboard/manual import path.
+
+Workspace/team Codex analytics use OpenAI's Codex Analytics API, which requires a workspace API key scoped to `codex.enterprise.analytics.read`; the normal local CLI token is not documented as an analytics API credential.
 
 Google sign-in can reject embedded app browser windows. If that happens, use `Open in Browser` from the dashboard window, sign in there, press Command-A then Command-C on the dashboard page, then click `Import Browser Text`.
 

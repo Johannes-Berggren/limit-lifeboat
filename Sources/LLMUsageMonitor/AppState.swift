@@ -68,6 +68,8 @@ final class AppState: ObservableObject {
         isRefreshing = true
         defer { isRefreshing = false }
 
+        syncActiveCodexCLIProfile()
+
         for profile in profiles {
             await refresh(profile)
         }
@@ -286,6 +288,53 @@ final class AppState: ObservableObject {
             return
         }
         updateIdentity(identity, for: profile)
+    }
+
+    private func syncActiveCodexCLIProfile() {
+        guard let currentIdentity = codexIdentityReader.readIdentity() else {
+            return
+        }
+
+        let codexIndices = profiles.indices.filter { profiles[$0].provider == .codex }
+        guard !codexIndices.isEmpty else {
+            return
+        }
+
+        let targetIndex = codexIndices.first { index in
+            guard let identity = profiles[index].identity else {
+                return false
+            }
+            return identitiesMatch(identity, currentIdentity)
+        } ?? codexIndices.first { profiles[$0].identity == nil }
+            ?? codexIndices.first { profiles[$0].isActiveCLI }
+            ?? codexIndices[0]
+
+        var changed = false
+        for index in codexIndices {
+            let shouldBeActive = index == targetIndex
+            if profiles[index].isActiveCLI != shouldBeActive {
+                profiles[index].isActiveCLI = shouldBeActive
+                profiles[index].updatedAt = Date()
+                changed = true
+            }
+        }
+
+        let merged = mergedIdentity(existing: profiles[targetIndex].identity, new: currentIdentity)
+        if profiles[targetIndex].identity != merged {
+            profiles[targetIndex].identity = merged
+            profiles[targetIndex].updatedAt = Date()
+            changed = true
+        }
+
+        guard changed else {
+            return
+        }
+
+        do {
+            try repository.saveProfiles(profiles)
+        } catch {
+            statusMessage = "Could not save active Codex profile: \(error.localizedDescription)"
+        }
     }
 
     private func codexLocalUsageSnapshot(for profile: AccountProfile) -> UsageSnapshot? {

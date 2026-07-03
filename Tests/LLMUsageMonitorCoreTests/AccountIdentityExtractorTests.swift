@@ -21,7 +21,7 @@ final class AccountIdentityExtractorTests: XCTestCase {
             .appendingPathComponent("auth.json")
         try FileManager.default.createDirectory(at: authURL.deletingLastPathComponent(), withIntermediateDirectories: true)
 
-        let payload = #"{"email":"codex@example.com","name":"Codex User"}"#
+        let payload = #"{"email":"codex@example.com","name":"Codex User","https://api.openai.com/auth":{"organizations":[{"id":"org_1","title":"Personal","is_default":false},{"id":"org_2","title":"Findable","is_default":true}]}}"#
         let token = "header.\(Data(payload.utf8).base64EncodedString().replacingOccurrences(of: "=", with: "")).signature"
         let auth = #"{"tokens":{"id_token":"\#(token)","account_id":"acct_123"}}"#
         try Data(auth.utf8).write(to: authURL)
@@ -30,6 +30,7 @@ final class AccountIdentityExtractorTests: XCTestCase {
 
         XCTAssertEqual(identity.email, "codex@example.com")
         XCTAssertEqual(identity.displayName, "Codex User")
+        XCTAssertEqual(identity.organization, "Findable")
         XCTAssertEqual(identity.accountID, "acct_123")
         XCTAssertEqual(identity.source, .codexIDToken)
     }
