@@ -84,19 +84,44 @@ struct LoginFlowView: View {
 
                 Spacer()
 
-                Button {
-                    state.importCurrentCLIForPrimaryAccounts()
-                } label: {
-                    Label("Use Current CLI Logins", systemImage: "square.and.arrow.down")
+                if let nextProfile = nextDashboardProfile {
+                    Button {
+                        state.openDashboard(for: nextProfile)
+                    } label: {
+                        Label("Connect Next: \(nextProfile.label)", systemImage: "arrow.right.circle")
+                    }
+                    .buttonStyle(.borderedProminent)
+                } else {
+                    Label("Dashboards Connected", systemImage: "checkmark.circle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.green)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 6)
+                        .background(Color.green.opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
                 }
             }
 
-            Text("Use this screen only to connect accounts and save CLI snapshots. Usage refresh is controlled from the main menu; dashboard windows read the page after login and when you click Read Page.")
+            Text("Use the main button to connect accounts one at a time. The dashboard window reads the page after login; use Read Page only if the visible status does not update.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
+    }
+
+    private var nextDashboardProfile: AccountProfile? {
+        state.profiles.first { profile in
+            dashboardNeedsConnection(profile)
+        }
+    }
+
+    private func dashboardNeedsConnection(_ profile: AccountProfile) -> Bool {
+        guard let snapshot = state.snapshots[profile.id] else {
+            return true
+        }
+
+        return snapshot.riskLevel == .stale || snapshot.message.lowercased().contains("login") || profile.identity == nil
     }
 }
 
@@ -109,6 +134,7 @@ struct LoginAccountSetupRow: View {
     let beginCLILogin: () -> Void
     let captureCLI: () -> Void
     let switchCLI: () -> Void
+    @State private var showsAdvancedCLI = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -136,7 +162,6 @@ struct LoginAccountSetupRow: View {
 
                 statusPill(text: profile.webDataStoreKind == .appDefault ? "Primary" : "Isolated", systemImage: profile.webDataStoreKind == .appDefault ? "person.crop.circle.fill" : "person.crop.circle.badge.plus", color: profile.webDataStoreKind == .appDefault ? .blue : .secondary)
                 statusPill(text: dashboardStatus.text, systemImage: dashboardStatus.image, color: dashboardStatus.color)
-                statusPill(text: hasCLISnapshot ? "CLI saved" : "CLI missing", systemImage: hasCLISnapshot ? "key.fill" : "key", color: hasCLISnapshot ? .green : .secondary)
             }
 
             UsageGauge(snapshot: snapshot, compact: false)
@@ -145,31 +170,51 @@ struct LoginAccountSetupRow: View {
                 Button {
                     openDashboard()
                 } label: {
-                    Label("Open Dashboard", systemImage: "safari")
-                }
-
-                Button {
-                    beginCLILogin()
-                } label: {
-                    Label("Run CLI Login", systemImage: "terminal")
-                }
-
-                Button {
-                    captureCLI()
-                } label: {
-                    Label("Save Snapshot", systemImage: "key")
+                    Label(dashboardButtonTitle, systemImage: "safari")
                 }
 
                 Spacer()
-
-                Button {
-                    switchCLI()
-                } label: {
-                    Label("Switch CLI", systemImage: "arrow.triangle.2.circlepath")
-                }
-                .disabled(!hasCLISnapshot)
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.borderedProminent)
+
+            DisclosureGroup(isExpanded: $showsAdvancedCLI) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Use this only if you want the app to switch the terminal CLI between accounts. It is separate from dashboard login and usage reading.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(spacing: 10) {
+                        Button {
+                            beginCLILogin()
+                        } label: {
+                            Label("Run CLI Login", systemImage: "terminal")
+                        }
+
+                        Button {
+                            captureCLI()
+                        } label: {
+                            Label("Save CLI Snapshot", systemImage: "key")
+                        }
+
+                        Button {
+                            switchCLI()
+                        } label: {
+                            Label("Switch CLI", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                        .disabled(!hasCLISnapshot)
+
+                        Spacer()
+
+                        statusPill(text: hasCLISnapshot ? "CLI saved" : "CLI missing", systemImage: hasCLISnapshot ? "key.fill" : "key", color: hasCLISnapshot ? .green : .secondary)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .padding(.top, 8)
+            } label: {
+                Label("Advanced CLI switching", systemImage: "terminal")
+                    .font(.caption.weight(.semibold))
+            }
         }
         .padding(14)
         .background(Color(nsColor: .controlBackgroundColor))
@@ -198,6 +243,18 @@ struct LoginAccountSetupRow: View {
 
     private var providerColor: Color {
         profile.provider == .claude ? .purple : .blue
+    }
+
+    private var dashboardButtonTitle: String {
+        guard let snapshot else {
+            return "Connect Dashboard"
+        }
+
+        if snapshot.riskLevel == .stale || snapshot.message.lowercased().contains("login") || profile.identity == nil {
+            return "Connect Dashboard"
+        }
+
+        return "Open Dashboard"
     }
 
     private var identityText: String {

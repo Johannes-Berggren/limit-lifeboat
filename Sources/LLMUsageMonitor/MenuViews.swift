@@ -105,13 +105,8 @@ struct MenuRootView: View {
                 AccountRowView(
                     profile: profile,
                     snapshot: state.snapshots[profile.id],
-                    hasSnapshot: state.hasStoredSnapshot(for: profile),
-                    activeLoginPresent: state.validateActiveLogin(provider: provider),
                     openDashboard: {
                         state.openDashboard(for: profile)
-                    },
-                    switchCLI: {
-                        state.switchCLI(to: profile)
                     }
                 )
             }
@@ -122,10 +117,7 @@ struct MenuRootView: View {
 struct AccountRowView: View {
     let profile: AccountProfile
     let snapshot: UsageSnapshot?
-    let hasSnapshot: Bool
-    let activeLoginPresent: Bool
     let openDashboard: () -> Void
-    let switchCLI: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -168,23 +160,11 @@ struct AccountRowView: View {
                 Button {
                     openDashboard()
                 } label: {
-                    Label("Dashboard", systemImage: "safari")
+                    Label(dashboardButtonTitle, systemImage: "safari")
                 }
                 .help("Open dashboard")
 
-                Button {
-                    switchCLI()
-                } label: {
-                    Label("Switch CLI", systemImage: "arrow.triangle.2.circlepath")
-                }
-                .help("Switch CLI to this account")
-                .disabled(!hasSnapshot)
-
                 Spacer()
-
-                Text(cliStateText)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
             }
             .buttonStyle(.bordered)
         }
@@ -222,16 +202,6 @@ struct AccountRowView: View {
         return parts.joined(separator: " • ")
     }
 
-    private var cliStateText: String {
-        if hasSnapshot && activeLoginPresent {
-            return "snapshot saved"
-        }
-        if hasSnapshot {
-            return "snapshot saved"
-        }
-        return "no snapshot"
-    }
-
     private var identityText: String {
         guard let identity = profile.identity else {
             return profile.webDataStoreKind == .appDefault ? "Primary profile, identity not read yet" : "Sign in to identify this account"
@@ -248,6 +218,18 @@ struct AccountRowView: View {
         }
         parts.append(identity.source == .codexIDToken ? "CLI" : "Dashboard")
         return parts.joined(separator: " • ")
+    }
+
+    private var dashboardButtonTitle: String {
+        guard let snapshot else {
+            return "Connect Dashboard"
+        }
+
+        if snapshot.riskLevel == .stale || snapshot.message.lowercased().contains("login") || profile.identity == nil {
+            return "Connect Dashboard"
+        }
+
+        return "Open Dashboard"
     }
 
     private var riskColor: Color {

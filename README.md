@@ -13,9 +13,9 @@ open dist/LLMUsageMonitor.app
 ## First Run
 
 1. Open the menu-bar item and choose `Accounts`.
-2. The first Claude and first ChatGPT/Codex profiles are primary profiles. On launch, the app imports currently active local CLI auth into those profiles when possible.
-3. For web usage, open each dashboard profile and sign in if the app profile is not already signed in. Browser, Claude Desktop, and ChatGPT Desktop cookies are separate from this app.
-4. For extra accounts, run the official CLI login command from `Accounts`, then save the CLI snapshot.
-5. Use `Switch CLI` to restore a saved snapshot for the selected provider. Active sessions are not killed; new credential reads use the restored account state.
+2. Click `Connect Next` until the accounts you want to monitor are signed in.
+3. Click `Refresh Usage` in the menu-bar popover.
+
+CLI switching is optional and hidden under `Advanced CLI switching` in the account setup rows. Browser, Claude Desktop, ChatGPT Desktop, and CLI sessions are separate; dashboard login is what the usage monitor reads.
 
 The menu bar shows compact provider usage without opening the popover: `C` is Claude and `G` is ChatGPT/Codex. Usage turns orange near 80% used and red when depleted; local notifications are sent on those threshold changes.
