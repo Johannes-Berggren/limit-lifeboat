@@ -55,14 +55,9 @@ final class MenuBarController {
         )
         button.image?.isTemplate = true
         button.toolTip = summary.accessibilityText
-        button.contentTintColor = color(for: summary.riskLevel)
-        button.attributedTitle = NSAttributedString(
-            string: " \(summary.title)",
-            attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .semibold),
-                .foregroundColor: color(for: summary.riskLevel)
-            ]
-        )
+        button.contentTintColor = nil
+        button.font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        button.title = " \(titlePrefix(for: summary.riskLevel))\(summary.title)"
     }
 
     private func imageName(for riskLevel: RiskLevel) -> String {
@@ -80,18 +75,16 @@ final class MenuBarController {
         }
     }
 
-    private func color(for riskLevel: RiskLevel) -> NSColor {
+    private func titlePrefix(for riskLevel: RiskLevel) -> String {
         switch riskLevel {
         case .depleted:
-            return .systemRed
+            return "!! "
         case .warning:
-            return .systemOrange
-        case .healthy:
-            return .labelColor
+            return "! "
         case .stale:
-            return .systemYellow
-        case .unknown:
-            return .secondaryLabelColor
+            return "? "
+        case .healthy, .unknown:
+            return ""
         }
     }
 }
