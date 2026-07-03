@@ -26,30 +26,41 @@ struct MenuRootView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("LLM Usage")
-                    .font(.headline)
-                Text(lastRefreshText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-
-            Button {
-                Task { await state.refreshAll() }
-            } label: {
-                if state.isRefreshing {
-                    ProgressView()
-                        .controlSize(.small)
-                } else {
-                    Image(systemName: "arrow.clockwise")
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("LLM Usage")
+                        .font(.headline)
+                    Text(lastRefreshText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
+
+                Spacer()
+
+                Button {
+                    state.openLoginFlow()
+                } label: {
+                    Label("Accounts", systemImage: "person.2.badge.gearshape")
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    Task { await state.refreshAll() }
+                } label: {
+                    if state.isRefreshing {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                }
+                .buttonStyle(.borderless)
+                .help("Refresh usage")
+                .disabled(state.isRefreshing)
             }
-            .buttonStyle(.borderless)
-            .help("Refresh usage")
-            .disabled(state.isRefreshing)
+
+            TopUsageSummaryView(profiles: state.profiles, snapshots: state.snapshots)
         }
         .padding(14)
     }
@@ -162,14 +173,7 @@ struct AccountRowView: View {
                 Spacer()
             }
 
-            if let fraction = snapshot?.remainingFraction {
-                ProgressView(value: fraction)
-                    .tint(riskColor)
-            } else {
-                ProgressView(value: 0)
-                    .tint(.gray)
-                    .opacity(0.35)
-            }
+            UsageGauge(snapshot: snapshot, compact: true)
 
             HStack(spacing: 8) {
                 Button {
@@ -273,5 +277,76 @@ struct AccountRowView: View {
             return String(Int(value))
         }
         return String(format: "%.1f", value)
+    }
+}
+
+struct TopUsageSummaryView: View {
+    let profiles: [AccountProfile]
+    let snapshots: [UUID: UsageSnapshot]
+
+    var body: some View {
+        HStack(spacing: 10) {
+            summaryTile(provider: .claude)
+            summaryTile(provider: .codex)
+        }
+    }
+
+    private func summaryTile(provider: Provider) -> some View {
+        let providerProfiles = profiles.filter { $0.provider == provider }
+        let worst = providerProfiles
+            .compactMap { profile -> (AccountProfile, UsageSnapshot)? in
+                guard let snapshot = snapshots[profile.id] else {
+                    return nil
+                }
+                return (profile, snapshot)
+            }
+            .max { left, right in
+                (left.1.usedFraction ?? -1) < (right.1.usedFraction ?? -1)
+            }
+
+        return VStack(alignment: .leading, spacing: 6) {
+            Label(provider.displayName, systemImage: provider == .claude ? "sparkles" : "terminal")
+                .font(.caption.weight(.semibold))
+
+            if let worst {
+                Text("\(Int(((worst.1.usedFraction ?? 0) * 100).rounded()))% used")
+                    .font(.title3.monospacedDigit().weight(.bold))
+                    .foregroundStyle(color(for: worst.1.riskLevel))
+                Text(worst.0.label)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else {
+                Text("--")
+                    .font(.title3.monospacedDigit().weight(.bold))
+                    .foregroundStyle(.secondary)
+                Text("No snapshot")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color(nsColor: .separatorColor), lineWidth: 0.5)
+        )
+    }
+
+    private func color(for riskLevel: RiskLevel) -> Color {
+        switch riskLevel {
+        case .healthy:
+            return .green
+        case .warning:
+            return .orange
+        case .depleted:
+            return .red
+        case .stale:
+            return .yellow
+        case .unknown:
+            return .secondary
+        }
     }
 }

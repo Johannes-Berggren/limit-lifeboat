@@ -2,12 +2,26 @@ import AppKit
 import Combine
 import Foundation
 import LLMUsageMonitorCore
+import UserNotifications
+
+struct MenuBarSummary: Equatable {
+    var title: String
+    var accessibilityText: String
+    var riskLevel: RiskLevel
+
+    static let empty = MenuBarSummary(
+        title: "C --  G --",
+        accessibilityText: "LLM usage has not been refreshed.",
+        riskLevel: .unknown
+    )
+}
 
 @MainActor
 final class AppState: ObservableObject {
     @Published private(set) var profiles: [AccountProfile]
     @Published private(set) var snapshots: [UUID: UsageSnapshot]
     @Published private(set) var isRefreshing = false
+    @Published var menuBarSummary: MenuBarSummary = .empty
     @Published var statusMessage = ""
 
     private let repository: ProfileRepository
@@ -15,14 +29,17 @@ final class AppState: ObservableObject {
     private let parser = UsageTextParser()
     private let webUsageRefresher = WebUsageRefresher()
     private let dashboardWindowManager = DashboardWindowManager()
+    private let loginFlowWindowManager = LoginFlowWindowManager()
+    private let usageAlertController = UsageAlertController()
     private var refreshTask: Task<Void, Never>?
-    private let refreshIntervalSeconds: UInt64 = 600
 
     init(repository: ProfileRepository, cliSwitcher: CLISwitcher) throws {
         self.repository = repository
         self.cliSwitcher = cliSwitcher
         self.profiles = try repository.loadProfiles()
         self.snapshots = try repository.loadUsageSnapshots()
+        updateMenuBarSummary()
+        usageAlertController.requestAuthorization()
     }
 
     deinit {
@@ -66,6 +83,7 @@ final class AppState: ObservableObject {
                 message: error.localizedDescription
             )
             snapshots[profile.id] = snapshot
+            updateMenuBarSummary()
             saveSnapshots()
             statusMessage = "\(profile.label): \(error.localizedDescription)"
         }
@@ -74,6 +92,8 @@ final class AppState: ObservableObject {
     func ingestDashboardText(_ text: String, for profile: AccountProfile, source: String) {
         let snapshot = parser.parse(text: text, account: profile, source: source)
         snapshots[profile.id] = snapshot
+        updateMenuBarSummary()
+        usageAlertController.handle(snapshot: snapshot, profile: profile)
         saveSnapshots()
         statusMessage = "\(profile.label): \(snapshot.message)"
     }
@@ -82,6 +102,10 @@ final class AppState: ObservableObject {
         dashboardWindowManager.open(profile: profile) { [weak self] text in
             self?.ingestDashboardText(text, for: profile, source: profile.provider.dashboardURL.absoluteString)
         }
+    }
+
+    func openLoginFlow() {
+        loginFlowWindowManager.open(state: self)
     }
 
     func captureCLISnapshot(for profile: AccountProfile) {
@@ -114,6 +138,7 @@ final class AppState: ObservableObject {
                 profiles[index].updatedAt = Date()
             }
             try repository.saveProfiles(profiles)
+            updateMenuBarSummary()
             statusMessage = "Switched \(profile.provider.displayName) CLI to \(profile.label). Backups: \(result.backupURLs.count)."
         } catch {
             statusMessage = "Switch failed for \(profile.label): \(error.localizedDescription)"
@@ -133,13 +158,101 @@ final class AppState: ObservableObject {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(provider.loginCommand, forType: .string)
         statusMessage = "Copied: \(provider.loginCommand)"
+        openTerminal()
+    }
 
-        let terminalURL = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
-        NSWorkspace.shared.openApplication(at: terminalURL, configuration: NSWorkspace.OpenConfiguration())
+    func beginCLILogin(for profile: AccountProfile) {
+        if runTerminalCommand(profile.provider.loginCommand) {
+            statusMessage = "Started \(profile.provider.loginCommand) for \(profile.label). Save the snapshot after login."
+            return
+        }
+
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(profile.provider.loginCommand, forType: .string)
+        statusMessage = "Copied \(profile.provider.loginCommand). Run it for \(profile.label), then save the snapshot."
+        openTerminal()
     }
 
     func quit() {
         NSApplication.shared.terminate(nil)
+    }
+
+    private func openTerminal() {
+        let terminalURL = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
+        NSWorkspace.shared.openApplication(at: terminalURL, configuration: NSWorkspace.OpenConfiguration())
+    }
+
+    private func runTerminalCommand(_ command: String) -> Bool {
+        let escaped = command
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let scriptSource = """
+        tell application "Terminal"
+            activate
+            do script "\(escaped)"
+        end tell
+        """
+
+        var errorInfo: NSDictionary?
+        let result = NSAppleScript(source: scriptSource)?.executeAndReturnError(&errorInfo)
+        return result != nil
+    }
+
+    private func updateMenuBarSummary() {
+        let claudeTitle = providerUsageTitle(.claude)
+        let codexTitle = providerUsageTitle(.codex)
+        menuBarSummary = MenuBarSummary(
+            title: "C \(claudeTitle)  G \(codexTitle)",
+            accessibilityText: accessibilitySummary(),
+            riskLevel: highestRisk()
+        )
+    }
+
+    private func providerUsageTitle(_ provider: Provider) -> String {
+        let usedValues = profiles
+            .filter { $0.provider == provider }
+            .compactMap { snapshots[$0.id]?.usedFraction }
+
+        guard let maxUsed = usedValues.max() else {
+            return "--"
+        }
+
+        return "\(Int((maxUsed * 100).rounded()))%"
+    }
+
+    private func highestRisk() -> RiskLevel {
+        let snapshotRisk = profiles.compactMap { snapshots[$0.id]?.riskLevel }.min() ?? .unknown
+        let thresholdRisk = profiles
+            .compactMap { snapshots[$0.id]?.usedFraction }
+            .map { used -> RiskLevel in
+                if used >= 1 {
+                    return .depleted
+                }
+                if used >= 0.8 {
+                    return .warning
+                }
+                return .healthy
+            }
+            .min() ?? .unknown
+
+        return min(snapshotRisk, thresholdRisk)
+    }
+
+    private func accessibilitySummary() -> String {
+        var parts: [String] = []
+        for provider in Provider.allCases {
+            let values = profiles
+                .filter { $0.provider == provider }
+                .compactMap { profile -> String? in
+                    guard let used = snapshots[profile.id]?.usedFraction else {
+                        return nil
+                    }
+                    return "\(profile.label) \(Int((used * 100).rounded())) percent used"
+                }
+
+            parts.append(values.isEmpty ? "\(provider.displayName) usage unknown" : values.joined(separator: ", "))
+        }
+        return parts.joined(separator: ". ")
     }
 
     private func saveSnapshots() {
@@ -155,5 +268,67 @@ final class AppState: ObservableObject {
         alert.messageText = message
         alert.informativeText = details
         alert.runModal()
+    }
+}
+
+@MainActor
+final class UsageAlertController {
+    private var lastNotifiedRisk: [UUID: RiskLevel] = [:]
+
+    func requestAuthorization() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    func handle(snapshot: UsageSnapshot, profile: AccountProfile) {
+        guard snapshot.parseConfidence != .none else {
+            return
+        }
+
+        guard snapshot.riskLevel == .warning || snapshot.riskLevel == .depleted else {
+            lastNotifiedRisk[profile.id] = nil
+            return
+        }
+
+        guard lastNotifiedRisk[profile.id] != snapshot.riskLevel else {
+            return
+        }
+
+        lastNotifiedRisk[profile.id] = snapshot.riskLevel
+
+        let content = UNMutableNotificationContent()
+        content.title = notificationTitle(snapshot: snapshot, profile: profile)
+        content.body = notificationBody(snapshot: snapshot, profile: profile)
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: "usage-\(profile.id.uuidString)-\(snapshot.riskLevel.rawValue)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
+        NSApplication.shared.requestUserAttention(.informationalRequest)
+    }
+
+    private func notificationTitle(snapshot: UsageSnapshot, profile: AccountProfile) -> String {
+        if snapshot.riskLevel == .depleted {
+            return "\(profile.label) limit reached"
+        }
+
+        if let used = snapshot.usedFraction {
+            return "\(profile.label) is \(Int((used * 100).rounded()))% used"
+        }
+
+        return "\(profile.label) is near its limit"
+    }
+
+    private func notificationBody(snapshot: UsageSnapshot, profile: AccountProfile) -> String {
+        var parts = ["\(profile.provider.displayName) included usage is \(snapshot.riskLevel == .depleted ? "depleted" : "near the limit")."]
+        if let reset = snapshot.resetDescription {
+            parts.append("Reset \(reset).")
+        }
+        if let credit = snapshot.creditStatus {
+            parts.append(credit)
+        }
+        return parts.joined(separator: " ")
     }
 }

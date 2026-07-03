@@ -14,6 +14,7 @@ final class UsageParserTests: XCTestCase {
 
         XCTAssertEqual(snapshot.includedRemaining, 65)
         XCTAssertEqual(snapshot.includedLimit, 100)
+        XCTAssertEqual(snapshot.usedFraction, 0.35)
         XCTAssertEqual(snapshot.riskLevel, .healthy)
         XCTAssertEqual(snapshot.parseConfidence, .high)
         XCTAssertNotNil(snapshot.creditStatus)
@@ -29,6 +30,7 @@ final class UsageParserTests: XCTestCase {
 
         XCTAssertEqual(snapshot.includedRemaining, 12)
         XCTAssertEqual(snapshot.includedLimit, 100)
+        XCTAssertEqual(snapshot.usedFraction, 0.88)
         XCTAssertEqual(snapshot.riskLevel, .warning)
         XCTAssertEqual(snapshot.parseConfidence, .medium)
     }

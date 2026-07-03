@@ -162,6 +162,13 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         }
         return max(0, min(1, includedRemaining / includedLimit))
     }
+
+    public var usedFraction: Double? {
+        guard let remainingFraction else {
+            return nil
+        }
+        return max(0, min(1, 1 - remainingFraction))
+    }
 }
 
 public struct CredentialSnapshot: Codable, Equatable, Sendable {
