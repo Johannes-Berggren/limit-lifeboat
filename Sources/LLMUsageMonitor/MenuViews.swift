@@ -61,6 +61,7 @@ struct MenuRootView: View {
             }
 
             TopUsageSummaryView(profiles: state.profiles, snapshots: state.snapshots)
+            ActiveCLIAccountsView(identities: state.activeCLIIdentities, profiles: state.profiles)
         }
         .padding(14)
     }
@@ -131,11 +132,12 @@ struct AccountRowView: View {
                         Text(profile.label)
                             .font(.system(size: 13, weight: .semibold))
                         if profile.isActiveCLI {
-                            Text("CLI")
+                            Label("Active terminal", systemImage: "terminal.fill")
                                 .font(.caption2.weight(.semibold))
-                                .padding(.horizontal, 5)
+                                .foregroundStyle(.green)
+                                .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
-                                .background(Color.accentColor.opacity(0.18))
+                                .background(Color.green.opacity(0.16))
                                 .clipShape(RoundedRectangle(cornerRadius: 4))
                         }
                     }
@@ -262,6 +264,119 @@ struct AccountRowView: View {
             return String(Int(value))
         }
         return String(format: "%.1f", value)
+    }
+}
+
+struct ActiveCLIAccountsView: View {
+    let identities: [Provider: AccountIdentity]
+    let profiles: [AccountProfile]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Image(systemName: "terminal.fill")
+                    .foregroundStyle(.secondary)
+                Text("Current Terminal Accounts")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+            }
+
+            HStack(spacing: 8) {
+                accountTile(provider: .claude)
+                accountTile(provider: .codex)
+            }
+        }
+    }
+
+    private func accountTile(provider: Provider) -> some View {
+        let identity = identities[provider]
+        let matchingProfile = identity.flatMap { identity in
+            profiles.first { profile in
+                profile.provider == provider
+                    && (profile.isActiveCLI || identitiesMatch(profile.identity, identity))
+            }
+        }
+        let hasIdentity = identity != nil
+        let iconName = provider == .claude ? "sparkles" : "terminal"
+        let accentColor: Color = hasIdentity ? .green : .secondary
+        let backgroundColor: Color = hasIdentity ? .green.opacity(0.10) : .gray.opacity(0.10)
+        let borderColor: Color = hasIdentity ? .green.opacity(0.24) : .gray.opacity(0.24)
+        let primaryText = identityPrimaryText(identity)
+        let detailText = identityDetailText(identity, matchingProfile: matchingProfile)
+
+        return HStack(alignment: .top, spacing: 7) {
+            Image(systemName: iconName)
+                .foregroundStyle(accentColor)
+                .frame(width: 14)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(provider.displayName)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                Text(primaryText)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+
+                Text(detailText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(backgroundColor)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(borderColor, lineWidth: 0.5)
+        )
+    }
+
+    private func identityPrimaryText(_ identity: AccountIdentity?) -> String {
+        identity?.primaryLabel ?? "Not signed in"
+    }
+
+    private func identityDetailText(_ identity: AccountIdentity?, matchingProfile: AccountProfile?) -> String {
+        guard let identity else {
+            return "No active CLI account detected"
+        }
+
+        var parts: [String] = []
+        if let organization = identity.organization, !organization.isEmpty {
+            parts.append(organization)
+        } else {
+            parts.append("Organization not read")
+        }
+
+        if let matchingProfile {
+            parts.append("Matches \(matchingProfile.label)")
+        }
+
+        return parts.joined(separator: " - ")
+    }
+
+    private func identitiesMatch(_ left: AccountIdentity?, _ right: AccountIdentity) -> Bool {
+        guard let left else {
+            return false
+        }
+
+        if let leftAccountID = left.accountID,
+           let rightAccountID = right.accountID,
+           leftAccountID == rightAccountID {
+            return true
+        }
+
+        if let leftEmail = left.email?.lowercased(),
+           let rightEmail = right.email?.lowercased(),
+           leftEmail == rightEmail {
+            return true
+        }
+
+        return false
     }
 }
 

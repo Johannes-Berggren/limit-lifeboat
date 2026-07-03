@@ -20,6 +20,7 @@ struct MenuBarSummary: Equatable {
 final class AppState: ObservableObject {
     @Published private(set) var profiles: [AccountProfile]
     @Published private(set) var snapshots: [UUID: UsageSnapshot]
+    @Published private(set) var activeCLIIdentities: [Provider: AccountIdentity] = [:]
     @Published private(set) var isRefreshing = false
     @Published var menuBarSummary: MenuBarSummary = .empty
     @Published var statusMessage = ""
@@ -44,6 +45,7 @@ final class AppState: ObservableObject {
         self.profiles = try repository.loadProfiles()
         self.snapshots = try repository.loadUsageSnapshots()
         autoImportPrimaryCLISnapshots()
+        refreshActiveCLIIdentities()
         updateMenuBarSummary()
         usageAlertController.requestAuthorization()
     }
@@ -70,6 +72,7 @@ final class AppState: ObservableObject {
         isRefreshing = true
         defer { isRefreshing = false }
 
+        refreshActiveCLIIdentities()
         syncActiveCodexCLIProfile()
         let refreshedClaudeProfileID = await refreshActiveClaudeCodeUsage()
 
@@ -184,6 +187,7 @@ final class AppState: ObservableObject {
                 profiles[index].isActiveCLI = profiles[index].id == profile.id
                 profiles[index].updatedAt = Date()
             }
+            refreshActiveCLIIdentities()
             try repository.saveProfiles(profiles)
             updateMenuBarSummary()
             statusMessage = "Switched \(profile.provider.displayName) CLI to \(profile.label). Backups: \(result.backupURLs.count)."
@@ -289,11 +293,30 @@ final class AppState: ObservableObject {
     }
 
     private func updateIdentityFromCurrentCLI(for profile: AccountProfile) {
-        guard profile.provider == .codex,
-              let identity = codexIdentityReader.readIdentity() else {
+        let identity: AccountIdentity?
+        switch profile.provider {
+        case .claude:
+            identity = claudeIdentityReader.readIdentity()
+        case .codex:
+            identity = codexIdentityReader.readIdentity()
+        }
+
+        guard let identity else {
             return
         }
         updateIdentity(identity, for: profile)
+        refreshActiveCLIIdentities()
+    }
+
+    private func refreshActiveCLIIdentities() {
+        var identities: [Provider: AccountIdentity] = [:]
+        if let identity = claudeIdentityReader.readIdentity() {
+            identities[.claude] = identity
+        }
+        if let identity = codexIdentityReader.readIdentity() {
+            identities[.codex] = identity
+        }
+        activeCLIIdentities = identities
     }
 
     private func syncActiveCodexCLIProfile() {
@@ -351,6 +374,9 @@ final class AppState: ObservableObject {
         do {
             let report = try await claudeCodeUsageReader.readUsage()
             let currentIdentity = claudeIdentityReader.readIdentity() ?? report.identity
+            if let currentIdentity {
+                activeCLIIdentities[.claude] = currentIdentity
+            }
             guard let targetIndex = targetClaudeProfileIndex(for: currentIdentity) else {
                 return nil
             }
