@@ -89,6 +89,7 @@ public enum WebDataStoreKind: String, Codable, Sendable {
 public enum AccountIdentitySource: String, Codable, Sendable {
     case dashboard
     case codexIDToken
+    case claudeCodeUsage
     case manual
 }
 

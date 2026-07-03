@@ -102,7 +102,7 @@ struct LoginFlowView: View {
                 }
             }
 
-            Text("Codex terminal usage is read automatically when local rate-limit logs are available. For Claude or missing Codex logs, connect accounts one at a time. If Google sign-in fails, use Open in Browser and import the copied dashboard text.")
+            Text("Claude Code /usage and Codex terminal usage are read automatically when available. Connect extra accounts one at a time; if Google sign-in fails, use Open in Browser and import the copied dashboard text.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -230,6 +230,10 @@ struct LoginAccountSetupRow: View {
             return ("Dashboard missing", "globe.badge.chevron.backward", .secondary)
         }
 
+        if snapshot.source == ClaudeCodeUsageReport.source || snapshot.source == "local Codex CLI logs" {
+            return ("CLI usage", "terminal.fill", .green)
+        }
+
         if snapshot.riskLevel == .stale || snapshot.message.lowercased().contains("login") {
             return ("Dashboard login", "person.crop.circle.badge.exclamationmark", .orange)
         }
@@ -277,8 +281,21 @@ struct LoginAccountSetupRow: View {
             parts.append("Org not read")
         }
 
-        parts.append(identity.source == .codexIDToken ? "from CLI" : "from dashboard")
+        parts.append(identitySourceText(identity.source))
         return parts.joined(separator: " • ")
+    }
+
+    private func identitySourceText(_ source: AccountIdentitySource) -> String {
+        switch source {
+        case .codexIDToken:
+            return "from CLI"
+        case .claudeCodeUsage:
+            return "from Claude Code"
+        case .dashboard:
+            return "from dashboard"
+        case .manual:
+            return "manual"
+        }
     }
 
     private func statusPill(text: String, systemImage: String, color: Color) -> some View {

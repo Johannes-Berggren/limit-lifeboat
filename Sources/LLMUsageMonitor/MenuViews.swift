@@ -216,8 +216,21 @@ struct AccountRowView: View {
         } else {
             parts.append("Org not read")
         }
-        parts.append(identity.source == .codexIDToken ? "CLI" : "Dashboard")
+        parts.append(identitySourceText(identity.source))
         return parts.joined(separator: " • ")
+    }
+
+    private func identitySourceText(_ source: AccountIdentitySource) -> String {
+        switch source {
+        case .codexIDToken:
+            return "CLI"
+        case .claudeCodeUsage:
+            return "Claude Code"
+        case .dashboard:
+            return "Dashboard"
+        case .manual:
+            return "Manual"
+        }
     }
 
     private var dashboardButtonTitle: String {

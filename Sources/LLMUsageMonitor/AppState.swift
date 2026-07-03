@@ -30,6 +30,7 @@ final class AppState: ObservableObject {
     private let identityExtractor = AccountIdentityExtractor()
     private let codexIdentityReader = CodexIdentityReader()
     private let codexLocalUsageReader = CodexLocalUsageReader()
+    private let claudeCodeUsageReader = ClaudeCodeUsageReader()
     private let webUsageRefresher = WebUsageRefresher()
     private let dashboardWindowManager = DashboardWindowManager()
     private let loginFlowWindowManager = LoginFlowWindowManager()
@@ -69,8 +70,12 @@ final class AppState: ObservableObject {
         defer { isRefreshing = false }
 
         syncActiveCodexCLIProfile()
+        let refreshedClaudeProfileID = await refreshActiveClaudeCodeUsage()
 
         for profile in profiles {
+            if profile.id == refreshedClaudeProfileID {
+                continue
+            }
             await refresh(profile)
         }
     }
@@ -337,6 +342,81 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func refreshActiveClaudeCodeUsage() async -> UUID? {
+        guard cliSwitcher.validateActiveLogin(provider: .claude) else {
+            return nil
+        }
+
+        do {
+            let report = try await claudeCodeUsageReader.readUsage()
+            guard let targetIndex = targetClaudeProfileIndex(for: report.identity) else {
+                return nil
+            }
+
+            var profilesChanged = false
+            let claudeIndices = profiles.indices.filter { profiles[$0].provider == .claude }
+            for index in claudeIndices {
+                let shouldBeActive = index == targetIndex
+                if profiles[index].isActiveCLI != shouldBeActive {
+                    profiles[index].isActiveCLI = shouldBeActive
+                    profiles[index].updatedAt = Date()
+                    profilesChanged = true
+                }
+            }
+
+            if let identity = report.identity {
+                let merged = mergedIdentity(existing: profiles[targetIndex].identity, new: identity)
+                if profiles[targetIndex].identity != merged {
+                    profiles[targetIndex].identity = merged
+                    profiles[targetIndex].updatedAt = Date()
+                    profilesChanged = true
+                }
+            }
+
+            if profilesChanged {
+                try repository.saveProfiles(profiles)
+            }
+
+            let profile = profiles[targetIndex]
+            let snapshot = report.makeSnapshot(for: profile)
+            snapshots[profile.id] = snapshot
+            updateMenuBarSummary()
+            usageAlertController.handle(snapshot: snapshot, profile: profile)
+            saveSnapshots()
+            statusMessage = "\(profile.label): \(snapshot.message)"
+            return profile.id
+        } catch {
+            statusMessage = "Claude Code /usage unavailable: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    private func targetClaudeProfileIndex(for currentIdentity: AccountIdentity?) -> Array<AccountProfile>.Index? {
+        let claudeIndices = profiles.indices.filter { profiles[$0].provider == .claude }
+        guard !claudeIndices.isEmpty else {
+            return nil
+        }
+
+        if let currentIdentity {
+            if let match = claudeIndices.first(where: { index in
+                guard let existingIdentity = profiles[index].identity else {
+                    return false
+                }
+                return identitiesMatch(existingIdentity, currentIdentity)
+                    || organizationsMatch(existingIdentity, currentIdentity)
+            }) {
+                return match
+            }
+
+            if let emptyProfile = claudeIndices.first(where: { profiles[$0].identity == nil }) {
+                return emptyProfile
+            }
+        }
+
+        return claudeIndices.first { profiles[$0].isActiveCLI }
+            ?? claudeIndices.first
+    }
+
     private func codexLocalUsageSnapshot(for profile: AccountProfile) -> UsageSnapshot? {
         guard profile.provider == .codex,
               codexTerminalLoginMatches(profile),
@@ -377,6 +457,16 @@ final class AppState: ObservableObject {
         }
 
         return false
+    }
+
+    private func organizationsMatch(_ left: AccountIdentity, _ right: AccountIdentity) -> Bool {
+        guard let leftOrganization = left.organization?.lowercased(),
+              let rightOrganization = right.organization?.lowercased(),
+              !leftOrganization.isEmpty,
+              !rightOrganization.isEmpty else {
+            return false
+        }
+        return leftOrganization == rightOrganization
     }
 
     private func updateIdentity(_ identity: AccountIdentity, for profile: AccountProfile) {
