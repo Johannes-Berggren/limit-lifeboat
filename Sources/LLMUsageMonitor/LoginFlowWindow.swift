@@ -165,6 +165,7 @@ struct LoginAccountSetupRow: View {
             }
 
             UsageGauge(snapshot: snapshot, compact: false)
+            BillingStatusView(snapshot: snapshot, compact: false)
 
             HStack(spacing: 10) {
                 Button {

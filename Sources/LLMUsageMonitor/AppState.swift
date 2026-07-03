@@ -529,9 +529,15 @@ final class AppState: ObservableObject {
     }
 
     private func providerUsageTitle(_ provider: Provider) -> String {
-        let usedValues = profiles
+        let providerSnapshots = profiles
             .filter { $0.provider == provider }
-            .compactMap { snapshots[$0.id]?.usedFraction }
+            .compactMap { snapshots[$0.id] }
+
+        if providerSnapshots.contains(where: { $0.billingUsageMode == .overLimitPayAsYouGo }) {
+            return "PAYG"
+        }
+
+        let usedValues = providerSnapshots.compactMap(\.usedFraction)
 
         guard let maxUsed = usedValues.max() else {
             return "--"
@@ -564,10 +570,30 @@ final class AppState: ObservableObject {
             let values = profiles
                 .filter { $0.provider == provider }
                 .compactMap { profile -> String? in
-                    guard let used = snapshots[profile.id]?.usedFraction else {
+                    guard let snapshot = snapshots[profile.id] else {
                         return nil
                     }
-                    return "\(profile.label) \(Int((used * 100).rounded())) percent used"
+
+                    let mode: String
+                    switch snapshot.billingUsageMode {
+                    case .includedSubscription:
+                        mode = "using included subscription usage"
+                    case .includedSubscriptionNearLimit:
+                        mode = "using included subscription usage near the limit"
+                    case .overLimitPayAsYouGo:
+                        mode = "using pay as you go or credits"
+                    case .payAsYouGoVisible:
+                        mode = "showing pay as you go status"
+                    case .needsLogin:
+                        mode = "needs login"
+                    case .unknown:
+                        mode = "usage mode unknown"
+                    }
+
+                    if let used = snapshot.usedFraction {
+                        return "\(profile.label) \(Int((used * 100).rounded())) percent used, \(mode)"
+                    }
+                    return "\(profile.label) \(mode)"
                 }
 
             parts.append(values.isEmpty ? "\(provider.displayName) usage unknown" : values.joined(separator: ", "))

@@ -24,4 +24,4 @@ Google sign-in can reject embedded app browser windows. If that happens, use `Op
 
 CLI switching is optional and hidden under `Advanced CLI switching` in the account setup rows. Browser, Claude Desktop, ChatGPT Desktop, and CLI sessions are separate; Claude Code/Codex terminal state is read locally when available, while dashboard login remains the fallback for accounts the terminal cannot identify.
 
-The menu bar shows compact provider usage without opening the popover: `C` is Claude and `G` is ChatGPT/Codex. Usage turns orange near 80% used and red when depleted; local notifications are sent on those threshold changes.
+The menu bar shows compact provider usage without opening the popover: `C` is Claude and `G` is ChatGPT/Codex. If any account appears to be past included subscription usage and falling back to credits/pay-as-you-go, the provider shows `PAYG`; otherwise it shows the included-usage percentage. Usage turns orange near 80% used and red when depleted; local notifications are sent on those threshold changes.
