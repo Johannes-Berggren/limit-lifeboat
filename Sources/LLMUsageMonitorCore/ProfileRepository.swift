@@ -39,18 +39,16 @@ public final class ProfileRepository {
     public func loadProfiles() throws -> [AccountProfile] {
         try ensureDirectory()
         guard fileManager.fileExists(atPath: profilesURL.path) else {
-            let defaults = AccountProfile.defaultProfiles()
-            try saveProfiles(defaults)
-            return defaults
+            return []
         }
 
         let data = try Data(contentsOf: profilesURL)
         let profiles = try JSONDecoder.appDecoder.decode([AccountProfile].self, from: data)
-        let migrated = migratePrimaryProfilesToDefaultStore(profiles)
-        if migrated != profiles {
-            try saveProfiles(migrated)
+        let sanitized = sanitizeProfiles(profiles)
+        if sanitized != profiles {
+            try saveProfiles(sanitized)
         }
-        return migrated
+        return sanitized
     }
 
     public func saveProfiles(_ profiles: [AccountProfile]) throws {
@@ -81,29 +79,13 @@ public final class ProfileRepository {
         try fileManager.createDirectory(at: applicationSupportDirectory, withIntermediateDirectories: true)
     }
 
-    private func migratePrimaryProfilesToDefaultStore(_ profiles: [AccountProfile]) -> [AccountProfile] {
-        var migrated = profiles
-        var seenProviders: Set<Provider> = []
-
-        for index in migrated.indices {
-            let provider = migrated[index].provider
-            if migrated[index].identity?.isLikelyValid == false {
-                migrated[index].identity = nil
-                migrated[index].updatedAt = Date()
-            }
-
-            if seenProviders.insert(provider).inserted {
-                if migrated[index].webDataStoreKind != .appDefault {
-                    migrated[index].webDataStoreKind = .appDefault
-                    migrated[index].updatedAt = Date()
-                }
-            } else if migrated[index].webDataStoreKind != .isolated {
-                migrated[index].webDataStoreKind = .isolated
-                migrated[index].updatedAt = Date()
-            }
+    private func sanitizeProfiles(_ profiles: [AccountProfile]) -> [AccountProfile] {
+        var sanitized = profiles
+        for index in sanitized.indices where sanitized[index].identity?.isLikelyValid == false {
+            sanitized[index].identity = nil
+            sanitized[index].updatedAt = Date()
         }
-
-        return migrated
+        return sanitized
     }
 }
 

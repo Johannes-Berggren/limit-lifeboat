@@ -121,6 +121,25 @@ public struct AccountIdentity: Codable, Hashable, Sendable {
         email ?? displayName ?? accountID
     }
 
+    /// Two identities refer to the same account when their stable identifiers
+    /// agree. Organization names are deliberately not compared: two different
+    /// accounts can share an organization.
+    public func matches(_ other: AccountIdentity) -> Bool {
+        if let leftAccountID = accountID,
+           let rightAccountID = other.accountID,
+           leftAccountID == rightAccountID {
+            return true
+        }
+
+        if let leftEmail = email?.lowercased(),
+           let rightEmail = other.email?.lowercased(),
+           leftEmail == rightEmail {
+            return true
+        }
+
+        return false
+    }
+
     public var isLikelyValid: Bool {
         if email != nil || displayName != nil || accountID != nil {
             return true
@@ -222,17 +241,6 @@ public struct AccountProfile: Codable, Identifiable, Hashable, Sendable {
     }
 }
 
-public extension AccountProfile {
-    static func defaultProfiles(now: Date = Date()) -> [AccountProfile] {
-        [
-            AccountProfile(provider: .claude, label: "Claude 1", webDataStoreKind: .appDefault, createdAt: now, updatedAt: now),
-            AccountProfile(provider: .claude, label: "Claude 2", createdAt: now, updatedAt: now),
-            AccountProfile(provider: .codex, label: "ChatGPT/Codex 1", webDataStoreKind: .appDefault, createdAt: now, updatedAt: now),
-            AccountProfile(provider: .codex, label: "ChatGPT/Codex 2", createdAt: now, updatedAt: now)
-        ]
-    }
-}
-
 public struct UsageSnapshot: Codable, Equatable, Sendable {
     public var accountID: UUID
     public var provider: Provider
@@ -287,6 +295,19 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
             return nil
         }
         return max(0, min(1, 1 - remainingFraction))
+    }
+
+    public func isStale(asOf now: Date = Date(), maxAge: TimeInterval = 30 * 60) -> Bool {
+        now.timeIntervalSince(lastRefreshed) > maxAge
+    }
+
+    /// True when the provider's limit window has rolled over since this
+    /// snapshot was taken, meaning the account likely has its full quota back.
+    public func resetHasElapsed(asOf now: Date = Date()) -> Bool {
+        guard let resetDate else {
+            return false
+        }
+        return resetDate < now
     }
 }
 
