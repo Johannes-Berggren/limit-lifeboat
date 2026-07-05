@@ -5,6 +5,7 @@ public enum CLISwitcherError: Error, LocalizedError {
     case missingStoredSnapshot(UUID)
     case providerMismatch(expected: Provider, actual: Provider)
     case invalidJSON(String)
+    case backupFailed(path: String, underlying: Error)
 
     public var errorDescription: String? {
         switch self {
@@ -16,6 +17,8 @@ public enum CLISwitcherError: Error, LocalizedError {
             return "Stored snapshot is for \(actual.displayName), not \(expected.displayName)."
         case .invalidJSON(let path):
             return "Could not parse JSON at \(path)."
+        case .backupFailed(let path, let underlying):
+            return "Could not back up \(path) before switching; nothing was changed. (\(underlying.localizedDescription))"
         }
     }
 }
@@ -62,34 +65,72 @@ public final class CLISwitcher {
             throw CLISwitcherError.providerMismatch(expected: profile.provider, actual: snapshot.provider)
         }
 
-        try fileManager.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
-
-        var touched: [URL] = []
+        // Phase 1: back up every existing destination into one directory per
+        // restore call before writing a single byte, so a failure here leaves
+        // the credentials untouched.
+        let restoreBackupDirectory = backupDirectory.appendingPathComponent(uniqueBackupDirectoryName(), isDirectory: true)
         var backups: [URL] = []
+        var backedUp: [(destination: URL, backup: URL)] = []
 
         for item in snapshot.items {
             let destination = resolve(relativePath: item.relativePath)
-            if let backup = try backupExistingFile(destination, relativePath: item.relativePath) {
+            guard fileManager.fileExists(atPath: destination.path) else {
+                continue
+            }
+            do {
+                try fileManager.createDirectory(at: restoreBackupDirectory, withIntermediateDirectories: true)
+                let backup = restoreBackupDirectory.appendingPathComponent(sanitizedBackupName(for: item.relativePath))
+                if fileManager.fileExists(atPath: backup.path) {
+                    try fileManager.removeItem(at: backup)
+                }
+                try fileManager.copyItem(at: destination, to: backup)
                 backups.append(backup)
+                backedUp.append((destination, backup))
+            } catch {
+                throw CLISwitcherError.backupFailed(path: destination.path, underlying: error)
             }
+        }
 
-            try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-            switch item.kind {
-            case .fullFile:
-                try item.contents.write(to: destination, options: [.atomic])
-            case .jsonFields:
-                try mergeJSONFields(item.contents, into: destination)
+        // Phase 2: write all items; on failure roll back from the backups.
+        var touched: [URL] = []
+        do {
+            for item in snapshot.items {
+                let destination = resolve(relativePath: item.relativePath)
+                try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+                switch item.kind {
+                case .fullFile:
+                    try item.contents.write(to: destination, options: [.atomic])
+                case .jsonFields:
+                    try mergeJSONFields(item.contents, into: destination)
+                }
+                try fileManager.setAttributes(
+                    [.posixPermissions: item.posixPermissions ?? 0o600],
+                    ofItemAtPath: destination.path
+                )
+                touched.append(destination)
             }
-
-            if let posixPermissions = item.posixPermissions {
-                try fileManager.setAttributes([.posixPermissions: posixPermissions], ofItemAtPath: destination.path)
-            } else {
-                try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+        } catch {
+            for (destination, backup) in backedUp {
+                try? fileManager.removeItem(at: destination)
+                try? fileManager.copyItem(at: backup, to: destination)
             }
-            touched.append(destination)
+            throw error
         }
 
         return RestoreResult(touchedPaths: touched, backupURLs: backups)
+    }
+
+    public func deleteStoredSnapshot(for profileID: UUID) throws {
+        try credentialStore.deleteSnapshot(for: profileID)
+    }
+
+    public func currentIdentity(provider: Provider) -> AccountIdentity? {
+        switch provider {
+        case .claude:
+            return ClaudeIdentityReader(homeDirectory: homeDirectory, fileManager: fileManager).readIdentity()
+        case .codex:
+            return CodexIdentityReader(homeDirectory: homeDirectory, fileManager: fileManager).readIdentity()
+        }
     }
 
     public func hasStoredSnapshot(for profile: AccountProfile) throws -> Bool {
@@ -272,28 +313,19 @@ public final class CLISwitcher {
         return attrs[.posixPermissions] as? Int
     }
 
-    private func backupExistingFile(_ url: URL, relativePath: String) throws -> URL? {
-        guard fileManager.fileExists(atPath: url.path) else {
-            return nil
-        }
-
+    private func uniqueBackupDirectoryName() -> String {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let stamp = formatter.string(from: Date())
             .replacingOccurrences(of: ":", with: "-")
             .replacingOccurrences(of: ".", with: "-")
-        let directory = backupDirectory.appendingPathComponent(stamp, isDirectory: true)
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        return "\(stamp)-\(UUID().uuidString.prefix(8))"
+    }
 
-        let sanitized = relativePath
+    private func sanitizedBackupName(for relativePath: String) -> String {
+        relativePath
             .replacingOccurrences(of: "/", with: "__")
             .replacingOccurrences(of: " ", with: "_")
-        let destination = directory.appendingPathComponent(sanitized)
-        if fileManager.fileExists(atPath: destination.path) {
-            try fileManager.removeItem(at: destination)
-        }
-        try fileManager.copyItem(at: url, to: destination)
-        return destination
     }
 
     private func runPgrep(arguments: [String]) -> Bool {
