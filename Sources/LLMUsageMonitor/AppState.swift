@@ -374,22 +374,98 @@ final class AppState: ObservableObject {
     }
 
     func copyLoginCommand(for provider: Provider) {
+        guard let command = resolvedLoginCommand(for: provider) else {
+            reportMissingCLI(provider)
+            return
+        }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(provider.loginCommand, forType: .string)
-        statusMessage = "Copied: \(provider.loginCommand)"
+        NSPasteboard.general.setString(command, forType: .string)
+        statusMessage = "Copied: \(command)"
         openTerminal()
     }
 
     func beginCLILogin(for profile: AccountProfile) {
-        if runTerminalCommand(profile.provider.loginCommand) {
+        guard let command = resolvedLoginCommand(for: profile.provider) else {
+            reportMissingCLI(profile.provider)
+            return
+        }
+
+        if runTerminalCommand(command) {
             statusMessage = "Started \(profile.provider.loginCommand) for \(profile.label). If the browser picks the wrong account, sign in from a private window. The account links automatically after login."
             return
         }
 
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(profile.provider.loginCommand, forType: .string)
+        NSPasteboard.general.setString(command, forType: .string)
         statusMessage = "Copied \(profile.provider.loginCommand). Run it in the terminal (use a private browser window if it picks the wrong account); the account links automatically after login."
         openTerminal()
+    }
+
+    /// The login-shell PATH of a GUI app's child Terminal may lack the CLI
+    /// (e.g. Codex bundled inside another app). Prefer the plain command when
+    /// the user's shell can resolve it, else fall back to an absolute path
+    /// from known install locations; nil means it is not installed at all.
+    private func resolvedLoginCommand(for provider: Provider) -> String? {
+        if loginShellCanFind(provider.commandName) {
+            return provider.loginCommand
+        }
+
+        guard let binary = locateCLIBinary(named: provider.commandName) else {
+            return nil
+        }
+
+        let parts = provider.loginCommand.split(separator: " ", maxSplits: 1)
+        let subcommand = parts.count > 1 ? String(parts[1]) : ""
+        return "\"\(binary.path)\"\(subcommand.isEmpty ? "" : " \(subcommand)")"
+    }
+
+    private func loginShellCanFind(_ commandName: String) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-lc", "command -v \(commandName)"]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    private func locateCLIBinary(named name: String) -> URL? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        var candidates = [
+            home.appendingPathComponent(".local/bin/\(name)"),
+            URL(fileURLWithPath: "/opt/homebrew/bin/\(name)"),
+            URL(fileURLWithPath: "/usr/local/bin/\(name)"),
+            home.appendingPathComponent(".volta/bin/\(name)"),
+            home.appendingPathComponent(".bun/bin/\(name)"),
+            home.appendingPathComponent("Library/Application Support/com.conductor.app/bin/\(name)"),
+        ]
+
+        let nvmVersions = home.appendingPathComponent(".nvm/versions/node", isDirectory: true)
+        if let versions = try? FileManager.default.contentsOfDirectory(at: nvmVersions, includingPropertiesForKeys: nil) {
+            candidates.append(contentsOf: versions.map { $0.appendingPathComponent("bin/\(name)") })
+        }
+
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
+    }
+
+    private func reportMissingCLI(_ provider: Provider) {
+        let installHint: String
+        switch provider {
+        case .claude:
+            installHint = "npm install -g @anthropic-ai/claude-code"
+        case .codex:
+            installHint = "npm install -g @openai/codex"
+        }
+        statusMessage = "\(provider.displayName) CLI not found on this Mac."
+        showError(
+            message: "\(provider.displayName) CLI not found",
+            details: "The \(provider.commandName) command is not installed in your shell. Install it first:\n\n\(installHint)\n\nthen use Log In via Terminal again."
+        )
     }
 
     func quit() {
