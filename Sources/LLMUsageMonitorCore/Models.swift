@@ -81,6 +81,15 @@ public enum ParseConfidence: String, Codable, Sendable {
     case none
 }
 
+public enum BillingUsageMode: String, Sendable {
+    case includedSubscription
+    case includedSubscriptionNearLimit
+    case overLimitPayAsYouGo
+    case payAsYouGoVisible
+    case needsLogin
+    case unknown
+}
+
 public enum WebDataStoreKind: String, Codable, Sendable {
     case appDefault
     case isolated
@@ -308,6 +317,60 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
             return false
         }
         return resetDate < now
+    }
+
+    public var billingUsageMode: BillingUsageMode {
+        if riskLevel == .stale {
+            return .needsLogin
+        }
+
+        if payAsYouGoLooksActive {
+            return .overLimitPayAsYouGo
+        }
+
+        if let usedFraction {
+            if usedFraction >= 0.8 {
+                return .includedSubscriptionNearLimit
+            }
+            return .includedSubscription
+        }
+
+        if hasPayAsYouGoSignal {
+            return .payAsYouGoVisible
+        }
+
+        return .unknown
+    }
+
+    public var hasPayAsYouGoSignal: Bool {
+        let text = "\(creditStatus ?? "") \(message)".lowercased()
+        return text.contains("pay-as-you-go")
+            || text.contains("pay as you go")
+            || text.contains("usage credit")
+            || text.contains("credits")
+            || text.contains("auto top-up")
+            || text.contains("auto-reload")
+            || text.contains("auto reload")
+    }
+
+    public var payAsYouGoLooksActive: Bool {
+        guard hasPayAsYouGoSignal else {
+            return false
+        }
+
+        if riskLevel == .depleted {
+            return true
+        }
+
+        if let includedRemaining, includedRemaining <= 0 {
+            return true
+        }
+
+        let text = "\(creditStatus ?? "") \(message)".lowercased()
+        return text.contains("rate limit reached")
+            || text.contains("included usage appears depleted")
+            || text.contains("included usage exhausted")
+            || text.contains("limit reached")
     }
 }
 

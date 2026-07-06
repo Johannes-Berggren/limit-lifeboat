@@ -482,7 +482,15 @@ final class AppState: ObservableObject {
 
     private func providerUsageTitle(_ provider: Provider) -> String {
         guard let profile = activeProfile(for: provider),
-              let used = snapshots[profile.id]?.usedFraction else {
+              let snapshot = snapshots[profile.id] else {
+            return "\(providerShortName(provider)) –"
+        }
+
+        if snapshot.billingUsageMode == .overLimitPayAsYouGo {
+            return "\(providerShortName(provider)) PAYG"
+        }
+
+        guard let used = snapshot.usedFraction else {
             return "\(providerShortName(provider)) –"
         }
         return "\(providerShortName(provider)) \(Int((used * 100).rounded()))%"
@@ -512,11 +520,32 @@ final class AppState: ObservableObject {
     private func accessibilitySummary() -> String {
         var parts: [String] = []
         for provider in Provider.allCases {
-            if let profile = activeProfile(for: provider),
-               let used = snapshots[profile.id]?.usedFraction {
-                parts.append("\(provider.displayName) active account \(profile.label) \(Int((used * 100).rounded())) percent used")
-            } else {
+            guard let profile = activeProfile(for: provider),
+                  let snapshot = snapshots[profile.id] else {
                 parts.append("\(provider.displayName) usage unknown")
+                continue
+            }
+
+            let mode: String
+            switch snapshot.billingUsageMode {
+            case .includedSubscription:
+                mode = "using included subscription usage"
+            case .includedSubscriptionNearLimit:
+                mode = "using included subscription usage near the limit"
+            case .overLimitPayAsYouGo:
+                mode = "using pay as you go or credits"
+            case .payAsYouGoVisible:
+                mode = "showing pay as you go status"
+            case .needsLogin:
+                mode = "needs login"
+            case .unknown:
+                mode = "usage mode unknown"
+            }
+
+            if let used = snapshot.usedFraction {
+                parts.append("\(provider.displayName) active account \(profile.label) \(Int((used * 100).rounded())) percent used, \(mode)")
+            } else {
+                parts.append("\(provider.displayName) active account \(profile.label) \(mode)")
             }
         }
         return parts.joined(separator: ". ")

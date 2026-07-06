@@ -28,7 +28,10 @@ usage-based overage.
   `~/Library/Application Support/LLMUsageMonitor/Backups/`.
 - The menu bar shows the active accounts at a glance
   (`Claude 42%  Codex 87%`), turning orange near 80% used and red when
-  depleted, with local notifications on those threshold changes.
+  depleted, with local notifications on those threshold changes. When an
+  account appears to be past its included usage and burning credits or
+  pay-as-you-go, it shows `PAYG` instead — the exact thing this app helps
+  you avoid, and each account row explains the billing mode it detected.
 
 Add, rename, or remove accounts from the popover (the `+` button per
 provider and the `…` menu per account). Browser, Claude Desktop, ChatGPT
