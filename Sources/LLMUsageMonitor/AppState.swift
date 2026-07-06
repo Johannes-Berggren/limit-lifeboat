@@ -374,13 +374,13 @@ final class AppState: ObservableObject {
 
     func beginCLILogin(for profile: AccountProfile) {
         if runTerminalCommand(profile.provider.loginCommand) {
-            statusMessage = "Started \(profile.provider.loginCommand) for \(profile.label). The account links automatically after login."
+            statusMessage = "Started \(profile.provider.loginCommand) for \(profile.label). If the browser picks the wrong account, sign in from a private window. The account links automatically after login."
             return
         }
 
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(profile.provider.loginCommand, forType: .string)
-        statusMessage = "Copied \(profile.provider.loginCommand). Run it in the terminal; the account links automatically after login."
+        statusMessage = "Copied \(profile.provider.loginCommand). Run it in the terminal (use a private browser window if it picks the wrong account); the account links automatically after login."
         openTerminal()
     }
 

@@ -43,7 +43,12 @@ public enum Provider: String, Codable, CaseIterable, Identifiable, Sendable {
     }
 
     public var loginCommand: String {
-        "\(commandName) login"
+        switch self {
+        case .claude:
+            return "claude auth login"
+        case .codex:
+            return "codex login"
+        }
     }
 }
 
@@ -390,18 +395,29 @@ public struct CredentialSnapshotItem: Codable, Equatable, Sendable {
     public enum Kind: String, Codable, Sendable {
         case fullFile
         case jsonFields
+        /// A macOS Keychain generic password; `relativePath` holds the
+        /// keychain service name (e.g. Claude Code's token item).
+        case keychainItem
     }
 
     public var relativePath: String
     public var kind: Kind
     public var contents: Data
     public var posixPermissions: Int?
+    public var keychainAccount: String?
 
-    public init(relativePath: String, kind: Kind, contents: Data, posixPermissions: Int?) {
+    public init(
+        relativePath: String,
+        kind: Kind,
+        contents: Data,
+        posixPermissions: Int?,
+        keychainAccount: String? = nil
+    ) {
         self.relativePath = relativePath
         self.kind = kind
         self.contents = contents
         self.posixPermissions = posixPermissions
+        self.keychainAccount = keychainAccount
     }
 }
 

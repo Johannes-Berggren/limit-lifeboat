@@ -24,21 +24,28 @@ public enum CLISwitcherError: Error, LocalizedError {
 }
 
 public final class CLISwitcher {
+    /// Claude Code stores its OAuth tokens in this Keychain generic-password
+    /// item on macOS; ~/.claude.json only carries account metadata.
+    public static let claudeCodeKeychainService = "Claude Code-credentials"
+
     private let fileManager: FileManager
     private let homeDirectory: URL
     private let backupDirectory: URL
     private let credentialStore: CredentialStoreProtocol
+    private let systemKeychain: SystemKeychainProtocol
 
     public init(
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         backupDirectory: URL,
         credentialStore: CredentialStoreProtocol,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        systemKeychain: SystemKeychainProtocol = SystemKeychain()
     ) {
         self.homeDirectory = homeDirectory
         self.backupDirectory = backupDirectory
         self.credentialStore = credentialStore
         self.fileManager = fileManager
+        self.systemKeychain = systemKeychain
     }
 
     public func captureAndStoreSnapshot(for profile: AccountProfile) throws -> CredentialSnapshot {
@@ -65,29 +72,43 @@ public final class CLISwitcher {
             throw CLISwitcherError.providerMismatch(expected: profile.provider, actual: snapshot.provider)
         }
 
-        // Phase 1: back up every existing destination into one directory per
-        // restore call before writing a single byte, so a failure here leaves
-        // the credentials untouched.
+        // Phase 1: back up every existing destination (files into one backup
+        // directory per restore call, keychain values in memory) before
+        // writing a single byte, so a failure here leaves credentials
+        // untouched.
         let restoreBackupDirectory = backupDirectory.appendingPathComponent(uniqueBackupDirectoryName(), isDirectory: true)
         var backups: [URL] = []
         var backedUp: [(destination: URL, backup: URL)] = []
+        var keychainRollbacks: [(service: String, account: String, previous: (account: String, data: Data)?)] = []
 
         for item in snapshot.items {
-            let destination = resolve(relativePath: item.relativePath)
-            guard fileManager.fileExists(atPath: destination.path) else {
-                continue
-            }
-            do {
-                try fileManager.createDirectory(at: restoreBackupDirectory, withIntermediateDirectories: true)
-                let backup = restoreBackupDirectory.appendingPathComponent(sanitizedBackupName(for: item.relativePath))
-                if fileManager.fileExists(atPath: backup.path) {
-                    try fileManager.removeItem(at: backup)
+            switch item.kind {
+            case .keychainItem:
+                let service = item.relativePath
+                do {
+                    let previous = try systemKeychain.readItem(service: service)
+                    let account = item.keychainAccount ?? previous?.account ?? NSUserName()
+                    keychainRollbacks.append((service, account, previous))
+                } catch {
+                    throw CLISwitcherError.backupFailed(path: "Keychain item \(service)", underlying: error)
                 }
-                try fileManager.copyItem(at: destination, to: backup)
-                backups.append(backup)
-                backedUp.append((destination, backup))
-            } catch {
-                throw CLISwitcherError.backupFailed(path: destination.path, underlying: error)
+            case .fullFile, .jsonFields:
+                let destination = resolve(relativePath: item.relativePath)
+                guard fileManager.fileExists(atPath: destination.path) else {
+                    continue
+                }
+                do {
+                    try fileManager.createDirectory(at: restoreBackupDirectory, withIntermediateDirectories: true)
+                    let backup = restoreBackupDirectory.appendingPathComponent(sanitizedBackupName(for: item.relativePath))
+                    if fileManager.fileExists(atPath: backup.path) {
+                        try fileManager.removeItem(at: backup)
+                    }
+                    try fileManager.copyItem(at: destination, to: backup)
+                    backups.append(backup)
+                    backedUp.append((destination, backup))
+                } catch {
+                    throw CLISwitcherError.backupFailed(path: destination.path, underlying: error)
+                }
             }
         }
 
@@ -95,24 +116,39 @@ public final class CLISwitcher {
         var touched: [URL] = []
         do {
             for item in snapshot.items {
-                let destination = resolve(relativePath: item.relativePath)
-                try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
                 switch item.kind {
-                case .fullFile:
-                    try item.contents.write(to: destination, options: [.atomic])
-                case .jsonFields:
-                    try mergeJSONFields(item.contents, into: destination)
+                case .keychainItem:
+                    let service = item.relativePath
+                    let account = keychainRollbacks.first { $0.service == service }?.account
+                        ?? item.keychainAccount
+                        ?? NSUserName()
+                    try systemKeychain.writeItem(service: service, account: account, data: item.contents)
+                case .fullFile, .jsonFields:
+                    let destination = resolve(relativePath: item.relativePath)
+                    try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    if item.kind == .fullFile {
+                        try item.contents.write(to: destination, options: [.atomic])
+                    } else {
+                        try mergeJSONFields(item.contents, into: destination)
+                    }
+                    try fileManager.setAttributes(
+                        [.posixPermissions: item.posixPermissions ?? 0o600],
+                        ofItemAtPath: destination.path
+                    )
+                    touched.append(destination)
                 }
-                try fileManager.setAttributes(
-                    [.posixPermissions: item.posixPermissions ?? 0o600],
-                    ofItemAtPath: destination.path
-                )
-                touched.append(destination)
             }
         } catch {
             for (destination, backup) in backedUp {
                 try? fileManager.removeItem(at: destination)
                 try? fileManager.copyItem(at: backup, to: destination)
+            }
+            for rollback in keychainRollbacks {
+                if let previous = rollback.previous {
+                    try? systemKeychain.writeItem(service: rollback.service, account: previous.account, data: previous.data)
+                } else {
+                    try? systemKeychain.deleteItem(service: rollback.service, account: rollback.account)
+                }
             }
             throw error
         }
@@ -211,6 +247,23 @@ public final class CLISwitcher {
                     kind: .fullFile,
                     contents: try Data(contentsOf: claudeJSONURL),
                     posixPermissions: filePermissions(claudeJSONURL)
+                )
+            )
+        }
+
+        // The actual OAuth tokens live in the Keychain on current Claude Code
+        // versions; without this item a "switch" would only swap identity
+        // metadata. A read failure (permission denied) must fail the capture
+        // loudly rather than produce a snapshot that cannot really switch.
+        if let keychainItem = try systemKeychain.readItem(service: Self.claudeCodeKeychainService),
+           !keychainItem.data.isEmpty {
+            items.append(
+                CredentialSnapshotItem(
+                    relativePath: Self.claudeCodeKeychainService,
+                    kind: .keychainItem,
+                    contents: keychainItem.data,
+                    posixPermissions: nil,
+                    keychainAccount: keychainItem.account
                 )
             )
         }

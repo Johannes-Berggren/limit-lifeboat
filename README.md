@@ -8,10 +8,16 @@ usage-based overage.
 
 ## How it works
 
-- **Accounts register themselves.** Log into Claude Code (`claude`) or
-  Codex (`codex login`) in your terminal; on the next refresh the app
-  detects the login, creates (or links) the account, and saves an encrypted
-  credential snapshot in your macOS Keychain. No manual setup steps.
+- **Accounts register themselves.** Log into Claude Code
+  (`claude auth login`) or Codex (`codex login`) in your terminal; on the
+  next refresh the app detects the login, creates (or links) the account,
+  and saves a credential snapshot in your macOS Keychain. No manual setup
+  steps. To add a second account, run the same login command and pick the
+  other account in the browser — use a private window if the browser
+  auto-signs into the wrong one.
+- **Claude Code's tokens live in the macOS Keychain** (the
+  "Claude Code-credentials" item), so the first capture asks for Keychain
+  access — click "Always Allow" so switching works unattended.
 - **Usage is read locally.** For the active account per provider, the app
   briefly launches Claude Code in screen-reader mode and parses `/usage`,
   and reads recent local Codex session logs for rate-limit status. Claude
