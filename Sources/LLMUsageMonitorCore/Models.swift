@@ -111,6 +111,10 @@ public struct AccountIdentity: Codable, Hashable, Sendable {
     public var email: String?
     public var displayName: String?
     public var organization: String?
+    /// Stable organization identifier (e.g. Claude's organizationUuid). The
+    /// same user in two organizations has separate usage limits, so this
+    /// participates in identity matching while the display name does not.
+    public var organizationID: String?
     public var accountID: String?
     public var source: AccountIdentitySource
     public var updatedAt: Date
@@ -119,6 +123,7 @@ public struct AccountIdentity: Codable, Hashable, Sendable {
         email: String? = nil,
         displayName: String? = nil,
         organization: String? = nil,
+        organizationID: String? = nil,
         accountID: String? = nil,
         source: AccountIdentitySource,
         updatedAt: Date = Date()
@@ -126,6 +131,7 @@ public struct AccountIdentity: Codable, Hashable, Sendable {
         self.email = email
         self.displayName = displayName
         self.organization = organization
+        self.organizationID = organizationID
         self.accountID = accountID
         self.source = source
         self.updatedAt = updatedAt
@@ -136,9 +142,17 @@ public struct AccountIdentity: Codable, Hashable, Sendable {
     }
 
     /// Two identities refer to the same account when their stable identifiers
-    /// agree. Organization names are deliberately not compared: two different
-    /// accounts can share an organization.
+    /// agree. The same user logged into two different organizations counts as
+    /// two accounts (separate usage limits), so differing organization IDs
+    /// never match. Organization *names* are not compared in either
+    /// direction: they are unstable, and different accounts can share one.
     public func matches(_ other: AccountIdentity) -> Bool {
+        if let leftOrgID = organizationID,
+           let rightOrgID = other.organizationID,
+           leftOrgID != rightOrgID {
+            return false
+        }
+
         if let leftAccountID = accountID,
            let rightAccountID = other.accountID,
            leftAccountID == rightAccountID {

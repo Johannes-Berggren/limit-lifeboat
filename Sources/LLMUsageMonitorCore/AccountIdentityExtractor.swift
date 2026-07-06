@@ -131,10 +131,11 @@ public struct CodexIdentityReader {
         let payload = (tokens["id_token"] as? String).flatMap(decodeJWTPayload)
         let email = payload?["email"] as? String
         let name = payload?["name"] as? String
+        let defaultOrganization = self.defaultOrganization(from: payload)
         let organization = (payload?["organization"] as? String)
             ?? (payload?["org"] as? String)
             ?? (payload?["workspace"] as? String)
-            ?? defaultOrganizationTitle(from: payload)
+            ?? defaultOrganization?.title
 
         guard email != nil || name != nil || organization != nil || accountID != nil else {
             return nil
@@ -144,6 +145,7 @@ public struct CodexIdentityReader {
             email: email,
             displayName: name,
             organization: organization,
+            organizationID: defaultOrganization?.id,
             accountID: accountID,
             source: .codexIDToken,
             updatedAt: now
@@ -171,7 +173,7 @@ public struct CodexIdentityReader {
         return payload
     }
 
-    private func defaultOrganizationTitle(from payload: [String: Any]?) -> String? {
+    private func defaultOrganization(from payload: [String: Any]?) -> (title: String?, id: String?)? {
         guard let auth = payload?["https://api.openai.com/auth"] as? [String: Any],
               let organizations = auth["organizations"] as? [[String: Any]] else {
             return nil
@@ -180,9 +182,11 @@ public struct CodexIdentityReader {
         let defaultOrganization = organizations.first { organization in
             (organization["is_default"] as? Bool) == true
         }
-        let organization = defaultOrganization ?? organizations.first
+        guard let organization = defaultOrganization ?? organizations.first else {
+            return nil
+        }
 
-        return organization?["title"] as? String
+        return (organization["title"] as? String, organization["id"] as? String)
     }
 }
 
@@ -210,6 +214,7 @@ public struct ClaudeIdentityReader {
         let email = account["emailAddress"] as? String
         let displayName = account["displayName"] as? String
         let organization = account["organizationName"] as? String
+        let organizationID = account["organizationUuid"] as? String
         let accountID = account["accountUuid"] as? String
 
         guard email != nil || displayName != nil || organization != nil || accountID != nil else {
@@ -220,6 +225,7 @@ public struct ClaudeIdentityReader {
             email: email,
             displayName: displayName,
             organization: organization,
+            organizationID: organizationID,
             accountID: accountID,
             source: .claudeCodeUsage,
             updatedAt: now

@@ -166,7 +166,15 @@ final class AppState: ObservableObject {
 
     private func defaultLabel(for identity: AccountIdentity, provider: Provider) -> String {
         if let label = identity.primaryLabel {
-            return label
+            // Same login in two organizations shares the email; append the
+            // organization so the rows are tellable apart.
+            let taken = profiles.contains { $0.provider == provider && $0.label == label }
+            if taken, let organization = identity.organization, !organization.isEmpty {
+                return "\(label) (\(organization))"
+            }
+            if !taken {
+                return label
+            }
         }
         let count = profiles.filter { $0.provider == provider }.count
         return "\(provider.displayName) \(count + 1)"
@@ -409,6 +417,7 @@ final class AppState: ObservableObject {
             email: new.email ?? existing.email,
             displayName: new.displayName ?? existing.displayName,
             organization: new.organization ?? existing.organization,
+            organizationID: new.organizationID ?? existing.organizationID,
             accountID: new.accountID ?? existing.accountID,
             source: new.source,
             updatedAt: new.updatedAt

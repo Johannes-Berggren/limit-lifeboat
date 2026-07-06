@@ -26,6 +26,28 @@ final class ModelsTests: XCTestCase {
         XCTAssertFalse(left.matches(right))
     }
 
+    func testSameAccountInDifferentOrganizationsDoesNotMatch() {
+        // The same Anthropic login in two organizations has separate usage
+        // limits and must be treated as two accounts.
+        let personal = AccountIdentity(email: "a@example.com", organizationID: "org-personal", accountID: "acct-1", source: .claudeCodeUsage)
+        let team = AccountIdentity(email: "a@example.com", organizationID: "org-team", accountID: "acct-1", source: .claudeCodeUsage)
+        XCTAssertFalse(personal.matches(team))
+    }
+
+    func testSameAccountMatchesWhenOneSideLacksOrganizationID() {
+        // Identities stored by older app versions have no organizationID;
+        // they must still match so existing profiles keep working.
+        let stored = AccountIdentity(email: "a@example.com", accountID: "acct-1", source: .claudeCodeUsage)
+        let current = AccountIdentity(email: "a@example.com", organizationID: "org-team", accountID: "acct-1", source: .claudeCodeUsage)
+        XCTAssertTrue(stored.matches(current))
+    }
+
+    func testSameAccountAndOrganizationMatches() {
+        let left = AccountIdentity(organizationID: "org-1", accountID: "acct-1", source: .claudeCodeUsage)
+        let right = AccountIdentity(organizationID: "org-1", accountID: "acct-1", source: .claudeCodeUsage)
+        XCTAssertTrue(left.matches(right))
+    }
+
     func testSnapshotStaleness() {
         let now = Date()
         let fresh = makeSnapshot(lastRefreshed: now.addingTimeInterval(-60))

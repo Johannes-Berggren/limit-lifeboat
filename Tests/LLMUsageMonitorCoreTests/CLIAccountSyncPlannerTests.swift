@@ -57,6 +57,24 @@ final class CLIAccountSyncPlannerTests: XCTestCase {
         XCTAssertEqual(planner.plan(provider: .claude, currentIdentity: identity, profiles: profiles), .create)
     }
 
+    func testSameLoginDifferentOrganizationAdoptsPlaceholderInsteadOfActivating() {
+        // Same Anthropic user, different organization: must NOT collapse onto
+        // the existing profile (that overwrites its credentials); it should
+        // take the free placeholder.
+        let personal = AccountProfile(
+            provider: .claude,
+            label: "Personal",
+            identity: AccountIdentity(email: "a@example.com", organizationID: "org-personal", accountID: "acct-1", source: .claudeCodeUsage)
+        )
+        let spare = placeholder(.claude)
+        let teamIdentity = AccountIdentity(email: "a@example.com", organizationID: "org-team", accountID: "acct-1", source: .claudeCodeUsage)
+
+        XCTAssertEqual(
+            planner.plan(provider: .claude, currentIdentity: teamIdentity, profiles: [personal, spare]),
+            .adopt(spare.id)
+        )
+    }
+
     func testOrganizationSimilarityAloneDoesNotActivate() {
         let sameOrg = profile(.claude, email: "colleague@example.com", organization: "Acme")
         let identity = AccountIdentity(email: "me@example.com", organization: "Acme", source: .claudeCodeUsage)
