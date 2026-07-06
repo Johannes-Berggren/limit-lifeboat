@@ -1,8 +1,56 @@
 # LLM Usage Monitor
 
-Native macOS menu-bar app for watching Claude and ChatGPT/Codex subscription usage across two accounts each, and switching same-provider CLI credentials from saved Keychain snapshots.
+Native macOS menu-bar app for people with multiple Claude and ChatGPT/Codex
+subscription accounts. It watches how much of each account's included usage
+is left and switches the Claude Code / Codex CLI to another account in one
+click — so you hop to an account with quota remaining instead of paying
+usage-based overage.
 
-## Build
+## How it works
+
+- **Accounts register themselves.** Log into Claude Code (`claude`) or
+  Codex (`codex login`) in your terminal; on the next refresh the app
+  detects the login, creates (or links) the account, and saves an encrypted
+  credential snapshot in your macOS Keychain. No manual setup steps.
+- **Usage is read locally.** For the active account per provider, the app
+  briefly launches Claude Code in screen-reader mode and parses `/usage`,
+  and reads recent local Codex session logs for rate-limit status. Claude
+  Code labels this an approximate local-machine view; it does not include
+  other devices or claude.ai.
+- **Inactive accounts keep their last reading**, annotated with how old it
+  is — and highlighted when the limit window has already reset, meaning
+  that account likely has its full quota back (your best switch target).
+- **Switching is one click.** Every non-active account row has a
+  "Switch CLI to this account" button. The app captures the current login
+  first (nothing is lost), backs up the files it touches, restores the
+  target account's credentials, and verifies the CLI now reports the right
+  account. Backups live in
+  `~/Library/Application Support/LLMUsageMonitor/Backups/`.
+- The menu bar shows the active accounts at a glance
+  (`Claude 42%  Codex 87%`), turning orange near 80% used and red when
+  depleted, with local notifications on those threshold changes. When an
+  account appears to be past its included usage and burning credits or
+  pay-as-you-go, it shows `PAYG` instead — the exact thing this app helps
+  you avoid, and each account row explains the billing mode it detected.
+
+Add, rename, or remove accounts from the popover (the `+` button per
+provider and the `…` menu per account). Browser, Claude Desktop, ChatGPT
+Desktop, and CLI sessions are separate: switching affects the CLI only.
+
+### Dashboard fallback
+
+Per-account web dashboards (claude.ai / chatgpt.com) can still be opened
+from an account's `…` menu for cross-device numbers, each in an isolated
+browser context. Google sign-in sometimes rejects embedded browser windows;
+if that happens, use `Open in Browser`, sign in there, press Command-A then
+Command-C on the dashboard page, then click `Import Browser Text`.
+
+## Install
+
+Download the DMG from the latest release, drag the app to Applications,
+and launch it. The app lives in the menu bar (no Dock icon).
+
+## Build from source
 
 ```bash
 swift test
@@ -10,20 +58,5 @@ swift test
 open dist/LLMUsageMonitor.app
 ```
 
-## First Run
-
-1. Open the menu-bar item and choose `Accounts`.
-2. Click `Connect Next` until the accounts you want to monitor are signed in.
-3. Click `Refresh Usage` in the menu-bar popover.
-
-For the active terminal Claude login, the app briefly launches Claude Code in screen-reader mode, sends `/usage`, parses the session/week/usage-credit panel, then terminates that helper process. Claude Code labels this as an approximate local-machine view; it does not include other devices or claude.ai. For the active terminal Codex login, the app reads recent local Codex session logs for rate-limit usage and reset timing, and maps the current CLI identity to the matching Codex profile.
-
-The popover header shows the current terminal account for Claude and Codex separately, using the same local account metadata used by the CLIs. The matching profile row is marked `Active terminal` so account switching and usage readings are easier to audit.
-
-Workspace/team Codex analytics use OpenAI's Codex Analytics API, which requires a workspace API key scoped to `codex.enterprise.analytics.read`; the normal local CLI token is not documented as an analytics API credential.
-
-Google sign-in can reject embedded app browser windows. If that happens, use `Open in Browser` from the dashboard window, sign in there, press Command-A then Command-C on the dashboard page, then click `Import Browser Text`.
-
-CLI switching is optional and hidden under `Advanced CLI switching` in the account setup rows. Browser, Claude Desktop, ChatGPT Desktop, and CLI sessions are separate; Claude Code/Codex terminal state is read locally when available, while dashboard login remains the fallback for accounts the terminal cannot identify.
-
-The menu bar shows compact provider usage without opening the popover: `C` is Claude and `G` is ChatGPT/Codex. If any account appears to be past included subscription usage and falling back to credits/pay-as-you-go, the provider shows `PAYG`; otherwise it shows the included-usage percentage. Usage turns orange near 80% used and red when depleted; local notifications are sent on those threshold changes.
+Do not use `swift run` — the app must run from a bundle for notifications
+to work. See [RELEASING.md](RELEASING.md) for signed/notarized releases.

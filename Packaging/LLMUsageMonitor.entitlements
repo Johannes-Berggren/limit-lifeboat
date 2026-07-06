@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Required under the hardened runtime so NSAppleScript may drive
+    Terminal.app (the "Log In via Terminal" action); without it the call
+    fails silently with AppleEvent error -1743.
+
+    Deliberately absent:
+    - app-sandbox: the app reads/writes ~/.claude.json, ~/.codex/*, and the
+      Claude desktop config, and spawns/kills CLI helper processes.
+    - allow-jit / allow-unsigned-executable-memory: WKWebView JIT runs in
+      Apple's out-of-process WebContent services, not in this process.
+    - get-task-allow: must not be present in notarized builds.
+  -->
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
+</dict>
+</plist>

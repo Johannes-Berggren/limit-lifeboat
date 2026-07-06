@@ -3,6 +3,7 @@ import Combine
 import Foundation
 import LLMUsageMonitorCore
 import UserNotifications
+import WebKit
 
 struct MenuBarSummary: Equatable {
     var title: String
@@ -10,7 +11,7 @@ struct MenuBarSummary: Equatable {
     var riskLevel: RiskLevel
 
     static let empty = MenuBarSummary(
-        title: "C --  G --",
+        title: "Claude –  Codex –",
         accessibilityText: "LLM usage has not been refreshed.",
         riskLevel: .unknown
     )
@@ -20,7 +21,6 @@ struct MenuBarSummary: Equatable {
 final class AppState: ObservableObject {
     @Published private(set) var profiles: [AccountProfile]
     @Published private(set) var snapshots: [UUID: UsageSnapshot]
-    @Published private(set) var activeCLIIdentities: [Provider: AccountIdentity] = [:]
     @Published private(set) var isRefreshing = false
     @Published var menuBarSummary: MenuBarSummary = .empty
     @Published var statusMessage = ""
@@ -29,13 +29,10 @@ final class AppState: ObservableObject {
     private let cliSwitcher: CLISwitcher
     private let parser = UsageTextParser()
     private let identityExtractor = AccountIdentityExtractor()
-    private let codexIdentityReader = CodexIdentityReader()
-    private let claudeIdentityReader = ClaudeIdentityReader()
+    private let syncPlanner = CLIAccountSyncPlanner()
     private let codexLocalUsageReader = CodexLocalUsageReader()
     private let claudeCodeUsageReader = ClaudeCodeUsageReader()
-    private let webUsageRefresher = WebUsageRefresher()
     private let dashboardWindowManager = DashboardWindowManager()
-    private let loginFlowWindowManager = LoginFlowWindowManager()
     private let usageAlertController = UsageAlertController()
     private var refreshTask: Task<Void, Never>?
 
@@ -44,8 +41,6 @@ final class AppState: ObservableObject {
         self.cliSwitcher = cliSwitcher
         self.profiles = try repository.loadProfiles()
         self.snapshots = try repository.loadUsageSnapshots()
-        autoImportPrimaryCLISnapshots()
-        refreshActiveCLIIdentities()
         updateMenuBarSummary()
         usageAlertController.requestAuthorization()
     }
@@ -64,6 +59,8 @@ final class AppState: ObservableObject {
         }
     }
 
+    // MARK: - Refresh (local-first)
+
     func refreshAll() async {
         guard !isRefreshing else {
             return
@@ -72,61 +69,144 @@ final class AppState: ObservableObject {
         isRefreshing = true
         defer { isRefreshing = false }
 
-        refreshActiveCLIIdentities()
-        syncActiveCodexCLIProfile()
-        let refreshedClaudeProfileID = await refreshActiveClaudeCodeUsage()
-
-        for profile in profiles {
-            if profile.id == refreshedClaudeProfileID {
-                continue
+        // Attribute the current CLI logins to profiles (registering new
+        // accounts as needed) and keep their credential snapshots fresh.
+        for provider in Provider.allCases {
+            do {
+                try captureActiveCredentials(provider: provider)
+            } catch {
+                statusMessage = "Could not capture the current \(provider.displayName) login: \(error.localizedDescription)"
             }
-            await refresh(profile)
         }
+
+        // Usage is read locally for the active account per provider. Inactive
+        // accounts keep their last snapshot; the UI shows how stale it is and
+        // whether the limit window has already reset.
+        await refreshActiveClaudeCodeUsage()
+        refreshActiveCodexUsage()
+        updateMenuBarSummary()
     }
 
-    func refresh(_ profile: AccountProfile) async {
-        if let localSnapshot = codexLocalUsageSnapshot(for: profile) {
-            snapshots[profile.id] = localSnapshot
-            updateMenuBarSummary()
-            usageAlertController.handle(snapshot: localSnapshot, profile: profile)
-            saveSnapshots()
-            statusMessage = "\(profile.label): \(localSnapshot.message)"
+    func activeProfile(for provider: Provider) -> AccountProfile? {
+        profiles.first { $0.provider == provider && $0.isActiveCLI }
+    }
+
+    /// Syncs the active-CLI flags and identities from the current terminal
+    /// login, then captures its credentials into the matching profile so
+    /// switching never depends on a manual snapshot step.
+    @discardableResult
+    private func captureActiveCredentials(provider: Provider) throws -> AccountProfile? {
+        guard let active = syncActiveCLIAccount(provider: provider) else {
+            return nil
+        }
+        guard cliSwitcher.validateActiveLogin(provider: provider) else {
+            return active
+        }
+        _ = try cliSwitcher.captureAndStoreSnapshot(for: active)
+        return active
+    }
+
+    @discardableResult
+    private func syncActiveCLIAccount(provider: Provider) -> AccountProfile? {
+        let currentIdentity = cliSwitcher.currentIdentity(provider: provider)
+        let action = syncPlanner.plan(provider: provider, currentIdentity: currentIdentity, profiles: profiles)
+        var changed = false
+        var activeID: UUID?
+
+        switch action {
+        case .deactivateAll:
+            for index in profiles.indices where profiles[index].provider == provider && profiles[index].isActiveCLI {
+                profiles[index].isActiveCLI = false
+                profiles[index].updatedAt = Date()
+                changed = true
+            }
+        case .activate(let id), .adopt(let id):
+            activeID = id
+        case .create:
+            guard let currentIdentity else {
+                break
+            }
+            let profile = AccountProfile(
+                provider: provider,
+                label: defaultLabel(for: currentIdentity, provider: provider),
+                identity: currentIdentity
+            )
+            profiles.append(profile)
+            activeID = profile.id
+            changed = true
+            statusMessage = "Registered \(profile.label) from the current \(provider.displayName) CLI login."
+        }
+
+        var active: AccountProfile?
+        if let activeID, let currentIdentity {
+            for index in profiles.indices where profiles[index].provider == provider {
+                let shouldBeActive = profiles[index].id == activeID
+                if profiles[index].isActiveCLI != shouldBeActive {
+                    profiles[index].isActiveCLI = shouldBeActive
+                    profiles[index].updatedAt = Date()
+                    changed = true
+                }
+            }
+            if let index = profiles.firstIndex(where: { $0.id == activeID }) {
+                let merged = mergedIdentity(existing: profiles[index].identity, new: currentIdentity)
+                if profiles[index].identity != merged {
+                    profiles[index].identity = merged
+                    profiles[index].updatedAt = Date()
+                    changed = true
+                }
+                active = profiles[index]
+            }
+        }
+
+        if changed {
+            persistProfiles()
+        }
+        return active
+    }
+
+    private func defaultLabel(for identity: AccountIdentity, provider: Provider) -> String {
+        if let label = identity.primaryLabel {
+            return label
+        }
+        let count = profiles.filter { $0.provider == provider }.count
+        return "\(provider.displayName) \(count + 1)"
+    }
+
+    private func refreshActiveClaudeCodeUsage() async {
+        guard cliSwitcher.validateActiveLogin(provider: .claude),
+              let profile = activeProfile(for: .claude) else {
             return
         }
 
-        var fallbackSnapshot: UsageSnapshot?
-
         do {
-            for url in profile.provider.dashboardURLs {
-                let text = try await webUsageRefresher.fetchVisibleText(for: profile, url: url)
-                let snapshot = ingestDashboardText(text, for: profile, source: url.absoluteString)
-                if snapshot.parseConfidence != .none || snapshot.riskLevel == .stale {
-                    return
-                }
-                fallbackSnapshot = snapshot
+            let report = try await claudeCodeUsageReader.readUsage()
+            if let identity = report.identity {
+                updateIdentity(identity, for: profile)
             }
-
-            if let fallbackSnapshot {
-                snapshots[profile.id] = fallbackSnapshot
-                updateMenuBarSummary()
-                saveSnapshots()
-                statusMessage = "\(profile.label): \(fallbackSnapshot.message)"
-            }
+            let snapshot = report.makeSnapshot(for: profile)
+            applySnapshot(snapshot, for: profile)
         } catch {
-            let snapshot = UsageSnapshot(
-                accountID: profile.id,
-                provider: profile.provider,
-                riskLevel: .stale,
-                source: profile.provider.dashboardURL.absoluteString,
-                parseConfidence: .none,
-                message: error.localizedDescription
-            )
-            snapshots[profile.id] = snapshot
-            updateMenuBarSummary()
-            saveSnapshots()
-            statusMessage = "\(profile.label): \(error.localizedDescription)"
+            statusMessage = "Claude Code /usage unavailable: \(error.localizedDescription)"
         }
     }
+
+    private func refreshActiveCodexUsage() {
+        guard let profile = activeProfile(for: .codex),
+              let snapshot = codexLocalUsageReader.readUsage(for: profile) else {
+            return
+        }
+        applySnapshot(snapshot, for: profile)
+    }
+
+    private func applySnapshot(_ snapshot: UsageSnapshot, for profile: AccountProfile) {
+        snapshots[profile.id] = snapshot
+        updateMenuBarSummary()
+        usageAlertController.handle(snapshot: snapshot, profile: profile)
+        saveSnapshots()
+        statusMessage = "\(profile.label): \(snapshot.message)"
+    }
+
+    // MARK: - Dashboard fallback
 
     @discardableResult
     func ingestDashboardText(_ text: String, for profile: AccountProfile, source: String) -> UsageSnapshot {
@@ -135,11 +215,7 @@ final class AppState: ObservableObject {
         }
 
         let snapshot = parser.parse(text: text, account: profile, source: source)
-        snapshots[profile.id] = snapshot
-        updateMenuBarSummary()
-        usageAlertController.handle(snapshot: snapshot, profile: profile)
-        saveSnapshots()
-        statusMessage = "\(profile.label): \(snapshot.message)"
+        applySnapshot(snapshot, for: profile)
         return snapshot
     }
 
@@ -149,27 +225,74 @@ final class AppState: ObservableObject {
         }
     }
 
-    func openLoginFlow() {
-        loginFlowWindowManager.open(state: self)
+    // MARK: - Account management
+
+    func addProfile(provider: Provider) {
+        let count = profiles.filter { $0.provider == provider }.count
+        let profile = AccountProfile(provider: provider, label: "\(provider.displayName) \(count + 1)")
+        profiles.append(profile)
+        persistProfiles()
+        statusMessage = "Added \(profile.label). Log into it in the terminal and it links automatically."
     }
 
-    func importCurrentCLIForPrimaryAccounts() {
-        autoImportPrimaryCLISnapshots(force: true)
-    }
-
-    func captureCLISnapshot(for profile: AccountProfile) {
-        do {
-            _ = try cliSwitcher.captureAndStoreSnapshot(for: profile)
-            updateIdentityFromCurrentCLI(for: profile)
-            statusMessage = "Captured \(profile.provider.displayName) CLI snapshot for \(profile.label)."
-            objectWillChange.send()
-        } catch {
-            statusMessage = "Capture failed for \(profile.label): \(error.localizedDescription)"
-            showError(message: "Capture failed", details: error.localizedDescription)
+    func renameProfile(_ profileID: UUID, to newLabel: String) {
+        let trimmed = newLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let index = profiles.firstIndex(where: { $0.id == profileID }),
+              profiles[index].label != trimmed else {
+            return
         }
+        profiles[index].label = trimmed
+        profiles[index].updatedAt = Date()
+        persistProfiles()
     }
+
+    func removeProfile(_ profileID: UUID) {
+        guard let index = profiles.firstIndex(where: { $0.id == profileID }) else {
+            return
+        }
+        let profile = profiles[index]
+
+        let alert = NSAlert()
+        alert.messageText = "Remove \(profile.label)?"
+        var details = "This deletes the saved credential snapshot and usage history for this account. Your terminal login and the account itself are not touched."
+        if profile.isActiveCLI {
+            details += " This account is the active CLI login, so it will be registered again on the next refresh unless you log out in the terminal first."
+        }
+        alert.informativeText = details
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return
+        }
+
+        do {
+            try cliSwitcher.deleteStoredSnapshot(for: profile.id)
+        } catch {
+            statusMessage = "Could not delete stored credentials for \(profile.label): \(error.localizedDescription)"
+        }
+        if profile.webDataStoreKind == .isolated {
+            WKWebsiteDataStore.remove(forIdentifier: profile.webDataStoreID) { _ in }
+        }
+        profiles.remove(at: index)
+        snapshots[profile.id] = nil
+        persistProfiles()
+        saveSnapshots()
+        updateMenuBarSummary()
+        statusMessage = "Removed \(profile.label)."
+    }
+
+    // MARK: - CLI switching
 
     func switchCLI(to profile: AccountProfile) {
+        guard hasStoredSnapshot(for: profile) else {
+            showError(
+                message: "No saved credentials for \(profile.label)",
+                details: "Log into this account once in the terminal (\(profile.provider.loginCommand)); the app captures its credentials automatically."
+            )
+            return
+        }
+
         if cliSwitcher.hasActiveProcesses(provider: profile.provider) {
             let alert = NSAlert()
             alert.messageText = "\(profile.provider.displayName) is running"
@@ -181,19 +304,56 @@ final class AppState: ObservableObject {
             }
         }
 
+        // Capture the currently active login first so nothing is lost.
+        do {
+            try captureActiveCredentials(provider: profile.provider)
+        } catch {
+            statusMessage = "Switch cancelled: \(error.localizedDescription)"
+            showError(
+                message: "Switch cancelled",
+                details: "Could not capture the current \(profile.provider.displayName) login first, so nothing was changed. \(error.localizedDescription)"
+            )
+            return
+        }
+
         do {
             let result = try cliSwitcher.restoreSnapshot(for: profile)
             for index in profiles.indices where profiles[index].provider == profile.provider {
                 profiles[index].isActiveCLI = profiles[index].id == profile.id
                 profiles[index].updatedAt = Date()
             }
-            refreshActiveCLIIdentities()
-            try repository.saveProfiles(profiles)
+            persistProfiles()
             updateMenuBarSummary()
-            statusMessage = "Switched \(profile.provider.displayName) CLI to \(profile.label). Backups: \(result.backupURLs.count)."
+
+            if let newIdentity = cliSwitcher.currentIdentity(provider: profile.provider),
+               let targetIdentity = profile.identity,
+               !targetIdentity.matches(newIdentity) {
+                showError(
+                    message: "Switch finished with a different account",
+                    details: "The CLI now reports \(newIdentity.primaryLabel ?? "an unknown account"), which does not match \(profile.label). The previous files were backed up to: \(result.backupURLs.map(\.path).joined(separator: ", "))"
+                )
+            } else {
+                statusMessage = "Switched \(profile.provider.displayName) CLI to \(profile.label)."
+            }
+
+            Task { await refreshAll() }
         } catch {
             statusMessage = "Switch failed for \(profile.label): \(error.localizedDescription)"
             showError(message: "Switch failed", details: error.localizedDescription)
+        }
+    }
+
+    func captureCLISnapshot(for profile: AccountProfile) {
+        do {
+            _ = try cliSwitcher.captureAndStoreSnapshot(for: profile)
+            if let identity = cliSwitcher.currentIdentity(provider: profile.provider) {
+                updateIdentity(identity, for: profile)
+            }
+            statusMessage = "Captured \(profile.provider.displayName) CLI credentials for \(profile.label)."
+            objectWillChange.send()
+        } catch {
+            statusMessage = "Capture failed for \(profile.label): \(error.localizedDescription)"
+            showError(message: "Capture failed", details: error.localizedDescription)
         }
     }
 
@@ -214,13 +374,13 @@ final class AppState: ObservableObject {
 
     func beginCLILogin(for profile: AccountProfile) {
         if runTerminalCommand(profile.provider.loginCommand) {
-            statusMessage = "Started \(profile.provider.loginCommand) for \(profile.label). Save the snapshot after login."
+            statusMessage = "Started \(profile.provider.loginCommand) for \(profile.label). The account links automatically after login."
             return
         }
 
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(profile.provider.loginCommand, forType: .string)
-        statusMessage = "Copied \(profile.provider.loginCommand). Run it for \(profile.label), then save the snapshot."
+        statusMessage = "Copied \(profile.provider.loginCommand). Run it in the terminal; the account links automatically after login."
         openTerminal()
     }
 
@@ -228,275 +388,7 @@ final class AppState: ObservableObject {
         NSApplication.shared.terminate(nil)
     }
 
-    private func openTerminal() {
-        let terminalURL = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
-        NSWorkspace.shared.openApplication(at: terminalURL, configuration: NSWorkspace.OpenConfiguration())
-    }
-
-    private func autoImportPrimaryCLISnapshots(force: Bool = false) {
-        var importedLabels: [String] = []
-        var updatedProfiles = false
-
-        for provider in Provider.allCases {
-            guard let index = profiles.firstIndex(where: { $0.provider == provider }) else {
-                continue
-            }
-
-            let profile = profiles[index]
-            if provider == .codex,
-               profiles[index].identity == nil,
-               let identity = codexIdentityReader.readIdentity() {
-                profiles[index].identity = identity
-                profiles[index].updatedAt = Date()
-                updatedProfiles = true
-            }
-
-            if !force, (try? cliSwitcher.hasStoredSnapshot(for: profile)) == true {
-                continue
-            }
-
-            guard cliSwitcher.validateActiveLogin(provider: provider) else {
-                continue
-            }
-
-            do {
-                _ = try cliSwitcher.captureAndStoreSnapshot(for: profile)
-                profiles[index].isActiveCLI = true
-                profiles[index].updatedAt = Date()
-                updatedProfiles = true
-                if provider == .codex, let identity = codexIdentityReader.readIdentity() {
-                    profiles[index].identity = identity
-                }
-                importedLabels.append(profile.label)
-            } catch {
-                if force {
-                    statusMessage = "Could not import \(profile.label): \(error.localizedDescription)"
-                }
-            }
-        }
-
-        guard !importedLabels.isEmpty || updatedProfiles else {
-            if force && statusMessage.isEmpty {
-                statusMessage = "No active CLI logins found to import."
-            }
-            return
-        }
-
-        do {
-            try repository.saveProfiles(profiles)
-            if !importedLabels.isEmpty {
-                statusMessage = "Imported current CLI login for \(importedLabels.joined(separator: ", "))."
-            }
-        } catch {
-            statusMessage = "Imported CLI snapshots, but could not save active profile state: \(error.localizedDescription)"
-        }
-    }
-
-    private func updateIdentityFromCurrentCLI(for profile: AccountProfile) {
-        let identity: AccountIdentity?
-        switch profile.provider {
-        case .claude:
-            identity = claudeIdentityReader.readIdentity()
-        case .codex:
-            identity = codexIdentityReader.readIdentity()
-        }
-
-        guard let identity else {
-            return
-        }
-        updateIdentity(identity, for: profile)
-        refreshActiveCLIIdentities()
-    }
-
-    private func refreshActiveCLIIdentities() {
-        var identities: [Provider: AccountIdentity] = [:]
-        if let identity = claudeIdentityReader.readIdentity() {
-            identities[.claude] = identity
-        }
-        if let identity = codexIdentityReader.readIdentity() {
-            identities[.codex] = identity
-        }
-        activeCLIIdentities = identities
-    }
-
-    private func syncActiveCodexCLIProfile() {
-        guard let currentIdentity = codexIdentityReader.readIdentity() else {
-            return
-        }
-
-        let codexIndices = profiles.indices.filter { profiles[$0].provider == .codex }
-        guard !codexIndices.isEmpty else {
-            return
-        }
-
-        let targetIndex = codexIndices.first { index in
-            guard let identity = profiles[index].identity else {
-                return false
-            }
-            return identitiesMatch(identity, currentIdentity)
-        } ?? codexIndices.first { profiles[$0].identity == nil }
-            ?? codexIndices.first { profiles[$0].isActiveCLI }
-            ?? codexIndices[0]
-
-        var changed = false
-        for index in codexIndices {
-            let shouldBeActive = index == targetIndex
-            if profiles[index].isActiveCLI != shouldBeActive {
-                profiles[index].isActiveCLI = shouldBeActive
-                profiles[index].updatedAt = Date()
-                changed = true
-            }
-        }
-
-        let merged = mergedIdentity(existing: profiles[targetIndex].identity, new: currentIdentity)
-        if profiles[targetIndex].identity != merged {
-            profiles[targetIndex].identity = merged
-            profiles[targetIndex].updatedAt = Date()
-            changed = true
-        }
-
-        guard changed else {
-            return
-        }
-
-        do {
-            try repository.saveProfiles(profiles)
-        } catch {
-            statusMessage = "Could not save active Codex profile: \(error.localizedDescription)"
-        }
-    }
-
-    private func refreshActiveClaudeCodeUsage() async -> UUID? {
-        guard cliSwitcher.validateActiveLogin(provider: .claude) else {
-            return nil
-        }
-
-        do {
-            let report = try await claudeCodeUsageReader.readUsage()
-            let currentIdentity = claudeIdentityReader.readIdentity() ?? report.identity
-            if let currentIdentity {
-                activeCLIIdentities[.claude] = currentIdentity
-            }
-            guard let targetIndex = targetClaudeProfileIndex(for: currentIdentity) else {
-                return nil
-            }
-
-            var profilesChanged = false
-            let claudeIndices = profiles.indices.filter { profiles[$0].provider == .claude }
-            for index in claudeIndices {
-                let shouldBeActive = index == targetIndex
-                if profiles[index].isActiveCLI != shouldBeActive {
-                    profiles[index].isActiveCLI = shouldBeActive
-                    profiles[index].updatedAt = Date()
-                    profilesChanged = true
-                }
-            }
-
-            if let identity = currentIdentity {
-                let merged = mergedIdentity(existing: profiles[targetIndex].identity, new: identity)
-                if profiles[targetIndex].identity != merged {
-                    profiles[targetIndex].identity = merged
-                    profiles[targetIndex].updatedAt = Date()
-                    profilesChanged = true
-                }
-            }
-
-            if profilesChanged {
-                try repository.saveProfiles(profiles)
-            }
-
-            let profile = profiles[targetIndex]
-            let snapshot = report.makeSnapshot(for: profile)
-            snapshots[profile.id] = snapshot
-            updateMenuBarSummary()
-            usageAlertController.handle(snapshot: snapshot, profile: profile)
-            saveSnapshots()
-            statusMessage = "\(profile.label): \(snapshot.message)"
-            return profile.id
-        } catch {
-            statusMessage = "Claude Code /usage unavailable: \(error.localizedDescription)"
-            return nil
-        }
-    }
-
-    private func targetClaudeProfileIndex(for currentIdentity: AccountIdentity?) -> Array<AccountProfile>.Index? {
-        let claudeIndices = profiles.indices.filter { profiles[$0].provider == .claude }
-        guard !claudeIndices.isEmpty else {
-            return nil
-        }
-
-        if let currentIdentity {
-            if let match = claudeIndices.first(where: { index in
-                guard let existingIdentity = profiles[index].identity else {
-                    return false
-                }
-                return identitiesMatch(existingIdentity, currentIdentity)
-                    || organizationsMatch(existingIdentity, currentIdentity)
-            }) {
-                return match
-            }
-
-            if let activeProfile = claudeIndices.first(where: { profiles[$0].isActiveCLI }) {
-                return activeProfile
-            }
-        }
-
-        return claudeIndices.first { profiles[$0].isActiveCLI }
-            ?? claudeIndices.first { profiles[$0].identity == nil }
-            ?? claudeIndices.first
-    }
-
-    private func codexLocalUsageSnapshot(for profile: AccountProfile) -> UsageSnapshot? {
-        guard profile.provider == .codex,
-              codexTerminalLoginMatches(profile),
-              let snapshot = codexLocalUsageReader.readUsage(for: profile) else {
-            return nil
-        }
-        return snapshot
-    }
-
-    private func codexTerminalLoginMatches(_ profile: AccountProfile) -> Bool {
-        guard let currentIdentity = codexIdentityReader.readIdentity() else {
-            return profile.isActiveCLI
-        }
-
-        if let identity = profile.identity, identitiesMatch(identity, currentIdentity) {
-            return true
-        }
-
-        if profile.isActiveCLI {
-            updateIdentity(currentIdentity, for: profile)
-            return true
-        }
-
-        return false
-    }
-
-    private func identitiesMatch(_ left: AccountIdentity, _ right: AccountIdentity) -> Bool {
-        if let leftAccountID = left.accountID,
-           let rightAccountID = right.accountID,
-           leftAccountID == rightAccountID {
-            return true
-        }
-
-        if let leftEmail = left.email?.lowercased(),
-           let rightEmail = right.email?.lowercased(),
-           leftEmail == rightEmail {
-            return true
-        }
-
-        return false
-    }
-
-    private func organizationsMatch(_ left: AccountIdentity, _ right: AccountIdentity) -> Bool {
-        guard let leftOrganization = left.organization?.lowercased(),
-              let rightOrganization = right.organization?.lowercased(),
-              !leftOrganization.isEmpty,
-              !rightOrganization.isEmpty else {
-            return false
-        }
-        return leftOrganization == rightOrganization
-    }
+    // MARK: - Identity
 
     private func updateIdentity(_ identity: AccountIdentity, for profile: AccountProfile) {
         guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else {
@@ -505,12 +397,7 @@ final class AppState: ObservableObject {
 
         profiles[index].identity = mergedIdentity(existing: profiles[index].identity, new: identity)
         profiles[index].updatedAt = Date()
-
-        do {
-            try repository.saveProfiles(profiles)
-        } catch {
-            statusMessage = "Could not save account identity: \(error.localizedDescription)"
-        }
+        persistProfiles()
     }
 
     private func mergedIdentity(existing: AccountIdentity?, new: AccountIdentity) -> AccountIdentity {
@@ -526,6 +413,13 @@ final class AppState: ObservableObject {
             source: new.source,
             updatedAt: new.updatedAt
         )
+    }
+
+    // MARK: - Helpers
+
+    private func openTerminal() {
+        let terminalURL = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
+        NSWorkspace.shared.openApplication(at: terminalURL, configuration: NSWorkspace.OpenConfiguration())
     }
 
     private func runTerminalCommand(_ command: String) -> Bool {
@@ -544,37 +438,70 @@ final class AppState: ObservableObject {
         return result != nil
     }
 
+    private func persistProfiles() {
+        do {
+            try repository.saveProfiles(profiles)
+        } catch {
+            statusMessage = "Could not save accounts: \(error.localizedDescription)"
+        }
+    }
+
+    private func saveSnapshots() {
+        do {
+            try repository.saveUsageSnapshots(snapshots)
+        } catch {
+            statusMessage = "Could not save usage snapshots: \(error.localizedDescription)"
+        }
+    }
+
+    private func showError(message: String, details: String) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.informativeText = details
+        alert.runModal()
+    }
+
+    // MARK: - Menu bar summary
+
     private func updateMenuBarSummary() {
-        let claudeTitle = providerUsageTitle(.claude)
-        let codexTitle = providerUsageTitle(.codex)
         menuBarSummary = MenuBarSummary(
-            title: "C \(claudeTitle)  G \(codexTitle)",
+            title: "\(providerUsageTitle(.claude))  \(providerUsageTitle(.codex))",
             accessibilityText: accessibilitySummary(),
             riskLevel: highestRisk()
         )
     }
 
-    private func providerUsageTitle(_ provider: Provider) -> String {
-        let providerSnapshots = profiles
-            .filter { $0.provider == provider }
-            .compactMap { snapshots[$0.id] }
-
-        if providerSnapshots.contains(where: { $0.billingUsageMode == .overLimitPayAsYouGo }) {
-            return "PAYG"
+    private func providerShortName(_ provider: Provider) -> String {
+        switch provider {
+        case .claude:
+            return "Claude"
+        case .codex:
+            return "Codex"
         }
-
-        let usedValues = providerSnapshots.compactMap(\.usedFraction)
-
-        guard let maxUsed = usedValues.max() else {
-            return "--"
-        }
-
-        return "\(Int((maxUsed * 100).rounded()))%"
     }
 
+    private func providerUsageTitle(_ provider: Provider) -> String {
+        guard let profile = activeProfile(for: provider),
+              let snapshot = snapshots[profile.id] else {
+            return "\(providerShortName(provider)) –"
+        }
+
+        if snapshot.billingUsageMode == .overLimitPayAsYouGo {
+            return "\(providerShortName(provider)) PAYG"
+        }
+
+        guard let used = snapshot.usedFraction else {
+            return "\(providerShortName(provider)) –"
+        }
+        return "\(providerShortName(provider)) \(Int((used * 100).rounded()))%"
+    }
+
+    /// Menu-bar risk reflects the accounts the terminal is actually using;
+    /// a stale inactive account must not paint warning glyphs.
     private func highestRisk() -> RiskLevel {
-        let snapshotRisk = profiles.compactMap { snapshots[$0.id]?.riskLevel }.min() ?? .unknown
-        let thresholdRisk = profiles
+        let activeProfiles = Provider.allCases.compactMap { activeProfile(for: $0) }
+        let snapshotRisk = activeProfiles.compactMap { snapshots[$0.id]?.riskLevel }.min() ?? .unknown
+        let thresholdRisk = activeProfiles
             .compactMap { snapshots[$0.id]?.usedFraction }
             .map { used -> RiskLevel in
                 if used >= 1 {
@@ -593,53 +520,35 @@ final class AppState: ObservableObject {
     private func accessibilitySummary() -> String {
         var parts: [String] = []
         for provider in Provider.allCases {
-            let values = profiles
-                .filter { $0.provider == provider }
-                .compactMap { profile -> String? in
-                    guard let snapshot = snapshots[profile.id] else {
-                        return nil
-                    }
+            guard let profile = activeProfile(for: provider),
+                  let snapshot = snapshots[profile.id] else {
+                parts.append("\(provider.displayName) usage unknown")
+                continue
+            }
 
-                    let mode: String
-                    switch snapshot.billingUsageMode {
-                    case .includedSubscription:
-                        mode = "using included subscription usage"
-                    case .includedSubscriptionNearLimit:
-                        mode = "using included subscription usage near the limit"
-                    case .overLimitPayAsYouGo:
-                        mode = "using pay as you go or credits"
-                    case .payAsYouGoVisible:
-                        mode = "showing pay as you go status"
-                    case .needsLogin:
-                        mode = "needs login"
-                    case .unknown:
-                        mode = "usage mode unknown"
-                    }
+            let mode: String
+            switch snapshot.billingUsageMode {
+            case .includedSubscription:
+                mode = "using included subscription usage"
+            case .includedSubscriptionNearLimit:
+                mode = "using included subscription usage near the limit"
+            case .overLimitPayAsYouGo:
+                mode = "using pay as you go or credits"
+            case .payAsYouGoVisible:
+                mode = "showing pay as you go status"
+            case .needsLogin:
+                mode = "needs login"
+            case .unknown:
+                mode = "usage mode unknown"
+            }
 
-                    if let used = snapshot.usedFraction {
-                        return "\(profile.label) \(Int((used * 100).rounded())) percent used, \(mode)"
-                    }
-                    return "\(profile.label) \(mode)"
-                }
-
-            parts.append(values.isEmpty ? "\(provider.displayName) usage unknown" : values.joined(separator: ", "))
+            if let used = snapshot.usedFraction {
+                parts.append("\(provider.displayName) active account \(profile.label) \(Int((used * 100).rounded())) percent used, \(mode)")
+            } else {
+                parts.append("\(provider.displayName) active account \(profile.label) \(mode)")
+            }
         }
         return parts.joined(separator: ". ")
-    }
-
-    private func saveSnapshots() {
-        do {
-            try repository.saveUsageSnapshots(snapshots)
-        } catch {
-            statusMessage = "Could not save usage snapshots: \(error.localizedDescription)"
-        }
-    }
-
-    private func showError(message: String, details: String) {
-        let alert = NSAlert()
-        alert.messageText = message
-        alert.informativeText = details
-        alert.runModal()
     }
 }
 
@@ -648,10 +557,19 @@ final class UsageAlertController {
     private var lastNotifiedRisk: [UUID: RiskLevel] = [:]
 
     func requestAuthorization() {
+        // UNUserNotificationCenter requires a real bundle; guard so an
+        // unbundled `swift run` does not crash at startup.
+        guard Bundle.main.bundleIdentifier != nil else {
+            return
+        }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
     func handle(snapshot: UsageSnapshot, profile: AccountProfile) {
+        guard Bundle.main.bundleIdentifier != nil else {
+            return
+        }
+
         guard snapshot.parseConfidence != .none else {
             return
         }
