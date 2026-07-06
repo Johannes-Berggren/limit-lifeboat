@@ -106,6 +106,8 @@ struct LoginFlowView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            ActiveCLIAccountsView(identities: state.activeCLIIdentities, profiles: state.profiles)
         }
         .padding(16)
     }
@@ -160,11 +162,15 @@ struct LoginAccountSetupRow: View {
 
                 Spacer()
 
+                if profile.isActiveCLI {
+                    statusPill(text: "Active terminal", systemImage: "terminal.fill", color: .green)
+                }
                 statusPill(text: profile.webDataStoreKind == .appDefault ? "Primary" : "Isolated", systemImage: profile.webDataStoreKind == .appDefault ? "person.crop.circle.fill" : "person.crop.circle.badge.plus", color: profile.webDataStoreKind == .appDefault ? .blue : .secondary)
                 statusPill(text: dashboardStatus.text, systemImage: dashboardStatus.image, color: dashboardStatus.color)
             }
 
             UsageGauge(snapshot: snapshot, compact: false)
+            BillingStatusView(snapshot: snapshot, compact: false)
 
             HStack(spacing: 10) {
                 Button {

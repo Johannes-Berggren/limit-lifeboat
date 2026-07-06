@@ -20,6 +20,7 @@ struct MenuBarSummary: Equatable {
 final class AppState: ObservableObject {
     @Published private(set) var profiles: [AccountProfile]
     @Published private(set) var snapshots: [UUID: UsageSnapshot]
+    @Published private(set) var activeCLIIdentities: [Provider: AccountIdentity] = [:]
     @Published private(set) var isRefreshing = false
     @Published var menuBarSummary: MenuBarSummary = .empty
     @Published var statusMessage = ""
@@ -44,6 +45,7 @@ final class AppState: ObservableObject {
         self.profiles = try repository.loadProfiles()
         self.snapshots = try repository.loadUsageSnapshots()
         autoImportPrimaryCLISnapshots()
+        refreshActiveCLIIdentities()
         updateMenuBarSummary()
         usageAlertController.requestAuthorization()
     }
@@ -70,6 +72,7 @@ final class AppState: ObservableObject {
         isRefreshing = true
         defer { isRefreshing = false }
 
+        refreshActiveCLIIdentities()
         syncActiveCodexCLIProfile()
         let refreshedClaudeProfileID = await refreshActiveClaudeCodeUsage()
 
@@ -184,6 +187,7 @@ final class AppState: ObservableObject {
                 profiles[index].isActiveCLI = profiles[index].id == profile.id
                 profiles[index].updatedAt = Date()
             }
+            refreshActiveCLIIdentities()
             try repository.saveProfiles(profiles)
             updateMenuBarSummary()
             statusMessage = "Switched \(profile.provider.displayName) CLI to \(profile.label). Backups: \(result.backupURLs.count)."
@@ -289,11 +293,30 @@ final class AppState: ObservableObject {
     }
 
     private func updateIdentityFromCurrentCLI(for profile: AccountProfile) {
-        guard profile.provider == .codex,
-              let identity = codexIdentityReader.readIdentity() else {
+        let identity: AccountIdentity?
+        switch profile.provider {
+        case .claude:
+            identity = claudeIdentityReader.readIdentity()
+        case .codex:
+            identity = codexIdentityReader.readIdentity()
+        }
+
+        guard let identity else {
             return
         }
         updateIdentity(identity, for: profile)
+        refreshActiveCLIIdentities()
+    }
+
+    private func refreshActiveCLIIdentities() {
+        var identities: [Provider: AccountIdentity] = [:]
+        if let identity = claudeIdentityReader.readIdentity() {
+            identities[.claude] = identity
+        }
+        if let identity = codexIdentityReader.readIdentity() {
+            identities[.codex] = identity
+        }
+        activeCLIIdentities = identities
     }
 
     private func syncActiveCodexCLIProfile() {
@@ -351,6 +374,9 @@ final class AppState: ObservableObject {
         do {
             let report = try await claudeCodeUsageReader.readUsage()
             let currentIdentity = claudeIdentityReader.readIdentity() ?? report.identity
+            if let currentIdentity {
+                activeCLIIdentities[.claude] = currentIdentity
+            }
             guard let targetIndex = targetClaudeProfileIndex(for: currentIdentity) else {
                 return nil
             }
@@ -529,9 +555,15 @@ final class AppState: ObservableObject {
     }
 
     private func providerUsageTitle(_ provider: Provider) -> String {
-        let usedValues = profiles
+        let providerSnapshots = profiles
             .filter { $0.provider == provider }
-            .compactMap { snapshots[$0.id]?.usedFraction }
+            .compactMap { snapshots[$0.id] }
+
+        if providerSnapshots.contains(where: { $0.billingUsageMode == .overLimitPayAsYouGo }) {
+            return "PAYG"
+        }
+
+        let usedValues = providerSnapshots.compactMap(\.usedFraction)
 
         guard let maxUsed = usedValues.max() else {
             return "--"
@@ -564,10 +596,30 @@ final class AppState: ObservableObject {
             let values = profiles
                 .filter { $0.provider == provider }
                 .compactMap { profile -> String? in
-                    guard let used = snapshots[profile.id]?.usedFraction else {
+                    guard let snapshot = snapshots[profile.id] else {
                         return nil
                     }
-                    return "\(profile.label) \(Int((used * 100).rounded())) percent used"
+
+                    let mode: String
+                    switch snapshot.billingUsageMode {
+                    case .includedSubscription:
+                        mode = "using included subscription usage"
+                    case .includedSubscriptionNearLimit:
+                        mode = "using included subscription usage near the limit"
+                    case .overLimitPayAsYouGo:
+                        mode = "using pay as you go or credits"
+                    case .payAsYouGoVisible:
+                        mode = "showing pay as you go status"
+                    case .needsLogin:
+                        mode = "needs login"
+                    case .unknown:
+                        mode = "usage mode unknown"
+                    }
+
+                    if let used = snapshot.usedFraction {
+                        return "\(profile.label) \(Int((used * 100).rounded())) percent used, \(mode)"
+                    }
+                    return "\(profile.label) \(mode)"
                 }
 
             parts.append(values.isEmpty ? "\(provider.displayName) usage unknown" : values.joined(separator: ", "))

@@ -71,4 +71,41 @@ final class UsageParserTests: XCTestCase {
         XCTAssertEqual(snapshot.parseConfidence, .none)
         XCTAssertEqual(snapshot.message, "Account page loaded, but usage limits are not visible.")
     }
+
+    func testBillingModeSeparatesSubscriptionUsageFromPayAsYouGo() {
+        let included = UsageSnapshot(
+            accountID: UUID(),
+            provider: .claude,
+            includedRemaining: 69,
+            includedLimit: 100,
+            creditStatus: "Usage credits 70% used.",
+            riskLevel: .healthy,
+            source: "test",
+            parseConfidence: .high
+        )
+        XCTAssertEqual(included.billingUsageMode, .includedSubscription)
+
+        let nearLimit = UsageSnapshot(
+            accountID: UUID(),
+            provider: .claude,
+            includedRemaining: 12,
+            includedLimit: 100,
+            riskLevel: .warning,
+            source: "test",
+            parseConfidence: .high
+        )
+        XCTAssertEqual(nearLimit.billingUsageMode, .includedSubscriptionNearLimit)
+
+        let payAsYouGo = UsageSnapshot(
+            accountID: UUID(),
+            provider: .codex,
+            includedRemaining: 0,
+            includedLimit: 0,
+            creditStatus: "Credits enabled; auto top-up may apply.",
+            riskLevel: .depleted,
+            source: "test",
+            parseConfidence: .high
+        )
+        XCTAssertEqual(payAsYouGo.billingUsageMode, .overLimitPayAsYouGo)
+    }
 }

@@ -61,6 +61,7 @@ struct MenuRootView: View {
             }
 
             TopUsageSummaryView(profiles: state.profiles, snapshots: state.snapshots)
+            ActiveCLIAccountsView(identities: state.activeCLIIdentities, profiles: state.profiles)
         }
         .padding(14)
     }
@@ -131,11 +132,12 @@ struct AccountRowView: View {
                         Text(profile.label)
                             .font(.system(size: 13, weight: .semibold))
                         if profile.isActiveCLI {
-                            Text("CLI")
+                            Label("Active terminal", systemImage: "terminal.fill")
                                 .font(.caption2.weight(.semibold))
-                                .padding(.horizontal, 5)
+                                .foregroundStyle(.green)
+                                .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
-                                .background(Color.accentColor.opacity(0.18))
+                                .background(Color.green.opacity(0.16))
                                 .clipShape(RoundedRectangle(cornerRadius: 4))
                         }
                     }
@@ -155,6 +157,7 @@ struct AccountRowView: View {
             }
 
             UsageGauge(snapshot: snapshot, compact: true)
+            BillingStatusView(snapshot: snapshot, compact: true)
 
             HStack(spacing: 8) {
                 Button {
@@ -193,10 +196,6 @@ struct AccountRowView: View {
 
         if let resetDescription = snapshot.resetDescription {
             parts.append("Reset \(resetDescription)")
-        }
-
-        if let creditStatus = snapshot.creditStatus {
-            parts.append(creditStatus)
         }
 
         return parts.joined(separator: " • ")
@@ -268,6 +267,119 @@ struct AccountRowView: View {
     }
 }
 
+struct ActiveCLIAccountsView: View {
+    let identities: [Provider: AccountIdentity]
+    let profiles: [AccountProfile]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Image(systemName: "terminal.fill")
+                    .foregroundStyle(.secondary)
+                Text("Current Terminal Accounts")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+            }
+
+            HStack(spacing: 8) {
+                accountTile(provider: .claude)
+                accountTile(provider: .codex)
+            }
+        }
+    }
+
+    private func accountTile(provider: Provider) -> some View {
+        let identity = identities[provider]
+        let matchingProfile = identity.flatMap { identity in
+            profiles.first { profile in
+                profile.provider == provider
+                    && (profile.isActiveCLI || identitiesMatch(profile.identity, identity))
+            }
+        }
+        let hasIdentity = identity != nil
+        let iconName = provider == .claude ? "sparkles" : "terminal"
+        let accentColor: Color = hasIdentity ? .green : .secondary
+        let backgroundColor: Color = hasIdentity ? .green.opacity(0.10) : .gray.opacity(0.10)
+        let borderColor: Color = hasIdentity ? .green.opacity(0.24) : .gray.opacity(0.24)
+        let primaryText = identityPrimaryText(identity)
+        let detailText = identityDetailText(identity, matchingProfile: matchingProfile)
+
+        return HStack(alignment: .top, spacing: 7) {
+            Image(systemName: iconName)
+                .foregroundStyle(accentColor)
+                .frame(width: 14)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(provider.displayName)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                Text(primaryText)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+
+                Text(detailText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(backgroundColor)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(borderColor, lineWidth: 0.5)
+        )
+    }
+
+    private func identityPrimaryText(_ identity: AccountIdentity?) -> String {
+        identity?.primaryLabel ?? "Not signed in"
+    }
+
+    private func identityDetailText(_ identity: AccountIdentity?, matchingProfile: AccountProfile?) -> String {
+        guard let identity else {
+            return "No active CLI account detected"
+        }
+
+        var parts: [String] = []
+        if let organization = identity.organization, !organization.isEmpty {
+            parts.append(organization)
+        } else {
+            parts.append("Organization not read")
+        }
+
+        if let matchingProfile {
+            parts.append("Matches \(matchingProfile.label)")
+        }
+
+        return parts.joined(separator: " - ")
+    }
+
+    private func identitiesMatch(_ left: AccountIdentity?, _ right: AccountIdentity) -> Bool {
+        guard let left else {
+            return false
+        }
+
+        if let leftAccountID = left.accountID,
+           let rightAccountID = right.accountID,
+           leftAccountID == rightAccountID {
+            return true
+        }
+
+        if let leftEmail = left.email?.lowercased(),
+           let rightEmail = right.email?.lowercased(),
+           leftEmail == rightEmail {
+            return true
+        }
+
+        return false
+    }
+}
+
 struct TopUsageSummaryView: View {
     let profiles: [AccountProfile]
     let snapshots: [UUID: UsageSnapshot]
@@ -281,14 +393,15 @@ struct TopUsageSummaryView: View {
 
     private func summaryTile(provider: Provider) -> some View {
         let providerProfiles = profiles.filter { $0.provider == provider }
-        let worst = providerProfiles
+        let entries = providerProfiles
             .compactMap { profile -> (AccountProfile, UsageSnapshot)? in
                 guard let snapshot = snapshots[profile.id] else {
                     return nil
                 }
                 return (profile, snapshot)
             }
-            .max { left, right in
+        let worst = entries.first { $0.1.billingUsageMode == .overLimitPayAsYouGo }
+            ?? entries.max { left, right in
                 (left.1.usedFraction ?? -1) < (right.1.usedFraction ?? -1)
             }
 
@@ -297,9 +410,12 @@ struct TopUsageSummaryView: View {
                 .font(.caption.weight(.semibold))
 
             if let worst {
-                Text("\(Int(((worst.1.usedFraction ?? 0) * 100).rounded()))% used")
+                Text(summaryValue(for: worst.1))
                     .font(.title3.monospacedDigit().weight(.bold))
-                    .foregroundStyle(color(for: worst.1.riskLevel))
+                    .foregroundStyle(color(for: worst.1.billingUsageMode))
+                Text(shortBillingLabel(for: worst.1.billingUsageMode))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(color(for: worst.1.billingUsageMode))
                 Text(worst.0.label)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -323,6 +439,35 @@ struct TopUsageSummaryView: View {
         )
     }
 
+    private func summaryValue(for snapshot: UsageSnapshot) -> String {
+        if snapshot.billingUsageMode == .overLimitPayAsYouGo {
+            return "PAYG"
+        }
+
+        guard let usedFraction = snapshot.usedFraction else {
+            return "--"
+        }
+
+        return "\(Int((usedFraction * 100).rounded()))% used"
+    }
+
+    private func shortBillingLabel(for mode: BillingUsageMode) -> String {
+        switch mode {
+        case .includedSubscription:
+            return "Included subscription"
+        case .includedSubscriptionNearLimit:
+            return "Included, near limit"
+        case .overLimitPayAsYouGo:
+            return "Pay-as-you-go"
+        case .payAsYouGoVisible:
+            return "Credits visible"
+        case .needsLogin:
+            return "Needs login"
+        case .unknown:
+            return "Mode unknown"
+        }
+    }
+
     private func color(for riskLevel: RiskLevel) -> Color {
         switch riskLevel {
         case .healthy:
@@ -336,5 +481,159 @@ struct TopUsageSummaryView: View {
         case .unknown:
             return .secondary
         }
+    }
+
+    private func color(for mode: BillingUsageMode) -> Color {
+        switch mode {
+        case .includedSubscription:
+            return .green
+        case .includedSubscriptionNearLimit:
+            return .orange
+        case .overLimitPayAsYouGo:
+            return .red
+        case .payAsYouGoVisible:
+            return .orange
+        case .needsLogin:
+            return .yellow
+        case .unknown:
+            return .secondary
+        }
+    }
+}
+
+struct BillingStatusView: View {
+    let snapshot: UsageSnapshot?
+    let compact: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: icon)
+                .foregroundStyle(color)
+                .frame(width: 14)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(color)
+                    .lineLimit(1)
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(compact ? 2 : 3)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(color.opacity(0.11))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(color.opacity(0.25), lineWidth: 0.5)
+        )
+    }
+
+    private var mode: BillingUsageMode {
+        snapshot?.billingUsageMode ?? .unknown
+    }
+
+    private var title: String {
+        switch mode {
+        case .includedSubscription:
+            return "Using included subscription usage"
+        case .includedSubscriptionNearLimit:
+            return "Using subscription usage - near limit"
+        case .overLimitPayAsYouGo:
+            return "PAY-AS-YOU-GO / credits likely in use"
+        case .payAsYouGoVisible:
+            return "Pay-as-you-go status visible"
+        case .needsLogin:
+            return "Usage mode needs login"
+        case .unknown:
+            return "Usage mode unknown"
+        }
+    }
+
+    private var detail: String {
+        guard let snapshot else {
+            return "No usage snapshot yet."
+        }
+
+        var parts: [String] = []
+        switch mode {
+        case .includedSubscription:
+            parts.append(includedUsageText(snapshot, prefix: "Included subscription"))
+            parts.append("Not over the included limit.")
+        case .includedSubscriptionNearLimit:
+            parts.append(includedUsageText(snapshot, prefix: "Included subscription"))
+            parts.append("Extra credits may apply after the included limit.")
+        case .overLimitPayAsYouGo:
+            parts.append("Included usage appears depleted or unavailable.")
+            parts.append("Extra usage may be billed through credits/pay-as-you-go.")
+        case .payAsYouGoVisible:
+            parts.append("Credit/pay-as-you-go data was found, but included usage is unclear.")
+        case .needsLogin:
+            parts.append("Connect or refresh this account before trusting billing mode.")
+        case .unknown:
+            parts.append(snapshot.message.isEmpty ? "No billing mode signal was recognized." : snapshot.message)
+        }
+
+        if let creditStatus = snapshot.creditStatus, !creditStatus.isEmpty {
+            parts.append(creditStatus)
+        }
+
+        return parts.joined(separator: " ")
+    }
+
+    private var icon: String {
+        switch mode {
+        case .includedSubscription:
+            return "checkmark.circle.fill"
+        case .includedSubscriptionNearLimit:
+            return "exclamationmark.triangle.fill"
+        case .overLimitPayAsYouGo:
+            return "creditcard.fill"
+        case .payAsYouGoVisible:
+            return "creditcard"
+        case .needsLogin:
+            return "person.crop.circle.badge.exclamationmark"
+        case .unknown:
+            return "questionmark.circle"
+        }
+    }
+
+    private var color: Color {
+        switch mode {
+        case .includedSubscription:
+            return .green
+        case .includedSubscriptionNearLimit:
+            return .orange
+        case .overLimitPayAsYouGo:
+            return .red
+        case .payAsYouGoVisible:
+            return .orange
+        case .needsLogin:
+            return .yellow
+        case .unknown:
+            return .gray
+        }
+    }
+
+    private func includedUsageText(_ snapshot: UsageSnapshot, prefix: String) -> String {
+        if let used = snapshot.usedFraction {
+            return "\(prefix): \(Int((used * 100).rounded()))% used."
+        }
+        if let remaining = snapshot.includedRemaining, let limit = snapshot.includedLimit {
+            return "\(prefix): \(format(remaining)) / \(format(limit)) remaining."
+        }
+        return "\(prefix): usage amount recognized."
+    }
+
+    private func format(_ value: Double) -> String {
+        if value.rounded() == value {
+            return String(Int(value))
+        }
+        return String(format: "%.1f", value)
     }
 }
