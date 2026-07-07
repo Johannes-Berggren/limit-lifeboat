@@ -6,12 +6,14 @@ import UserNotifications
 import WebKit
 
 struct MenuBarSummary: Equatable {
-    var title: String
+    var claudeValue: String
+    var codexValue: String
     var accessibilityText: String
     var riskLevel: RiskLevel
 
     static let empty = MenuBarSummary(
-        title: "Claude –  Codex –",
+        claudeValue: "–",
+        codexValue: "–",
         accessibilityText: "LLM usage has not been refreshed.",
         riskLevel: .unknown
     )
@@ -465,35 +467,27 @@ final class AppState: ObservableObject {
 
     private func updateMenuBarSummary() {
         menuBarSummary = MenuBarSummary(
-            title: "\(providerUsageTitle(.claude))  \(providerUsageTitle(.codex))",
+            claudeValue: providerUsageValue(.claude),
+            codexValue: providerUsageValue(.codex),
             accessibilityText: accessibilitySummary(),
             riskLevel: highestRisk()
         )
     }
 
-    private func providerShortName(_ provider: Provider) -> String {
-        switch provider {
-        case .claude:
-            return "Claude"
-        case .codex:
-            return "Codex"
-        }
-    }
-
-    private func providerUsageTitle(_ provider: Provider) -> String {
+    private func providerUsageValue(_ provider: Provider) -> String {
         guard let profile = activeProfile(for: provider),
               let snapshot = snapshots[profile.id] else {
-            return "\(providerShortName(provider)) –"
+            return "–"
         }
 
         if snapshot.billingUsageMode == .overLimitPayAsYouGo {
-            return "\(providerShortName(provider)) PAYG"
+            return "PAYG"
         }
 
         guard let used = snapshot.usedFraction else {
-            return "\(providerShortName(provider)) –"
+            return "–"
         }
-        return "\(providerShortName(provider)) \(Int((used * 100).rounded()))%"
+        return "\(Int((used * 100).rounded()))%"
     }
 
     /// Menu-bar risk reflects the accounts the terminal is actually using;

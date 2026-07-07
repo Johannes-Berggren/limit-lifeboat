@@ -49,15 +49,40 @@ final class MenuBarController {
             return
         }
 
-        button.image = NSImage(
+        var image = NSImage(
             systemSymbolName: imageName(for: summary.riskLevel),
             accessibilityDescription: summary.accessibilityText
         )
-        button.image?.isTemplate = true
+        if summary.riskLevel == .depleted {
+            image = image?.withSymbolConfiguration(
+                NSImage.SymbolConfiguration(paletteColors: [.systemRed])
+            )
+            image?.isTemplate = false
+        } else {
+            image?.isTemplate = true
+        }
+        button.image = image
         button.toolTip = summary.accessibilityText
         button.contentTintColor = nil
-        button.font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
-        button.title = " \(titlePrefix(for: summary.riskLevel))\(summary.title)"
+        button.attributedTitle = attributedTitle(claude: summary.claudeValue, codex: summary.codexValue)
+    }
+
+    private func attributedTitle(claude: String, codex: String) -> NSAttributedString {
+        let labelAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: NSColor.secondaryLabelColor
+        ]
+        let valueAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold),
+            .foregroundColor: NSColor.labelColor
+        ]
+
+        let title = NSMutableAttributedString()
+        title.append(NSAttributedString(string: " Claude ", attributes: labelAttributes))
+        title.append(NSAttributedString(string: claude, attributes: valueAttributes))
+        title.append(NSAttributedString(string: " · Codex ", attributes: labelAttributes))
+        title.append(NSAttributedString(string: codex, attributes: valueAttributes))
+        return title
     }
 
     private func imageName(for riskLevel: RiskLevel) -> String {
@@ -75,16 +100,4 @@ final class MenuBarController {
         }
     }
 
-    private func titlePrefix(for riskLevel: RiskLevel) -> String {
-        switch riskLevel {
-        case .depleted:
-            return "!! "
-        case .warning:
-            return "! "
-        case .stale:
-            return "? "
-        case .healthy, .unknown:
-            return ""
-        }
-    }
 }

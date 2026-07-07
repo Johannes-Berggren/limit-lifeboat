@@ -48,7 +48,7 @@ struct DashboardContainerView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                Label(profile.label, systemImage: profile.provider == .claude ? "sparkles" : "terminal")
+                ProviderLabel(text: profile.label, provider: profile.provider)
                     .font(.headline)
 
                 Spacer()
@@ -73,7 +73,7 @@ struct DashboardContainerView: View {
                     Label("Read Page", systemImage: "text.viewfinder")
                 }
             }
-            .padding(10)
+            .padding(DS.Spacing.md)
 
             if let notice {
                 DashboardNoticeView(notice: notice)
@@ -199,6 +199,7 @@ struct DashboardNoticeView: View {
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: imageName)
+                .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(color)
             Text(notice.message)
                 .font(.caption)
