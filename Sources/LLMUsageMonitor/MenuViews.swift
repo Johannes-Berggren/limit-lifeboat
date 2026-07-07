@@ -95,13 +95,8 @@ struct MenuRootView: View {
 
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Label {
-                    Text(provider.displayName)
-                } icon: {
-                    Image(systemName: DS.providerSymbol(provider))
-                        .foregroundStyle(DS.providerAccent(provider))
-                }
-                .font(.subheadline.weight(.semibold))
+                ProviderLabel(text: provider.displayName, provider: provider)
+                    .font(.subheadline.weight(.semibold))
 
                 Spacer()
 
@@ -336,15 +331,10 @@ struct TopUsageSummaryView: View {
         let snapshot = active.flatMap { snapshots[$0.id] }
 
         return VStack(alignment: .leading, spacing: 6) {
-            Label {
-                Text(provider.displayName)
-            } icon: {
-                Image(systemName: DS.providerSymbol(provider))
-                    .foregroundStyle(DS.providerAccent(provider))
-            }
-            .font(.caption.weight(.semibold))
+            ProviderLabel(text: provider.displayName, provider: provider)
+                .font(.caption.weight(.semibold))
 
-            if let active, let snapshot {
+            if let snapshot {
                 Text(summaryValue(for: snapshot))
                     .font(.title3.monospacedDigit().weight(.semibold))
                     .foregroundStyle(DS.billingColor(snapshot.billingUsageMode))
@@ -354,27 +344,21 @@ struct TopUsageSummaryView: View {
                     text: shortBillingLabel(for: snapshot.billingUsageMode),
                     color: DS.billingColor(snapshot.billingUsageMode)
                 )
-                HStack(spacing: DS.Spacing.xs) {
-                    Image(systemName: "terminal.fill")
-                    Text(active.label)
-                        .lineLimit(1)
-                }
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .help("Active terminal account: \(active.label)")
             } else {
                 Text("–")
                     .font(.title3.monospacedDigit().weight(.semibold))
                     .foregroundStyle(.secondary)
                 Badge(text: "No snapshot", color: .gray)
-                HStack(spacing: DS.Spacing.xs) {
-                    Image(systemName: "terminal.fill")
-                    Text(active?.label ?? "No active CLI account")
-                        .lineLimit(1)
-                }
-                .font(.caption2)
-                .foregroundStyle(.secondary)
             }
+
+            HStack(spacing: DS.Spacing.xs) {
+                Image(systemName: "terminal.fill")
+                Text(active?.label ?? "No active CLI account")
+                    .lineLimit(1)
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .help(active.map { "Active terminal account: \($0.label)" } ?? "No active CLI account detected")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(DS.Spacing.cardPadding)
@@ -440,7 +424,7 @@ struct BillingStatusView: View {
                 .lineLimit(1)
             Text(detail)
                 .font(.caption2)
-                .foregroundStyle(compact ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.secondary))
+                .foregroundStyle(compact ? .tertiary : .secondary)
                 .lineLimit(compact ? 2 : 3)
         }
     }

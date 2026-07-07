@@ -6,14 +6,12 @@ import UserNotifications
 import WebKit
 
 struct MenuBarSummary: Equatable {
-    var title: String
     var claudeValue: String
     var codexValue: String
     var accessibilityText: String
     var riskLevel: RiskLevel
 
     static let empty = MenuBarSummary(
-        title: "Claude –  Codex –",
         claudeValue: "–",
         codexValue: "–",
         accessibilityText: "LLM usage has not been refreshed.",
@@ -469,25 +467,11 @@ final class AppState: ObservableObject {
 
     private func updateMenuBarSummary() {
         menuBarSummary = MenuBarSummary(
-            title: "\(providerUsageTitle(.claude))  \(providerUsageTitle(.codex))",
             claudeValue: providerUsageValue(.claude),
             codexValue: providerUsageValue(.codex),
             accessibilityText: accessibilitySummary(),
             riskLevel: highestRisk()
         )
-    }
-
-    private func providerShortName(_ provider: Provider) -> String {
-        switch provider {
-        case .claude:
-            return "Claude"
-        case .codex:
-            return "Codex"
-        }
-    }
-
-    private func providerUsageTitle(_ provider: Provider) -> String {
-        "\(providerShortName(provider)) \(providerUsageValue(provider))"
     }
 
     private func providerUsageValue(_ provider: Provider) -> String {

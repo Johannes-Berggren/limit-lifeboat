@@ -48,13 +48,8 @@ struct DashboardContainerView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                Label {
-                    Text(profile.label)
-                } icon: {
-                    Image(systemName: DS.providerSymbol(profile.provider))
-                        .foregroundStyle(DS.providerAccent(profile.provider))
-                }
-                .font(.headline)
+                ProviderLabel(text: profile.label, provider: profile.provider)
+                    .font(.headline)
 
                 Spacer()
 

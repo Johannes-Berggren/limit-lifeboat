@@ -63,6 +63,20 @@ enum DS {
     }
 }
 
+struct ProviderLabel: View {
+    let text: String
+    let provider: Provider
+
+    var body: some View {
+        Label {
+            Text(text)
+        } icon: {
+            Image(systemName: DS.providerSymbol(provider))
+                .foregroundStyle(DS.providerAccent(provider))
+        }
+    }
+}
+
 struct Badge: View {
     let text: String
     var systemImage: String?
