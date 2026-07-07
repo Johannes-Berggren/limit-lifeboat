@@ -44,10 +44,12 @@ public struct ClaudeCodeUsageReport: Equatable, Sendable {
             provider: .claude,
             includedRemaining: max(0, 100 - usedPercent),
             includedLimit: 100,
-            resetDate: nil,
+            resetDate: selectedLimit.resetDescription.flatMap {
+                ClaudeResetDateParser().parse($0, now: now)
+            },
             resetDescription: selectedLimit.resetDescription,
             creditStatus: creditStatus,
-            riskLevel: riskLevel(usedPercent: usedPercent),
+            riskLevel: UsageThresholds.standard.riskLevel(usedPercent: usedPercent),
             source: Self.source,
             lastRefreshed: now,
             parseConfidence: .high,
@@ -82,16 +84,6 @@ public struct ClaudeCodeUsageReport: Equatable, Sendable {
             return "weekly \(organization)"
         }
         return name
-    }
-
-    private func riskLevel(usedPercent: Double) -> RiskLevel {
-        if usedPercent >= 100 {
-            return .depleted
-        }
-        if usedPercent >= 80 {
-            return .warning
-        }
-        return .healthy
     }
 
     private func firstCapture(_ pattern: String, in text: String) -> String? {

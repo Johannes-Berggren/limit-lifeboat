@@ -34,6 +34,11 @@ struct MenuRootView: View {
                     Text(lastRefreshText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if let stage = state.refreshStage {
+                        Text(stage)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
                 }
 
                 Spacer()
@@ -53,12 +58,23 @@ struct MenuRootView: View {
                     .frame(width: 24, height: 24)
                 }
                 .buttonStyle(.borderless)
-                .help("Refresh usage")
+                .help("Refresh usage (⌘R)")
                 .accessibilityLabel("Refresh usage")
+                .keyboardShortcut("r", modifiers: .command)
                 .disabled(state.isRefreshing)
             }
 
             TopUsageSummaryView(profiles: state.profiles, snapshots: state.snapshots)
+
+            if let update = state.availableUpdate {
+                Button {
+                    state.openAvailableUpdate()
+                } label: {
+                    Label("Version \(update.version) is available — download", systemImage: "arrow.down.circle")
+                        .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.link)
+            }
         }
         .padding(DS.Spacing.md)
     }
@@ -71,6 +87,19 @@ struct MenuRootView: View {
                 .lineLimit(2)
 
             Spacer()
+
+            Text("v\(AppInfo.version)")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+
+            Button {
+                state.openSettings()
+            } label: {
+                Image(systemName: "gearshape")
+            }
+            .buttonStyle(.borderless)
+            .help("Settings (⌘,)")
+            .keyboardShortcut(",", modifiers: .command)
 
             Button("Quit") {
                 state.quit()
@@ -251,11 +280,14 @@ struct AccountRowView: View {
     }
 
     private var staleness: (text: String, isOpportunity: Bool)? {
-        guard let snapshot, !profile.isActiveCLI else {
+        guard let snapshot else {
             return nil
         }
 
-        if snapshot.resetHasElapsed() {
+        // The opportunity label stays inactive-only: for the active account a
+        // refresh simply confirms the reset, but stale readings deserve a
+        // flag on every row — active accounts drift too (sleep, failures).
+        if !profile.isActiveCLI, snapshot.resetHasElapsed() {
             return ("Limit window elapsed — likely full quota again", true)
         }
 

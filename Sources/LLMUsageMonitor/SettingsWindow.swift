@@ -1,0 +1,128 @@
+import AppKit
+import ServiceManagement
+import SwiftUI
+
+@MainActor
+final class SettingsWindowController {
+    private var window: NSWindow?
+
+    func show(state: AppState) {
+        if window == nil {
+            let hosting = NSHostingController(rootView: SettingsView(state: state, settings: state.settings))
+            let window = NSWindow(contentViewController: hosting)
+            window.title = "LLM Usage Monitor Settings"
+            window.styleMask = [.titled, .closable]
+            window.isReleasedWhenClosed = false
+            window.center()
+            self.window = window
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+    }
+}
+
+enum LaunchAtLogin {
+    /// SMAppService requires a real bundle; guard so an unbundled `swift run`
+    /// does not crash (same constraint as notifications).
+    static var isSupported: Bool {
+        Bundle.main.bundleIdentifier != nil
+    }
+
+    static var isEnabled: Bool {
+        guard isSupported else {
+            return false
+        }
+        return SMAppService.mainApp.status == .enabled
+    }
+
+    static func set(enabled: Bool) throws {
+        guard isSupported else {
+            return
+        }
+        if enabled {
+            try SMAppService.mainApp.register()
+        } else {
+            try SMAppService.mainApp.unregister()
+        }
+    }
+}
+
+struct SettingsView: View {
+    @ObservedObject var state: AppState
+    @ObservedObject var settings: SettingsStore
+
+    @State private var launchAtLogin = LaunchAtLogin.isEnabled
+    @State private var launchAtLoginMessage: String?
+    @State private var isCheckingForUpdates = false
+    @State private var upToDateMessage: String?
+
+    var body: some View {
+        Form {
+            Section("General") {
+                Picker("Refresh usage every", selection: $settings.refreshIntervalMinutes) {
+                    ForEach(SettingsStore.refreshIntervalOptions, id: \.self) { minutes in
+                        Text("\(minutes) minutes").tag(minutes)
+                    }
+                }
+
+                Toggle("Launch at login", isOn: $launchAtLogin)
+                    .onChange(of: launchAtLogin) { _, newValue in
+                        applyLaunchAtLogin(newValue)
+                    }
+                    .disabled(!LaunchAtLogin.isSupported)
+                if let launchAtLoginMessage {
+                    Text(launchAtLoginMessage)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+
+            Section("Notifications") {
+                Toggle("Warn when included usage nears its limit", isOn: $settings.usageAlertsEnabled)
+                Toggle("Alert when an account's quota is likely back", isOn: $settings.resetAlertsEnabled)
+            }
+
+            Section("Updates") {
+                LabeledContent("Version", value: AppInfo.version)
+                if let update = state.availableUpdate {
+                    Button("Download version \(update.version)…") {
+                        state.openAvailableUpdate()
+                    }
+                } else {
+                    Button(isCheckingForUpdates ? "Checking…" : "Check for Updates") {
+                        checkForUpdates()
+                    }
+                    .disabled(isCheckingForUpdates)
+                    if let upToDateMessage {
+                        Text(upToDateMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 420)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func applyLaunchAtLogin(_ enabled: Bool) {
+        do {
+            try LaunchAtLogin.set(enabled: enabled)
+            launchAtLoginMessage = nil
+        } catch {
+            launchAtLogin = LaunchAtLogin.isEnabled
+            launchAtLoginMessage = "Could not update the login item: \(error.localizedDescription)"
+        }
+    }
+
+    private func checkForUpdates() {
+        isCheckingForUpdates = true
+        upToDateMessage = nil
+        Task {
+            let found = await state.checkForUpdatesNow()
+            upToDateMessage = found ? nil : "You're up to date."
+            isCheckingForUpdates = false
+        }
+    }
+}

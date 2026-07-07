@@ -81,6 +81,34 @@ public enum ParseConfidence: String, Codable, Sendable {
     case none
 }
 
+/// The single home for the "how close to the limit is worrying" and "how old
+/// is too old" numbers, so every reader and view agrees.
+public struct UsageThresholds: Equatable, Sendable {
+    public var warningUsedFraction: Double
+    public var staleAfter: TimeInterval
+
+    public static let standard = UsageThresholds()
+
+    public init(warningUsedFraction: Double = 0.8, staleAfter: TimeInterval = 30 * 60) {
+        self.warningUsedFraction = warningUsedFraction
+        self.staleAfter = staleAfter
+    }
+
+    public func riskLevel(usedFraction: Double) -> RiskLevel {
+        if usedFraction >= 1 {
+            return .depleted
+        }
+        if usedFraction >= warningUsedFraction {
+            return .warning
+        }
+        return .healthy
+    }
+
+    public func riskLevel(usedPercent: Double) -> RiskLevel {
+        riskLevel(usedFraction: usedPercent / 100)
+    }
+}
+
 public enum BillingUsageMode: String, Sendable {
     case includedSubscription
     case includedSubscriptionNearLimit
@@ -306,7 +334,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         return max(0, min(1, 1 - remainingFraction))
     }
 
-    public func isStale(asOf now: Date = Date(), maxAge: TimeInterval = 30 * 60) -> Bool {
+    public func isStale(asOf now: Date = Date(), maxAge: TimeInterval = UsageThresholds.standard.staleAfter) -> Bool {
         now.timeIntervalSince(lastRefreshed) > maxAge
     }
 
@@ -329,7 +357,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         }
 
         if let usedFraction {
-            if usedFraction >= 0.8 {
+            if usedFraction >= UsageThresholds.standard.warningUsedFraction {
                 return .includedSubscriptionNearLimit
             }
             return .includedSubscription

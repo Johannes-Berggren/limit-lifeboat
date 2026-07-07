@@ -24,8 +24,12 @@ final class AppState: ObservableObject {
     @Published private(set) var profiles: [AccountProfile]
     @Published private(set) var snapshots: [UUID: UsageSnapshot]
     @Published private(set) var isRefreshing = false
+    @Published private(set) var refreshStage: String?
+    @Published private(set) var availableUpdate: AvailableUpdate?
     @Published var menuBarSummary: MenuBarSummary = .empty
     @Published var statusMessage = ""
+
+    let settings: SettingsStore
 
     private let repository: ProfileRepository
     private let cliSwitcher: CLISwitcher
@@ -36,29 +40,89 @@ final class AppState: ObservableObject {
     private let claudeCodeUsageReader = ClaudeCodeUsageReader()
     private let dashboardWindowManager = DashboardWindowManager()
     private let usageAlertController = UsageAlertController()
+    private let resetAlertPlanner = ResetAlertPlanner()
+    private let updateService = UpdateService()
+    private let settingsWindowController = SettingsWindowController()
     private var refreshTask: Task<Void, Never>?
+    private var wakeObserver: NSObjectProtocol?
+    private var cancellables: Set<AnyCancellable> = []
 
-    init(repository: ProfileRepository, cliSwitcher: CLISwitcher) throws {
+    init(repository: ProfileRepository, cliSwitcher: CLISwitcher, settings: SettingsStore? = nil) throws {
         self.repository = repository
         self.cliSwitcher = cliSwitcher
+        self.settings = settings ?? SettingsStore()
         self.profiles = try repository.loadProfiles()
         self.snapshots = try repository.loadUsageSnapshots()
         updateMenuBarSummary()
         usageAlertController.requestAuthorization()
+        observeWake()
+
+        self.settings.$refreshIntervalMinutes
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                guard let self, self.refreshTask != nil else {
+                    return
+                }
+                self.startBackgroundRefresh()
+            }
+            .store(in: &cancellables)
     }
 
     deinit {
         refreshTask?.cancel()
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+        }
     }
 
     func startBackgroundRefresh() {
         refreshTask?.cancel()
         refreshTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 600_000_000_000)
+                let minutes = self?.settings.refreshIntervalMinutes ?? 10
+                try? await Task.sleep(nanoseconds: UInt64(max(1, minutes)) * 60_000_000_000)
                 await self?.refreshAll()
             }
         }
+    }
+
+    /// The `Task.sleep` loop does not fire while the Mac sleeps, so the menu
+    /// bar would otherwise show hours-old numbers after wake.
+    private func observeWake() {
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                // Give the network and the CLIs a moment to come back.
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                await self?.refreshAll()
+            }
+        }
+    }
+
+    /// Called when the popover opens: Codex is a cheap local file scan and is
+    /// always re-read; the Claude probe spawns the CLI for up to 20 seconds,
+    /// so it only runs when its snapshot has outlived the refresh interval.
+    func refreshIfStale() {
+        refreshActiveCodexUsage()
+        if shouldProbeClaudeNow() {
+            Task { await refreshAll() }
+        } else {
+            updateMenuBarSummary()
+        }
+    }
+
+    private func shouldProbeClaudeNow() -> Bool {
+        guard !isRefreshing, let profile = activeProfile(for: .claude) else {
+            return false
+        }
+        guard let snapshot = snapshots[profile.id] else {
+            return true
+        }
+        return snapshot.isStale(maxAge: TimeInterval(settings.refreshIntervalMinutes * 60))
     }
 
     // MARK: - Refresh (local-first)
@@ -86,7 +150,25 @@ final class AppState: ObservableObject {
         // whether the limit window has already reset.
         await refreshActiveClaudeCodeUsage()
         refreshActiveCodexUsage()
+        notifyElapsedResets()
         updateMenuBarSummary()
+        await checkForUpdatesIfDue()
+    }
+
+    /// The app's core alert: an inactive account that was near or past its
+    /// limit has had its window roll over — its quota is likely back.
+    private func notifyElapsedResets() {
+        guard settings.resetAlertsEnabled else {
+            return
+        }
+        let alerts = resetAlertPlanner.alerts(
+            profiles: profiles,
+            snapshots: snapshots,
+            alreadyNotified: usageAlertController.notifiedResetDates()
+        )
+        for alert in alerts {
+            usageAlertController.handleResetElapsed(alert)
+        }
     }
 
     func activeProfile(for provider: Provider) -> AccountProfile? {
@@ -180,6 +262,9 @@ final class AppState: ObservableObject {
             return
         }
 
+        refreshStage = "Reading Claude Code /usage — can take ~20 seconds…"
+        defer { refreshStage = nil }
+
         do {
             let report = try await claudeCodeUsageReader.readUsage()
             if let identity = report.identity {
@@ -203,7 +288,9 @@ final class AppState: ObservableObject {
     private func applySnapshot(_ snapshot: UsageSnapshot, for profile: AccountProfile) {
         snapshots[profile.id] = snapshot
         updateMenuBarSummary()
-        usageAlertController.handle(snapshot: snapshot, profile: profile)
+        if settings.usageAlertsEnabled {
+            usageAlertController.handle(snapshot: snapshot, profile: profile)
+        }
         saveSnapshots()
         statusMessage = "\(profile.label): \(snapshot.message)"
     }
@@ -390,6 +477,34 @@ final class AppState: ObservableObject {
         NSApplication.shared.terminate(nil)
     }
 
+    func openSettings() {
+        settingsWindowController.show(state: self)
+    }
+
+    // MARK: - Updates
+
+    private func checkForUpdatesIfDue() async {
+        if let lastCheck = settings.lastUpdateCheck,
+           lastCheck > Date().addingTimeInterval(-24 * 60 * 60) {
+            return
+        }
+        await checkForUpdatesNow()
+    }
+
+    @discardableResult
+    func checkForUpdatesNow() async -> Bool {
+        settings.lastUpdateCheck = Date()
+        availableUpdate = await updateService.fetchAvailableUpdate()
+        return availableUpdate != nil
+    }
+
+    func openAvailableUpdate() {
+        guard let availableUpdate else {
+            return
+        }
+        NSWorkspace.shared.open(availableUpdate.url)
+    }
+
     // MARK: - Identity
 
     private func updateIdentity(_ identity: AccountIdentity, for profile: AccountProfile) {
@@ -474,44 +589,54 @@ final class AppState: ObservableObject {
         )
     }
 
+    /// "–" = no active CLI login, "?" = active but not read yet, and a
+    /// trailing "*" marks numbers that are stale and may no longer be true.
     private func providerUsageValue(_ provider: Provider) -> String {
-        guard let profile = activeProfile(for: provider),
-              let snapshot = snapshots[profile.id] else {
+        guard let profile = activeProfile(for: provider) else {
             return "–"
         }
+        guard let snapshot = snapshots[profile.id] else {
+            return "?"
+        }
 
+        let staleMark = snapshot.isStale() ? "*" : ""
         if snapshot.billingUsageMode == .overLimitPayAsYouGo {
-            return "PAYG"
+            return "PAYG\(staleMark)"
         }
 
         guard let used = snapshot.usedFraction else {
-            return "–"
+            return "?"
         }
-        return "\(Int((used * 100).rounded()))%"
+        return "\(Int((used * 100).rounded()))%\(staleMark)"
     }
 
     /// Menu-bar risk reflects the accounts the terminal is actually using;
     /// a stale inactive account must not paint warning glyphs.
     private func highestRisk() -> RiskLevel {
         let activeProfiles = Provider.allCases.compactMap { activeProfile(for: $0) }
-        let snapshotRisk = activeProfiles.compactMap { snapshots[$0.id]?.riskLevel }.min() ?? .unknown
-        let thresholdRisk = activeProfiles
-            .compactMap { snapshots[$0.id]?.usedFraction }
-            .map { used -> RiskLevel in
-                if used >= 1 {
-                    return .depleted
-                }
-                if used >= 0.8 {
-                    return .warning
-                }
-                return .healthy
-            }
+        let activeSnapshots = activeProfiles.compactMap { snapshots[$0.id] }
+        let snapshotRisk = activeSnapshots.map(\.riskLevel).min() ?? .unknown
+        let thresholdRisk = activeSnapshots
+            .compactMap(\.usedFraction)
+            .map(UsageThresholds.standard.riskLevel(usedFraction:))
             .min() ?? .unknown
 
-        return min(snapshotRisk, thresholdRisk)
+        let risk = min(snapshotRisk, thresholdRisk)
+        // An okay-looking number that has not been re-read in a long time is
+        // not okay — it is unknown. Real warnings still win.
+        if risk == .healthy || risk == .unknown,
+           !activeSnapshots.isEmpty,
+           activeSnapshots.allSatisfy({ $0.isStale() }) {
+            return .stale
+        }
+        return risk
     }
 
     private func accessibilitySummary() -> String {
+        guard !profiles.isEmpty else {
+            return "No accounts yet. Log into Claude Code or Codex in the terminal to register one."
+        }
+
         var parts: [String] = []
         for provider in Provider.allCases {
             guard let profile = activeProfile(for: provider),
@@ -536,11 +661,16 @@ final class AppState: ObservableObject {
                 mode = "usage mode unknown"
             }
 
+            var entry: String
             if let used = snapshot.usedFraction {
-                parts.append("\(provider.displayName) active account \(profile.label) \(Int((used * 100).rounded())) percent used, \(mode)")
+                entry = "\(provider.displayName) active account \(profile.label) \(Int((used * 100).rounded())) percent used, \(mode)"
             } else {
-                parts.append("\(provider.displayName) active account \(profile.label) \(mode)")
+                entry = "\(provider.displayName) active account \(profile.label) \(mode)"
             }
+            if snapshot.isStale() {
+                entry += ", last checked \(snapshot.lastRefreshed.formatted(.relative(presentation: .named)))"
+            }
+            parts.append(entry)
         }
         return parts.joined(separator: ". ")
     }
@@ -549,6 +679,44 @@ final class AppState: ObservableObject {
 @MainActor
 final class UsageAlertController {
     private var lastNotifiedRisk: [UUID: RiskLevel] = [:]
+    private let notifiedResetsKey = "notifiedResetDates"
+
+    /// Reset alerts survive relaunches (persisted, keyed by reset date) so a
+    /// restart does not re-announce quotas that were already reported back.
+    func notifiedResetDates() -> [UUID: Date] {
+        let stored = UserDefaults.standard.dictionary(forKey: notifiedResetsKey) as? [String: Double] ?? [:]
+        var result: [UUID: Date] = [:]
+        for (key, value) in stored {
+            guard let id = UUID(uuidString: key) else {
+                continue
+            }
+            result[id] = Date(timeIntervalSince1970: value)
+        }
+        return result
+    }
+
+    func handleResetElapsed(_ alert: ResetAlert) {
+        var stored = UserDefaults.standard.dictionary(forKey: notifiedResetsKey) as? [String: Double] ?? [:]
+        stored[alert.profileID.uuidString] = alert.resetDate.timeIntervalSince1970
+        UserDefaults.standard.set(stored, forKey: notifiedResetsKey)
+
+        guard Bundle.main.bundleIdentifier != nil else {
+            return
+        }
+
+        let content = UNMutableNotificationContent()
+        content.title = "\(alert.profileLabel) likely has its full quota back"
+        content.body = "The \(alert.provider.displayName) limit window has rolled over since the last reading. Switch the CLI to \(alert.profileLabel) to keep using included usage."
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: "reset-\(alert.profileID.uuidString)-\(Int(alert.resetDate.timeIntervalSince1970))",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
+        NSApplication.shared.requestUserAttention(.informationalRequest)
+    }
 
     func requestAuthorization() {
         // UNUserNotificationCenter requires a real bundle; guard so an
