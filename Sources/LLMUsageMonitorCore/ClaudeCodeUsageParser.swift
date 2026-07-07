@@ -38,7 +38,7 @@ public struct ClaudeCodeUsageReport: Equatable, Sendable {
             )
         }
 
-        let windows = limits.map { makeWindow(from: $0, now: now) }
+        let windows = dedupeWindows(limits.map { makeWindow(from: $0, now: now) })
         let usedPercent = min(100, max(0, selectedLimit.usedPercent))
         return UsageSnapshot(
             accountID: account.id,
@@ -72,6 +72,21 @@ public struct ClaudeCodeUsageReport: Equatable, Sendable {
             windowMinutes: nil,
             riskLevel: UsageThresholds.standard.riskLevel(usedPercent: usedPercent)
         )
+    }
+
+    /// Multi-frame TUI captures can repeat a section, so limits may map to the
+    /// same window id. Keep the last occurrence per id so SwiftUI ForEach never
+    /// sees duplicate identifiers.
+    private func dedupeWindows(_ windows: [UsageWindow]) -> [UsageWindow] {
+        var orderedIDs: [String] = []
+        var lastByID: [String: UsageWindow] = [:]
+        for window in windows {
+            if lastByID[window.id] == nil {
+                orderedIDs.append(window.id)
+            }
+            lastByID[window.id] = window
+        }
+        return orderedIDs.compactMap { lastByID[$0] }
     }
 
     private func windowDescriptor(for name: String) -> (id: String, kind: UsageWindowKind, label: String) {
@@ -186,7 +201,30 @@ public struct ClaudeCodeUsageOutputParser: Sendable {
         }
         flushCurrent()
 
-        return limits
+        return dedupeLimits(limits)
+    }
+
+    /// The expect probe captures the /usage TUI across progressive redraw
+    /// frames, so the same section can be parsed several times. Keep one limit
+    /// per section: later frames are usually more complete, but never trade a
+    /// reset description away for an occurrence without one.
+    private func dedupeLimits(_ limits: [ClaudeCodeUsageLimit]) -> [ClaudeCodeUsageLimit] {
+        var orderedKeys: [String] = []
+        var bestByKey: [String: ClaudeCodeUsageLimit] = [:]
+
+        for limit in limits {
+            let key = canonicalize(limit.name).lowercased()
+            guard let existing = bestByKey[key] else {
+                orderedKeys.append(key)
+                bestByKey[key] = limit
+                continue
+            }
+            if limit.resetDescription != nil || existing.resetDescription == nil {
+                bestByKey[key] = limit
+            }
+        }
+
+        return orderedKeys.compactMap { bestByKey[$0] }
     }
 
     private func parseLimit(name: String, lines: [String]) -> ClaudeCodeUsageLimit? {

@@ -283,6 +283,21 @@ public enum UsageWindowKind: String, Codable, Sendable {
     case weekly         // Claude "weekly all models" / Codex secondary (10080 min)
     case weeklyScoped   // Claude "current week (<org/model>)"
     case other
+
+    /// Display order: the short session window first, then the broad weekly
+    /// windows, with anything unrecognized last.
+    public var sortRank: Int {
+        switch self {
+        case .session:
+            return 0
+        case .weekly:
+            return 1
+        case .weeklyScoped:
+            return 2
+        case .other:
+            return 3
+        }
+    }
 }
 
 /// One rate-limit window a subscription reports (e.g. the ~5h session window
@@ -423,6 +438,38 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
                 riskLevel: riskLevel
             )
         ]
+    }
+
+    /// `displayWindows` cleaned up for presentation: snapshots persisted from
+    /// mangled captures can carry duplicate window ids, so duplicates collapse
+    /// to the last occurrence (the freshest reading), then the result is
+    /// stable-sorted session → weekly → weeklyScoped → other, tie-breaking
+    /// on label.
+    public var orderedDisplayWindows: [UsageWindow] {
+        var deduped: [UsageWindow] = []
+        for window in displayWindows {
+            if let existing = deduped.firstIndex(where: { $0.id == window.id }) {
+                deduped.remove(at: existing)
+            }
+            deduped.append(window)
+        }
+        return deduped.sorted { left, right in
+            if left.kind.sortRank != right.kind.sortRank {
+                return left.kind.sortRank < right.kind.sortRank
+            }
+            return left.label < right.label
+        }
+    }
+
+    /// The first window of the given kind, in display order.
+    public func window(ofKind kind: UsageWindowKind) -> UsageWindow? {
+        orderedDisplayWindows.first { $0.kind == kind }
+    }
+
+    /// The window closest to (or past) its limit — the one the menu bar and
+    /// alerts should lead with.
+    public var mostConstrainedWindow: UsageWindow? {
+        orderedDisplayWindows.max { $0.usedPercent < $1.usedPercent }
     }
 
     public func isStale(asOf now: Date = Date(), maxAge: TimeInterval = UsageThresholds.standard.staleAfter) -> Bool {
