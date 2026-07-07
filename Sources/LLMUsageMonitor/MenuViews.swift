@@ -11,11 +11,11 @@ struct MenuRootView: View {
             Divider()
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: DS.Spacing.md) {
                     providerSection(.claude)
                     providerSection(.codex)
                 }
-                .padding(14)
+                .padding(DS.Spacing.md)
             }
 
             Divider()
@@ -27,7 +27,7 @@ struct MenuRootView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
+            HStack(spacing: DS.Spacing.sm) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("LLM Usage")
                         .font(.headline)
@@ -41,28 +41,33 @@ struct MenuRootView: View {
                 Button {
                     Task { await state.refreshAll() }
                 } label: {
-                    if state.isRefreshing {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Label("Refresh Usage", systemImage: "arrow.clockwise")
+                    Group {
+                        if state.isRefreshing {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .foregroundStyle(.secondary)
+                        }
                     }
+                    .frame(width: 24, height: 24)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderless)
                 .help("Refresh usage")
+                .accessibilityLabel("Refresh usage")
                 .disabled(state.isRefreshing)
             }
 
             TopUsageSummaryView(profiles: state.profiles, snapshots: state.snapshots)
         }
-        .padding(14)
+        .padding(DS.Spacing.md)
     }
 
     private var footer: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: DS.Spacing.sm) {
             Text(state.statusMessage.isEmpty ? "Ready" : state.statusMessage)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.tertiary)
                 .lineLimit(2)
 
             Spacer()
@@ -71,8 +76,10 @@ struct MenuRootView: View {
                 state.quit()
             }
             .buttonStyle(.borderless)
+            .keyboardShortcut("q")
         }
-        .padding(14)
+        .padding(DS.Spacing.md)
+        .background(.bar)
     }
 
     private var lastRefreshText: String {
@@ -88,8 +95,13 @@ struct MenuRootView: View {
 
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Label(provider.displayName, systemImage: provider == .claude ? "sparkles" : "terminal")
-                    .font(.subheadline.weight(.semibold))
+                Label {
+                    Text(provider.displayName)
+                } icon: {
+                    Image(systemName: DS.providerSymbol(provider))
+                        .foregroundStyle(DS.providerAccent(provider))
+                }
+                .font(.subheadline.weight(.semibold))
 
                 Spacer()
 
@@ -138,13 +150,8 @@ struct MenuRootView: View {
             .buttonStyle(.bordered)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color(nsColor: .separatorColor), lineWidth: 0.5)
-        )
+        .padding(DS.Spacing.md)
+        .cardSurface()
     }
 }
 
@@ -175,13 +182,7 @@ struct AccountRowView: View {
                         Text(profile.label)
                             .font(.system(size: 13, weight: .semibold))
                         if profile.isActiveCLI {
-                            Label("Active terminal", systemImage: "terminal.fill")
-                                .font(.caption2.weight(.semibold))
-                                .foregroundStyle(.green)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color.green.opacity(0.16))
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                            Badge(text: "Active terminal", systemImage: "terminal.fill", color: .green)
                         }
                     }
 
@@ -189,10 +190,11 @@ struct AccountRowView: View {
                         .font(.caption)
                         .foregroundStyle(profile.identity == nil ? .tertiary : .secondary)
                         .lineLimit(1)
+                        .help(identityText)
 
                     Text(statusText)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.tertiary)
                         .lineLimit(2)
                 }
 
@@ -244,13 +246,8 @@ struct AccountRowView: View {
                 }
             }
         }
-        .padding(10)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color(nsColor: .separatorColor), lineWidth: 0.5)
-        )
+        .padding(DS.Spacing.cardPadding)
+        .cardSurface()
         .alert("Rename \(profile.label)", isPresented: $showsRenameAlert) {
             TextField("Account name", text: $renameText)
             Button("Rename") { rename(renameText) }
@@ -312,18 +309,7 @@ struct AccountRowView: View {
     }
 
     private var riskColor: Color {
-        switch snapshot?.riskLevel ?? .unknown {
-        case .healthy:
-            return .green
-        case .warning:
-            return .orange
-        case .depleted:
-            return .red
-        case .stale:
-            return .yellow
-        case .unknown:
-            return .gray
-        }
+        DS.riskColor(snapshot?.riskLevel ?? .unknown)
     }
 
     private func format(_ value: Double) -> String {
@@ -339,7 +325,7 @@ struct TopUsageSummaryView: View {
     let snapshots: [UUID: UsageSnapshot]
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: DS.Spacing.sm) {
             summaryTile(provider: .claude)
             summaryTile(provider: .codex)
         }
@@ -350,38 +336,49 @@ struct TopUsageSummaryView: View {
         let snapshot = active.flatMap { snapshots[$0.id] }
 
         return VStack(alignment: .leading, spacing: 6) {
-            Label(provider.displayName, systemImage: provider == .claude ? "sparkles" : "terminal")
-                .font(.caption.weight(.semibold))
+            Label {
+                Text(provider.displayName)
+            } icon: {
+                Image(systemName: DS.providerSymbol(provider))
+                    .foregroundStyle(DS.providerAccent(provider))
+            }
+            .font(.caption.weight(.semibold))
 
             if let active, let snapshot {
                 Text(summaryValue(for: snapshot))
-                    .font(.title3.monospacedDigit().weight(.bold))
-                    .foregroundStyle(color(for: snapshot.billingUsageMode))
-                Text(shortBillingLabel(for: snapshot.billingUsageMode))
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(color(for: snapshot.billingUsageMode))
-                Text(active.label)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .font(.title3.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(DS.billingColor(snapshot.billingUsageMode))
+                    .contentTransition(.numericText())
+                    .animation(.default, value: summaryValue(for: snapshot))
+                Badge(
+                    text: shortBillingLabel(for: snapshot.billingUsageMode),
+                    color: DS.billingColor(snapshot.billingUsageMode)
+                )
+                HStack(spacing: DS.Spacing.xs) {
+                    Image(systemName: "terminal.fill")
+                    Text(active.label)
+                        .lineLimit(1)
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .help("Active terminal account: \(active.label)")
             } else {
-                Text("--")
-                    .font(.title3.monospacedDigit().weight(.bold))
+                Text("–")
+                    .font(.title3.monospacedDigit().weight(.semibold))
                     .foregroundStyle(.secondary)
-                Text(active?.label ?? "No active CLI account")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                Badge(text: "No snapshot", color: .gray)
+                HStack(spacing: DS.Spacing.xs) {
+                    Image(systemName: "terminal.fill")
+                    Text(active?.label ?? "No active CLI account")
+                        .lineLimit(1)
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color(nsColor: .separatorColor), lineWidth: 0.5)
-        )
+        .padding(DS.Spacing.cardPadding)
+        .cardSurface()
     }
 
     private func summaryValue(for snapshot: UsageSnapshot) -> String {
@@ -390,10 +387,10 @@ struct TopUsageSummaryView: View {
         }
 
         guard let usedFraction = snapshot.usedFraction else {
-            return "--"
+            return "–"
         }
 
-        return "\(Int((usedFraction * 100).rounded()))% used"
+        return "\(Int((usedFraction * 100).rounded()))%"
     }
 
     private func shortBillingLabel(for mode: BillingUsageMode) -> String {
@@ -413,37 +410,6 @@ struct TopUsageSummaryView: View {
         }
     }
 
-    private func color(for riskLevel: RiskLevel) -> Color {
-        switch riskLevel {
-        case .healthy:
-            return .green
-        case .warning:
-            return .orange
-        case .depleted:
-            return .red
-        case .stale:
-            return .yellow
-        case .unknown:
-            return .secondary
-        }
-    }
-
-    private func color(for mode: BillingUsageMode) -> Color {
-        switch mode {
-        case .includedSubscription:
-            return .green
-        case .includedSubscriptionNearLimit:
-            return .orange
-        case .overLimitPayAsYouGo:
-            return .red
-        case .payAsYouGoVisible:
-            return .orange
-        case .needsLogin:
-            return .yellow
-        case .unknown:
-            return .secondary
-        }
-    }
 }
 
 struct BillingStatusView: View {
@@ -451,32 +417,32 @@ struct BillingStatusView: View {
     let compact: Bool
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: icon)
-                .foregroundStyle(color)
-                .frame(width: 14)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(color)
-                    .lineLimit(1)
-                Text(detail)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(compact ? 2 : 3)
-            }
-
-            Spacer(minLength: 0)
+        if compact {
+            content
+        } else {
+            content
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    color.opacity(0.10),
+                    in: RoundedRectangle(cornerRadius: DS.Radius.small, style: .continuous)
+                )
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(color.opacity(0.11))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(color.opacity(0.25), lineWidth: 0.5)
-        )
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Label(title, systemImage: icon)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(color)
+                .symbolRenderingMode(.hierarchical)
+                .lineLimit(1)
+            Text(detail)
+                .font(.caption2)
+                .foregroundStyle(compact ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.secondary))
+                .lineLimit(compact ? 2 : 3)
+        }
     }
 
     private var mode: BillingUsageMode {
@@ -486,17 +452,17 @@ struct BillingStatusView: View {
     private var title: String {
         switch mode {
         case .includedSubscription:
-            return "Using included subscription usage"
+            return "Within included subscription usage"
         case .includedSubscriptionNearLimit:
-            return "Using subscription usage - near limit"
+            return "Included usage — near limit"
         case .overLimitPayAsYouGo:
-            return "PAY-AS-YOU-GO / credits likely in use"
+            return "Pay-as-you-go — credits likely in use"
         case .payAsYouGoVisible:
-            return "Pay-as-you-go status visible"
+            return "Credits visible — included usage unclear"
         case .needsLogin:
-            return "Usage mode needs login"
+            return "Sign in to read billing mode"
         case .unknown:
-            return "Usage mode unknown"
+            return "Billing mode unknown"
         }
     }
 
@@ -549,20 +515,7 @@ struct BillingStatusView: View {
     }
 
     private var color: Color {
-        switch mode {
-        case .includedSubscription:
-            return .green
-        case .includedSubscriptionNearLimit:
-            return .orange
-        case .overLimitPayAsYouGo:
-            return .red
-        case .payAsYouGoVisible:
-            return .orange
-        case .needsLogin:
-            return .yellow
-        case .unknown:
-            return .gray
-        }
+        DS.billingColor(mode)
     }
 
     private func includedUsageText(_ snapshot: UsageSnapshot, prefix: String) -> String {
@@ -591,7 +544,10 @@ struct UsageGauge: View {
         VStack(alignment: .leading, spacing: compact ? 5 : 8) {
             HStack(spacing: 8) {
                 Text(usageTitle)
-                    .font(compact ? .caption.weight(.semibold) : .subheadline.weight(.semibold))
+                    .font(compact ? .caption.weight(.medium) : .subheadline.weight(.semibold))
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+                    .animation(.default, value: usageTitle)
                 Spacer()
                 Text(usageDetail)
                     .font(.caption)
@@ -600,14 +556,15 @@ struct UsageGauge: View {
 
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(Color(nsColor: .quaternaryLabelColor).opacity(0.35))
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(riskColor)
-                        .frame(width: max(8, proxy.size.width * CGFloat(usedFraction)))
+                    Capsule()
+                        .fill(.quaternary)
+                    Capsule()
+                        .fill(riskColor.gradient)
+                        .frame(width: fillWidth(in: proxy.size.width))
                 }
+                .animation(.spring(duration: 0.5, bounce: 0.15), value: snapshot?.usedFraction)
             }
-            .frame(height: compact ? 8 : 12)
+            .frame(height: compact ? 6 : 10)
 
             if !compact {
                 HStack {
@@ -629,8 +586,11 @@ struct UsageGauge: View {
         }
     }
 
-    private var usedFraction: Double {
-        snapshot?.usedFraction ?? 0
+    private func fillWidth(in totalWidth: CGFloat) -> CGFloat {
+        guard let fraction = snapshot?.usedFraction, fraction > 0 else {
+            return 0
+        }
+        return max(4, totalWidth * CGFloat(min(fraction, 1)))
     }
 
     private var usageTitle: String {
@@ -642,7 +602,7 @@ struct UsageGauge: View {
 
     private var usageDetail: String {
         guard let snapshot else {
-            return "--"
+            return "–"
         }
 
         if let remaining = snapshot.includedRemaining, let limit = snapshot.includedLimit {
@@ -657,18 +617,7 @@ struct UsageGauge: View {
     }
 
     private var riskColor: Color {
-        switch snapshot?.riskLevel ?? .unknown {
-        case .healthy:
-            return .green
-        case .warning:
-            return .orange
-        case .depleted:
-            return .red
-        case .stale:
-            return .yellow
-        case .unknown:
-            return .gray
-        }
+        DS.riskColor(snapshot?.riskLevel ?? .unknown)
     }
 
     private func format(_ value: Double) -> String {
