@@ -427,8 +427,22 @@ final class AppState: ObservableObject {
 
             Task { await refreshAll() }
         } catch {
-            statusMessage = "Switch failed for \(profile.label): \(error.localizedDescription)"
-            showError(message: "Switch failed", details: error.localizedDescription)
+            if let storeError = error as? CredentialStoreError, case .decodeFailed = storeError {
+                // The stored snapshot is unreadable (e.g. written by an older
+                // build). Clear it so this account falls back to the re-capture
+                // path, and tell the user how to restore it. The current login
+                // was already captured above, so nothing is lost.
+                try? cliSwitcher.deleteStoredSnapshot(for: profile.id)
+                objectWillChange.send()
+                statusMessage = "Cleared unreadable credentials for \(profile.label)."
+                showError(
+                    message: "Saved credentials for \(profile.label) were unreadable",
+                    details: "They were likely written by an older version and have been cleared. Log into this account once in the terminal (\(profile.provider.loginCommand)); the app captures its credentials automatically."
+                )
+            } else {
+                statusMessage = "Switch failed for \(profile.label): \(error.localizedDescription)"
+                showError(message: "Switch failed", details: error.localizedDescription)
+            }
         }
     }
 
