@@ -20,6 +20,12 @@ usage-based overage.
 - **Inactive accounts keep their last reading**, annotated with how old it
   is — and highlighted when the limit window has already reset, meaning
   that account likely has its full quota back (your best switch target).
+  When that happens to an account that was near or past its limit, the app
+  sends a notification so you know it is worth switching back.
+- **Stale numbers are marked.** Readings older than 30 minutes get a `*`
+  in the menu bar and a "Last checked …" note in the popover, and the app
+  re-reads usage after your Mac wakes from sleep and when you open the
+  popover with outdated data.
 - **Switching is one click.** Every non-active account row has a
   "Switch CLI to this account" button. The app captures the current login
   first (nothing is lost), backs up the files it touches, restores the
@@ -36,6 +42,11 @@ usage-based overage.
 Add, rename, or remove accounts from the popover (the `+` button per
 provider and the `…` menu per account). Browser, Claude Desktop, ChatGPT
 Desktop, and CLI sessions are separate: switching affects the CLI only.
+
+Settings (the gear in the popover footer, or ⌘,) cover the refresh
+interval, launch at login, and both notification types. The app checks
+GitHub once a day for a newer release and links to the download when one
+exists — it never updates itself.
 
 ### Dashboard fallback
 

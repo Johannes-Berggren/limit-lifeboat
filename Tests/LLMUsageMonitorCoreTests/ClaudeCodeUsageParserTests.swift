@@ -54,6 +54,21 @@ final class ClaudeCodeUsageParserTests: XCTestCase {
         XCTAssertEqual(snapshot.includedLimit, 100)
         XCTAssertEqual(snapshot.usedFraction, 0.70)
         XCTAssertEqual(snapshot.resetDescription, "8pm (Europe/Oslo)")
+
+        // "8pm (Europe/Oslo)" resolves to the next 8pm Oslo time after `now`.
+        var osloCalendar = Calendar(identifier: .gregorian)
+        osloCalendar.timeZone = TimeZone(identifier: "Europe/Oslo")!
+        let snapshotTime = Date(timeIntervalSince1970: 1_783_000_000)
+        var expectedReset = osloCalendar.date(
+            bySettingHour: 20, minute: 0, second: 0,
+            of: osloCalendar.startOfDay(for: snapshotTime)
+        )!
+        if expectedReset <= snapshotTime {
+            expectedReset = osloCalendar.date(byAdding: .day, value: 1, to: expectedReset)!
+        }
+        XCTAssertEqual(snapshot.resetDate, expectedReset)
+        XCTAssertFalse(snapshot.resetHasElapsed(asOf: snapshotTime))
+
         XCTAssertEqual(snapshot.riskLevel, .healthy)
         XCTAssertEqual(snapshot.source, ClaudeCodeUsageReport.source)
         XCTAssertEqual(snapshot.parseConfidence, .high)

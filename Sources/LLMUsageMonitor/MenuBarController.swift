@@ -5,11 +5,13 @@ import SwiftUI
 
 @MainActor
 final class MenuBarController {
+    private let state: AppState
     private let statusItem: NSStatusItem
     private let popover: NSPopover
     private var cancellables: Set<AnyCancellable> = []
 
     init(state: AppState) {
+        self.state = state
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         self.popover = NSPopover()
         popover.behavior = .transient
@@ -41,6 +43,7 @@ final class MenuBarController {
         } else {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
+            state.refreshIfStale()
         }
     }
 

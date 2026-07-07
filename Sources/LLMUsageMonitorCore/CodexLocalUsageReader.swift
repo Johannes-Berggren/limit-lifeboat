@@ -34,7 +34,7 @@ public struct CodexLocalUsageReader {
             resetDate: resetDate,
             resetDescription: resetDescription(for: resetDate, now: now),
             creditStatus: creditStatus(from: event),
-            riskLevel: riskLevel(usedPercent: usedPercent),
+            riskLevel: UsageThresholds.standard.riskLevel(usedPercent: usedPercent),
             source: "local Codex CLI logs",
             lastRefreshed: now,
             parseConfidence: .high,
@@ -185,16 +185,6 @@ public struct CodexLocalUsageReader {
             return "Rate limit reached: \(reachedType)."
         }
         return event.creditsAvailable ? "Credits are available." : nil
-    }
-
-    private func riskLevel(usedPercent: Double) -> RiskLevel {
-        if usedPercent >= 100 {
-            return .depleted
-        }
-        if usedPercent >= 80 {
-            return .warning
-        }
-        return .healthy
     }
 
     private func message(for limit: CodexRateLimit, event: RateLimitEvent) -> String {
