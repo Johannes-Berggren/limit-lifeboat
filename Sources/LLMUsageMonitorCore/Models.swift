@@ -278,9 +278,74 @@ public struct AccountProfile: Codable, Identifiable, Hashable, Sendable {
     }
 }
 
+public enum UsageWindowKind: String, Codable, Sendable {
+    case session        // Claude "current session" (~5h) / Codex primary (300 min)
+    case weekly         // Claude "weekly all models" / Codex secondary (10080 min)
+    case weeklyScoped   // Claude "current week (<org/model>)"
+    case other
+}
+
+/// One rate-limit window a subscription reports (e.g. the ~5h session window
+/// and the weekly window are two separate windows on the same account). A
+/// snapshot carries all of them; the snapshot's scalar fields mirror the
+/// most-constrained one for the menu bar and legacy call sites.
+public struct UsageWindow: Codable, Equatable, Sendable, Identifiable {
+    /// Stable per-account key so per-window alert dedupe and SwiftUI diffing
+    /// survive across refreshes, e.g. "session", "weekly-all", "weekly-fable",
+    /// "codex-300".
+    public var id: String
+    public var kind: UsageWindowKind
+    public var label: String
+    public var usedPercent: Double
+    public var resetDate: Date?
+    public var resetDescription: String?
+    public var windowMinutes: Int?
+    public var riskLevel: RiskLevel
+
+    public init(
+        id: String,
+        kind: UsageWindowKind,
+        label: String,
+        usedPercent: Double,
+        resetDate: Date? = nil,
+        resetDescription: String? = nil,
+        windowMinutes: Int? = nil,
+        riskLevel: RiskLevel = .unknown
+    ) {
+        self.id = id
+        self.kind = kind
+        self.label = label
+        self.usedPercent = usedPercent
+        self.resetDate = resetDate
+        self.resetDescription = resetDescription
+        self.windowMinutes = windowMinutes
+        self.riskLevel = riskLevel
+    }
+
+    public var remainingPercent: Double {
+        max(0, 100 - min(100, max(0, usedPercent)))
+    }
+
+    public var usedFraction: Double {
+        min(1, max(0, usedPercent / 100))
+    }
+
+    /// True when this window's limit has rolled over since the reading, meaning
+    /// the account likely has this window's quota back.
+    public func resetHasElapsed(asOf now: Date = Date()) -> Bool {
+        guard let resetDate else {
+            return false
+        }
+        return resetDate < now
+    }
+}
+
 public struct UsageSnapshot: Codable, Equatable, Sendable {
     public var accountID: UUID
     public var provider: Provider
+    /// Every rate-limit window the provider reported. The scalar fields below
+    /// mirror the most-constrained window for the menu bar and legacy readers.
+    public var windows: [UsageWindow]
     public var includedRemaining: Double?
     public var includedLimit: Double?
     public var resetDate: Date?
@@ -295,6 +360,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
     public init(
         accountID: UUID,
         provider: Provider,
+        windows: [UsageWindow] = [],
         includedRemaining: Double? = nil,
         includedLimit: Double? = nil,
         resetDate: Date? = nil,
@@ -308,6 +374,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
     ) {
         self.accountID = accountID
         self.provider = provider
+        self.windows = windows
         self.includedRemaining = includedRemaining
         self.includedLimit = includedLimit
         self.resetDate = resetDate
@@ -332,6 +399,30 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
             return nil
         }
         return max(0, min(1, 1 - remainingFraction))
+    }
+
+    /// The windows to surface. Uses the parsed windows when present, otherwise
+    /// synthesizes a single window from the scalar fields so snapshots that
+    /// predate `windows` (legacy files, the web dashboard fallback) still show
+    /// and alert on a quota.
+    public var displayWindows: [UsageWindow] {
+        if !windows.isEmpty {
+            return windows
+        }
+        guard let usedFraction else {
+            return []
+        }
+        return [
+            UsageWindow(
+                id: "primary",
+                kind: .other,
+                label: "Quota",
+                usedPercent: usedFraction * 100,
+                resetDate: resetDate,
+                resetDescription: resetDescription,
+                riskLevel: riskLevel
+            )
+        ]
     }
 
     public func isStale(asOf now: Date = Date(), maxAge: TimeInterval = UsageThresholds.standard.staleAfter) -> Bool {
@@ -399,6 +490,59 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
             || text.contains("included usage appears depleted")
             || text.contains("included usage exhausted")
             || text.contains("limit reached")
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case accountID
+        case provider
+        case windows
+        case includedRemaining
+        case includedLimit
+        case resetDate
+        case resetDescription
+        case creditStatus
+        case riskLevel
+        case source
+        case lastRefreshed
+        case parseConfidence
+        case message
+    }
+
+    // Manual conformance so snapshots persisted before `windows` existed still
+    // decode: the key is absent in legacy usage-snapshots.json, so it defaults
+    // to [] and repopulates on the next refresh rather than throwing.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.accountID = try container.decode(UUID.self, forKey: .accountID)
+        self.provider = try container.decode(Provider.self, forKey: .provider)
+        self.windows = try container.decodeIfPresent([UsageWindow].self, forKey: .windows) ?? []
+        self.includedRemaining = try container.decodeIfPresent(Double.self, forKey: .includedRemaining)
+        self.includedLimit = try container.decodeIfPresent(Double.self, forKey: .includedLimit)
+        self.resetDate = try container.decodeIfPresent(Date.self, forKey: .resetDate)
+        self.resetDescription = try container.decodeIfPresent(String.self, forKey: .resetDescription)
+        self.creditStatus = try container.decodeIfPresent(String.self, forKey: .creditStatus)
+        self.riskLevel = try container.decode(RiskLevel.self, forKey: .riskLevel)
+        self.source = try container.decode(String.self, forKey: .source)
+        self.lastRefreshed = try container.decode(Date.self, forKey: .lastRefreshed)
+        self.parseConfidence = try container.decode(ParseConfidence.self, forKey: .parseConfidence)
+        self.message = try container.decode(String.self, forKey: .message)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(accountID, forKey: .accountID)
+        try container.encode(provider, forKey: .provider)
+        try container.encode(windows, forKey: .windows)
+        try container.encodeIfPresent(includedRemaining, forKey: .includedRemaining)
+        try container.encodeIfPresent(includedLimit, forKey: .includedLimit)
+        try container.encodeIfPresent(resetDate, forKey: .resetDate)
+        try container.encodeIfPresent(resetDescription, forKey: .resetDescription)
+        try container.encodeIfPresent(creditStatus, forKey: .creditStatus)
+        try container.encode(riskLevel, forKey: .riskLevel)
+        try container.encode(source, forKey: .source)
+        try container.encode(lastRefreshed, forKey: .lastRefreshed)
+        try container.encode(parseConfidence, forKey: .parseConfidence)
+        try container.encode(message, forKey: .message)
     }
 }
 

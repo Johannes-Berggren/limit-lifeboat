@@ -46,6 +46,63 @@ final class ModelsTests: XCTestCase {
         XCTAssertFalse(unknown.resetHasElapsed(asOf: now))
     }
 
+    func testSnapshotWithWindowsRoundTrips() throws {
+        let reset = Date(timeIntervalSince1970: 1_783_388_580)
+        let original = UsageSnapshot(
+            accountID: UUID(),
+            provider: .codex,
+            windows: [
+                UsageWindow(id: "codex-300", kind: .session, label: "Session (5h)", usedPercent: 23,
+                            resetDate: reset, resetDescription: "in 5h", windowMinutes: 300, riskLevel: .healthy),
+                UsageWindow(id: "codex-10080", kind: .weekly, label: "Weekly (7d)", usedPercent: 86,
+                            resetDate: reset, windowMinutes: 10080, riskLevel: .warning)
+            ],
+            includedRemaining: 14,
+            includedLimit: 100,
+            resetDate: reset,
+            riskLevel: .warning,
+            source: "test",
+            lastRefreshed: Date(timeIntervalSince1970: 1_783_000_000),
+            parseConfidence: .high,
+            message: "m"
+        )
+
+        let data = try JSONEncoder.appEncoder.encode(original)
+        let decoded = try JSONDecoder.appDecoder.decode(UsageSnapshot.self, from: data)
+        XCTAssertEqual(decoded, original)
+    }
+
+    /// The load-bearing migration guarantee: snapshots persisted before
+    /// `windows` existed must still decode (with an empty windows array) rather
+    /// than throwing and wiping stored usage on first launch.
+    func testDecodesLegacySnapshotWithoutWindowsKey() throws {
+        let id = UUID()
+        let json = """
+        {
+          "accountID": "\(id.uuidString)",
+          "provider": "claude",
+          "includedRemaining": 30,
+          "includedLimit": 100,
+          "resetDate": "2026-07-10T04:00:00Z",
+          "resetDescription": "Jul 10",
+          "riskLevel": "healthy",
+          "source": "legacy",
+          "lastRefreshed": "2026-07-07T00:00:00Z",
+          "parseConfidence": "high",
+          "message": "legacy"
+        }
+        """
+
+        let snapshot = try JSONDecoder.appDecoder.decode(UsageSnapshot.self, from: Data(json.utf8))
+        XCTAssertTrue(snapshot.windows.isEmpty)
+        XCTAssertEqual(snapshot.accountID, id)
+        XCTAssertEqual(snapshot.includedRemaining, 30)
+        XCTAssertEqual(snapshot.usedFraction, 0.7)
+        XCTAssertEqual(snapshot.riskLevel, .healthy)
+        // Legacy snapshots still surface a window for display/alerts via the fallback.
+        XCTAssertEqual(snapshot.displayWindows.count, 1)
+    }
+
     private func makeSnapshot(lastRefreshed: Date, resetDate: Date? = nil) -> UsageSnapshot {
         UsageSnapshot(
             accountID: UUID(),

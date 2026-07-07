@@ -76,6 +76,45 @@ final class ClaudeCodeUsageParserTests: XCTestCase {
         XCTAssertTrue(snapshot.message.contains("current session 70%"))
         XCTAssertTrue(snapshot.message.contains("weekly all models 24%"))
         XCTAssertTrue(snapshot.message.contains("weekly Fable 26%"))
+
+        // All three rate-limit windows are preserved (credits stay out).
+        XCTAssertEqual(snapshot.windows.count, 3)
+
+        XCTAssertEqual(snapshot.windows[0].id, "session")
+        XCTAssertEqual(snapshot.windows[0].kind, .session)
+        XCTAssertEqual(snapshot.windows[0].label, "Session")
+        XCTAssertEqual(snapshot.windows[0].usedPercent, 70)
+        XCTAssertEqual(snapshot.windows[0].resetDate, expectedReset)
+        XCTAssertEqual(snapshot.windows[0].riskLevel, .healthy)
+
+        XCTAssertEqual(snapshot.windows[1].id, "weekly-all")
+        XCTAssertEqual(snapshot.windows[1].kind, .weekly)
+        XCTAssertEqual(snapshot.windows[1].label, "Weekly (all models)")
+        XCTAssertEqual(snapshot.windows[1].usedPercent, 24)
+
+        XCTAssertEqual(snapshot.windows[2].id, "weekly-fable")
+        XCTAssertEqual(snapshot.windows[2].kind, .weeklyScoped)
+        XCTAssertEqual(snapshot.windows[2].label, "Weekly (Fable)")
+        XCTAssertEqual(snapshot.windows[2].usedPercent, 26)
+
+        // The scalar fields mirror the most-constrained window (session, 70%).
+        XCTAssertEqual(snapshot.usedFraction, snapshot.windows[0].usedFraction)
+    }
+
+    func testWindowKeepsUnparsedResetDescription() throws {
+        let report = try XCTUnwrap(parser.parse(text: """
+        Current session
+        40% used
+        Resets soon
+        """))
+
+        let profile = AccountProfile(provider: .claude, label: "Claude")
+        let snapshot = report.makeSnapshot(for: profile)
+
+        let session = try XCTUnwrap(snapshot.windows.first)
+        XCTAssertEqual(session.resetDescription, "soon")
+        XCTAssertNil(session.resetDate)
+        XCTAssertEqual(session.usedPercent, 40)
     }
 
     func testSelectsMostConstrainedLimitForRisk() throws {

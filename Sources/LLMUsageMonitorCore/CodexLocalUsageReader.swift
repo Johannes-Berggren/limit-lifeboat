@@ -22,6 +22,7 @@ public struct CodexLocalUsageReader {
             return nil
         }
 
+        let windows = event.limits.map { makeWindow(from: $0, now: now) }
         let usedPercent = min(100, max(0, selectedLimit.usedPercent))
         let remainingPercent = max(0, 100 - usedPercent)
         let resetDate = selectedLimit.resetsAt
@@ -29,6 +30,7 @@ public struct CodexLocalUsageReader {
         return UsageSnapshot(
             accountID: profile.id,
             provider: .codex,
+            windows: windows,
             includedRemaining: remainingPercent,
             includedLimit: 100,
             resetDate: resetDate,
@@ -40,6 +42,41 @@ public struct CodexLocalUsageReader {
             parseConfidence: .high,
             message: message(for: selectedLimit, event: event)
         )
+    }
+
+    private func makeWindow(from limit: CodexRateLimit, now: Date) -> UsageWindow {
+        let usedPercent = min(100, max(0, limit.usedPercent))
+        let kind: UsageWindowKind
+        if let minutes = limit.windowMinutes {
+            kind = minutes <= 60 * 24 ? .session : .weekly
+        } else {
+            kind = limit.name == "secondary" ? .weekly : .session
+        }
+
+        let base = kind == .weekly ? "Weekly" : "Session"
+        let label = limit.windowMinutes.map { "\(base) (\(shortDuration(minutes: $0)))" } ?? base
+        let id = limit.windowMinutes.map { "codex-\($0)" } ?? "codex-\(limit.name)"
+
+        return UsageWindow(
+            id: id,
+            kind: kind,
+            label: label,
+            usedPercent: usedPercent,
+            resetDate: limit.resetsAt,
+            resetDescription: resetDescription(for: limit.resetsAt, now: now),
+            windowMinutes: limit.windowMinutes,
+            riskLevel: UsageThresholds.standard.riskLevel(usedPercent: usedPercent)
+        )
+    }
+
+    private func shortDuration(minutes: Int) -> String {
+        if minutes < 60 {
+            return "\(minutes)m"
+        }
+        if minutes < 60 * 24 {
+            return "\(minutes / 60)h"
+        }
+        return "\(minutes / (60 * 24))d"
     }
 
     private func latestRateLimitEvent() -> RateLimitEvent? {
