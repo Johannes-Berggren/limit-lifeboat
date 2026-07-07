@@ -40,8 +40,10 @@ public struct ResetAlertPlanner: Sendable {
                   let snapshot = snapshots[profile.id],
                   let resetDate = snapshot.resetDate,
                   snapshot.resetHasElapsed(asOf: now),
-                  wasConstrained(snapshot),
-                  alreadyNotified[profile.id] != resetDate else {
+                  wasConstrained(snapshot) else {
+                return nil
+            }
+            if let notified = alreadyNotified[profile.id], isSameReset(notified, resetDate) {
                 return nil
             }
             return ResetAlert(
@@ -51,6 +53,13 @@ public struct ResetAlertPlanner: Sendable {
                 resetDate: resetDate
             )
         }
+    }
+
+    /// Snapshot dates lose sub-second precision on their .iso8601 disk
+    /// round-trip while the notified store keeps the full value, so exact
+    /// equality would re-fire after a relaunch. Same second = same reset.
+    private func isSameReset(_ lhs: Date, _ rhs: Date) -> Bool {
+        abs(lhs.timeIntervalSince(rhs)) < 1
     }
 
     private func wasConstrained(_ snapshot: UsageSnapshot) -> Bool {

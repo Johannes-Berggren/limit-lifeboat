@@ -102,6 +102,25 @@ final class UsageAlertPolicyTests: XCTestCase {
         )
     }
 
+    /// Snapshots round-trip through .iso8601 JSON and lose sub-second
+    /// precision, while the notified store keeps the full value — the dedupe
+    /// must treat dates within the same second as the same reset.
+    func testSubSecondPrecisionLossDoesNotRefire() {
+        let profile = AccountProfile(provider: .codex, label: "Codex 2")
+        let preciseReset = now.addingTimeInterval(-600.5)
+        let truncatedReset = Date(timeIntervalSince1970: preciseReset.timeIntervalSince1970.rounded(.down))
+        let snapshot = snapshot(for: profile, usedPercent: 92, resetDate: truncatedReset)
+
+        XCTAssertTrue(
+            planner.alerts(
+                profiles: [profile],
+                snapshots: [profile.id: snapshot],
+                alreadyNotified: [profile.id: preciseReset],
+                now: now
+            ).isEmpty
+        )
+    }
+
     func testNewResetDateNotifiesAgain() {
         let profile = AccountProfile(provider: .claude, label: "Claude 2")
         let snapshot = snapshot(for: profile, usedPercent: 92, resetDate: now.addingTimeInterval(-600))
