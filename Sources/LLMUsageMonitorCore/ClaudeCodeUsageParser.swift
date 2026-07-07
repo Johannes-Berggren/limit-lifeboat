@@ -38,10 +38,12 @@ public struct ClaudeCodeUsageReport: Equatable, Sendable {
             )
         }
 
+        let windows = limits.map { makeWindow(from: $0, now: now) }
         let usedPercent = min(100, max(0, selectedLimit.usedPercent))
         return UsageSnapshot(
             accountID: account.id,
             provider: .claude,
+            windows: windows,
             includedRemaining: max(0, 100 - usedPercent),
             includedLimit: 100,
             resetDate: selectedLimit.resetDescription.flatMap {
@@ -55,6 +57,45 @@ public struct ClaudeCodeUsageReport: Equatable, Sendable {
             parseConfidence: .high,
             message: message
         )
+    }
+
+    private func makeWindow(from limit: ClaudeCodeUsageLimit, now: Date) -> UsageWindow {
+        let usedPercent = min(100, max(0, limit.usedPercent))
+        let descriptor = windowDescriptor(for: limit.name)
+        return UsageWindow(
+            id: descriptor.id,
+            kind: descriptor.kind,
+            label: descriptor.label,
+            usedPercent: usedPercent,
+            resetDate: limit.resetDescription.flatMap { ClaudeResetDateParser().parse($0, now: now) },
+            resetDescription: limit.resetDescription,
+            windowMinutes: nil,
+            riskLevel: UsageThresholds.standard.riskLevel(usedPercent: usedPercent)
+        )
+    }
+
+    private func windowDescriptor(for name: String) -> (id: String, kind: UsageWindowKind, label: String) {
+        let lower = name.lowercased()
+        if lower == "current session" {
+            return ("session", .session, "Session")
+        }
+        if lower.contains("all models") {
+            return ("weekly-all", .weekly, "Weekly (all models)")
+        }
+        if let organization = firstCapture(#"\(([^)]+)\)"#, in: name) {
+            return ("weekly-\(slug(organization))", .weeklyScoped, "Weekly (\(organization))")
+        }
+        return (slug(name), .other, name)
+    }
+
+    private func slug(_ text: String) -> String {
+        let mapped = text.lowercased().unicodeScalars.map { scalar -> Character in
+            CharacterSet.alphanumerics.contains(scalar) ? Character(scalar) : "-"
+        }
+        let collapsed = String(mapped)
+            .split(separator: "-", omittingEmptySubsequences: true)
+            .joined(separator: "-")
+        return collapsed.isEmpty ? "window" : collapsed
     }
 
     private var creditStatus: String {

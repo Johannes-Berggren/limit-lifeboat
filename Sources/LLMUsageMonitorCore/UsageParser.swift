@@ -64,9 +64,27 @@ public struct UsageTextParser: Sendable {
         let risk = riskLevel(from: lower, remaining: remaining, limit: limit)
         let message = messageFor(risk: risk, confidence: confidence, creditStatus: creditStatus)
 
+        // The dashboard exposes a single aggregate number, so it maps to one
+        // window. Only build it when a percentage is derivable (both remaining
+        // and a positive limit); otherwise leave windows empty and rely on the
+        // scalar "N remaining" text.
+        var windows: [UsageWindow] = []
+        if confidence != .none, let remaining, let limit, limit > 0 {
+            let usedPercent = max(0, min(100, 100 * (1 - remaining / limit)))
+            windows = [UsageWindow(
+                id: "web",
+                kind: .other,
+                label: "Usage",
+                usedPercent: usedPercent,
+                resetDescription: resetDescription,
+                riskLevel: UsageThresholds.standard.riskLevel(usedPercent: usedPercent)
+            )]
+        }
+
         return UsageSnapshot(
             accountID: account.id,
             provider: account.provider,
+            windows: windows,
             includedRemaining: remaining,
             includedLimit: limit,
             resetDate: nil,

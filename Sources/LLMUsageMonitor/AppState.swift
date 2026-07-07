@@ -164,7 +164,7 @@ final class AppState: ObservableObject {
         let alerts = resetAlertPlanner.alerts(
             profiles: profiles,
             snapshots: snapshots,
-            alreadyNotified: usageAlertController.notifiedResetDates()
+            alreadyNotified: usageAlertController.notifiedResetKeys()
         )
         for alert in alerts {
             usageAlertController.handleResetElapsed(alert)
@@ -681,23 +681,31 @@ final class UsageAlertController {
     private var lastNotifiedRisk: [UUID: RiskLevel] = [:]
     private let notifiedResetsKey = "notifiedResetDates"
 
-    /// Reset alerts survive relaunches (persisted, keyed by reset date) so a
-    /// restart does not re-announce quotas that were already reported back.
-    func notifiedResetDates() -> [UUID: Date] {
+    /// Reset alerts survive relaunches (persisted, keyed by account+window and
+    /// reset date) so a restart does not re-announce quotas that were already
+    /// reported back. The UserDefaults key is `"<profileID>|<windowID>"`.
+    func notifiedResetKeys() -> [AlertWindowKey: Date] {
         let stored = UserDefaults.standard.dictionary(forKey: notifiedResetsKey) as? [String: Double] ?? [:]
-        var result: [UUID: Date] = [:]
+        var result: [AlertWindowKey: Date] = [:]
         for (key, value) in stored {
-            guard let id = UUID(uuidString: key) else {
+            // Legacy entries were bare UUIDs (no window component); drop them —
+            // the worst case is one duplicate "quota back" alert after upgrade.
+            guard let separator = key.firstIndex(of: "|") else {
                 continue
             }
-            result[id] = Date(timeIntervalSince1970: value)
+            let idPart = String(key[..<separator])
+            let windowID = String(key[key.index(after: separator)...])
+            guard let id = UUID(uuidString: idPart), !windowID.isEmpty else {
+                continue
+            }
+            result[AlertWindowKey(profileID: id, windowID: windowID)] = Date(timeIntervalSince1970: value)
         }
         return result
     }
 
     func handleResetElapsed(_ alert: ResetAlert) {
         var stored = UserDefaults.standard.dictionary(forKey: notifiedResetsKey) as? [String: Double] ?? [:]
-        stored[alert.profileID.uuidString] = alert.resetDate.timeIntervalSince1970
+        stored["\(alert.profileID.uuidString)|\(alert.windowID)"] = alert.resetDate.timeIntervalSince1970
         UserDefaults.standard.set(stored, forKey: notifiedResetsKey)
 
         guard Bundle.main.bundleIdentifier != nil else {
@@ -705,12 +713,12 @@ final class UsageAlertController {
         }
 
         let content = UNMutableNotificationContent()
-        content.title = "\(alert.profileLabel) likely has its full quota back"
-        content.body = "The \(alert.provider.displayName) limit window has rolled over since the last reading. Switch the CLI to \(alert.profileLabel) to keep using included usage."
+        content.title = "\(alert.profileLabel): \(alert.windowLabel) quota likely back"
+        content.body = "The \(alert.provider.displayName) \(alert.windowLabel) limit window has rolled over since the last reading. Switch the CLI to \(alert.profileLabel) to keep using included usage."
         content.sound = .default
 
         let request = UNNotificationRequest(
-            identifier: "reset-\(alert.profileID.uuidString)-\(Int(alert.resetDate.timeIntervalSince1970))",
+            identifier: "reset-\(alert.profileID.uuidString)-\(alert.windowID)-\(Int(alert.resetDate.timeIntervalSince1970))",
             content: content,
             trigger: nil
         )

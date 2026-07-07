@@ -242,7 +242,13 @@ struct AccountRowView: View {
                 .help("More actions")
             }
 
-            UsageGauge(snapshot: snapshot, compact: true)
+            if let snapshot, !snapshot.displayWindows.isEmpty {
+                ForEach(snapshot.displayWindows) { window in
+                    UsageGauge(window: window, compact: true)
+                }
+            } else {
+                UsageGauge(window: nil, compact: true)
+            }
             BillingStatusView(snapshot: snapshot, compact: true)
 
             if let staleness {
@@ -552,22 +558,30 @@ struct BillingStatusView: View {
     }
 }
 
+/// Renders one quota window as a labelled progress bar. An account shows one
+/// of these per window (Session, Weekly, …); `window == nil` is the empty state.
 struct UsageGauge: View {
-    let snapshot: UsageSnapshot?
+    let window: UsageWindow?
     let compact: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: compact ? 5 : 8) {
+        VStack(alignment: .leading, spacing: compact ? 4 : 8) {
             HStack(spacing: 8) {
-                Text(usageTitle)
+                Text(window?.label ?? "Usage unknown")
                     .font(compact ? .caption.weight(.medium) : .subheadline.weight(.semibold))
+                    .lineLimit(1)
+                Spacer()
+                if let reset = window?.resetDescription {
+                    Text("Resets \(reset)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Text(usageValue)
+                    .font(.caption.weight(.semibold))
                     .monospacedDigit()
                     .contentTransition(.numericText())
-                    .animation(.default, value: usageTitle)
-                Spacer()
-                Text(usageDetail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .animation(.default, value: usageValue)
             }
 
             GeometryReader { proxy in
@@ -578,68 +592,27 @@ struct UsageGauge: View {
                         .fill(riskColor.gradient)
                         .frame(width: fillWidth(in: proxy.size.width))
                 }
-                .animation(.spring(duration: 0.5, bounce: 0.15), value: snapshot?.usedFraction)
+                .animation(.spring(duration: 0.5, bounce: 0.15), value: window?.usedFraction)
             }
             .frame(height: compact ? 6 : 10)
-
-            if !compact {
-                HStack {
-                    Text(snapshot?.message ?? "No usage snapshot")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-
-                    Spacer()
-
-                    if let reset = snapshot?.resetDescription {
-                        Text("Reset \(reset)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                }
-            }
         }
     }
 
     private func fillWidth(in totalWidth: CGFloat) -> CGFloat {
-        guard let fraction = snapshot?.usedFraction, fraction > 0 else {
+        guard let fraction = window?.usedFraction, fraction > 0 else {
             return 0
         }
         return max(4, totalWidth * CGFloat(min(fraction, 1)))
     }
 
-    private var usageTitle: String {
-        guard let snapshot, let used = snapshot.usedFraction else {
-            return "Usage unknown"
-        }
-        return "\(Int((used * 100).rounded()))% used"
-    }
-
-    private var usageDetail: String {
-        guard let snapshot else {
+    private var usageValue: String {
+        guard let window else {
             return "–"
         }
-
-        if let remaining = snapshot.includedRemaining, let limit = snapshot.includedLimit {
-            return "\(format(remaining)) left of \(format(limit))"
-        }
-
-        if snapshot.riskLevel == .stale {
-            return "Needs login"
-        }
-
-        return snapshot.parseConfidence == .none ? "Unrecognized" : snapshot.riskLevel.rawValue.capitalized
+        return "\(Int(window.usedPercent.rounded()))% used"
     }
 
     private var riskColor: Color {
-        DS.riskColor(snapshot?.riskLevel ?? .unknown)
-    }
-
-    private func format(_ value: Double) -> String {
-        if value.rounded() == value {
-            return String(Int(value))
-        }
-        return String(format: "%.1f", value)
+        DS.riskColor(window?.riskLevel ?? .unknown)
     }
 }
