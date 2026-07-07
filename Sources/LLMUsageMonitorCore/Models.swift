@@ -609,6 +609,11 @@ public struct CredentialSnapshotItem: Codable, Equatable, Sendable {
     public enum Kind: String, Codable, Sendable {
         case fullFile
         case jsonFields
+        /// JSON fields merged into a login-keychain generic password instead
+        /// of a file; `relativePath` carries a "keychain/<service>" marker.
+        /// Older builds cannot decode this case — their `decodeFailed`
+        /// recovery clears the snapshot and re-captures.
+        case keychainJSONFields
     }
 
     public var relativePath: String
