@@ -28,6 +28,9 @@ final class AppState: ObservableObject {
     @Published private(set) var availableUpdate: AvailableUpdate?
     @Published var menuBarSummary: MenuBarSummary = .empty
     @Published var statusMessage = ""
+    /// Per-account, per-window burn-rate projections; only `.depletesAt`
+    /// values render anything in the UI.
+    @Published private(set) var burnRateEstimates: [UUID: [String: BurnRateEstimate]] = [:]
 
     let settings: SettingsStore
 
@@ -38,9 +41,12 @@ final class AppState: ObservableObject {
     private let syncPlanner = CLIAccountSyncPlanner()
     private let codexLocalUsageReader = CodexLocalUsageReader()
     private let claudeCodeUsageReader = ClaudeCodeUsageReader()
+    private let claudeUsageService: ClaudeAccountUsageService
     private let dashboardWindowManager = DashboardWindowManager()
     private let usageAlertController = UsageAlertController()
     private let resetAlertPlanner = ResetAlertPlanner()
+    private let historyStore: UsageHistoryStore?
+    private let burnRateEstimator = BurnRateEstimator()
     private let updateService = UpdateService()
     private let settingsWindowController = SettingsWindowController()
     private var refreshTask: Task<Void, Never>?
@@ -50,9 +56,13 @@ final class AppState: ObservableObject {
     init(repository: ProfileRepository, cliSwitcher: CLISwitcher, settings: SettingsStore? = nil) throws {
         self.repository = repository
         self.cliSwitcher = cliSwitcher
+        self.claudeUsageService = ClaudeAccountUsageService(credentials: cliSwitcher)
         self.settings = settings ?? SettingsStore()
         self.profiles = try repository.loadProfiles()
         self.snapshots = try repository.loadUsageSnapshots()
+        self.historyStore = try? UsageHistoryStore(applicationSupportDirectory: repository.applicationSupportDirectory)
+        try? historyStore?.load()
+        recomputeAllEstimates()
         updateMenuBarSummary()
         usageAlertController.requestAuthorization()
         observeWake()
@@ -104,25 +114,32 @@ final class AppState: ObservableObject {
     }
 
     /// Called when the popover opens: Codex is a cheap local file scan and is
-    /// always re-read; the Claude probe spawns the CLI for up to 20 seconds,
-    /// so it only runs when its snapshot has outlived the refresh interval.
+    /// always re-read; Claude accounts refresh (sub-second usage API call,
+    /// with the slow CLI probe only as fallback) when any of them has
+    /// outlived the refresh interval.
     func refreshIfStale() {
         refreshActiveCodexUsage()
-        if shouldProbeClaudeNow() {
+        if shouldRefreshClaudeNow() {
             Task { await refreshAll() }
         } else {
             updateMenuBarSummary()
         }
     }
 
-    private func shouldProbeClaudeNow() -> Bool {
-        guard !isRefreshing, let profile = activeProfile(for: .claude) else {
+    private func shouldRefreshClaudeNow() -> Bool {
+        guard !isRefreshing else {
             return false
         }
-        guard let snapshot = snapshots[profile.id] else {
-            return true
+        return profiles.contains { profile in
+            guard profile.provider == .claude,
+                  profile.isActiveCLI || hasStoredSnapshot(for: profile) else {
+                return false
+            }
+            guard let snapshot = snapshots[profile.id] else {
+                return true
+            }
+            return snapshot.isStale(maxAge: TimeInterval(settings.refreshIntervalMinutes * 60))
         }
-        return snapshot.isStale(maxAge: TimeInterval(settings.refreshIntervalMinutes * 60))
     }
 
     // MARK: - Refresh (local-first)
@@ -135,6 +152,12 @@ final class AppState: ObservableObject {
         isRefreshing = true
         defer { isRefreshing = false }
 
+        // Reset alerts are evaluated against the pre-refresh snapshots first:
+        // fresh data for a rolled-over inactive account would otherwise erase
+        // the "was constrained" evidence the planner needs. The persisted
+        // dedupe keys keep the post-refresh pass below from double-firing.
+        notifyElapsedResets()
+
         // Attribute the current CLI logins to profiles (registering new
         // accounts as needed) and keep their credential snapshots fresh.
         for provider in Provider.allCases {
@@ -145,14 +168,40 @@ final class AppState: ObservableObject {
             }
         }
 
-        // Usage is read locally for the active account per provider. Inactive
-        // accounts keep their last snapshot; the UI shows how stale it is and
-        // whether the limit window has already reset.
-        await refreshActiveClaudeCodeUsage()
+        // Claude usage comes from the account-wide usage API for every
+        // profile with a captured token; Codex stays a local log scan for the
+        // active account only.
+        await refreshClaudeUsage()
         refreshActiveCodexUsage()
         notifyElapsedResets()
         updateMenuBarSummary()
         await checkForUpdatesIfDue()
+    }
+
+    /// Polls every Claude account through the usage API (active first, so its
+    /// numbers land even if an inactive account's refresh stalls). The slow
+    /// expect-probe of the CLI remains the fallback for the active account.
+    private func refreshClaudeUsage() async {
+        let claudeProfiles = profiles
+            .filter { $0.provider == .claude }
+            .sorted { $0.isActiveCLI && !$1.isActiveCLI }
+
+        for profile in claudeProfiles {
+            do {
+                let snapshot = try await claudeUsageService.fetchSnapshot(
+                    for: profile,
+                    isActiveCLI: profile.isActiveCLI
+                )
+                applySnapshot(snapshot, for: profile)
+            } catch {
+                if profile.isActiveCLI {
+                    await refreshActiveClaudeCodeUsage()
+                }
+                // Inactive profiles keep their last snapshot. A missing token
+                // is expected until the account has been the active login
+                // once — the per-cycle capture stores it automatically.
+            }
+        }
     }
 
     /// The app's core alert: an inactive account that was near or past its
@@ -287,12 +336,46 @@ final class AppState: ObservableObject {
 
     private func applySnapshot(_ snapshot: UsageSnapshot, for profile: AccountProfile) {
         snapshots[profile.id] = snapshot
+        _ = try? historyStore?.append(snapshot)
+        recomputeEstimates(for: profile, snapshot: snapshot)
         updateMenuBarSummary()
-        if settings.usageAlertsEnabled {
-            usageAlertController.handle(snapshot: snapshot, profile: profile)
+        // Near-limit alerts stay active-account-only: an inactive account
+        // nearing its limit is not actionable (nobody is burning it down);
+        // its "quota is back" reset alert is the one that matters.
+        if settings.usageAlertsEnabled, profile.isActiveCLI {
+            usageAlertController.handleThresholds(snapshot: snapshot, profile: profile)
         }
         saveSnapshots()
         statusMessage = "\(profile.label): \(snapshot.message)"
+    }
+
+    // MARK: - Burn rate
+
+    private func recomputeEstimates(for profile: AccountProfile, snapshot: UsageSnapshot) {
+        guard let historyStore else {
+            return
+        }
+        var estimates: [String: BurnRateEstimate] = [:]
+        for window in snapshot.orderedDisplayWindows {
+            let readings = historyStore
+                .readings(accountID: profile.id, windowID: window.id)
+                .map { BurnRateEstimator.Reading(timestamp: $0.timestamp, reading: $0.reading) }
+            estimates[window.id] = burnRateEstimator.estimate(readings: readings, window: window)
+        }
+        burnRateEstimates[profile.id] = estimates
+    }
+
+    private func recomputeAllEstimates() {
+        for profile in profiles {
+            guard let snapshot = snapshots[profile.id] else {
+                continue
+            }
+            recomputeEstimates(for: profile, snapshot: snapshot)
+        }
+    }
+
+    func historyRecords(for profile: AccountProfile) -> [UsageHistoryRecord] {
+        historyStore?.records(for: profile.id) ?? []
     }
 
     // MARK: - Dashboard fallback
@@ -365,6 +448,8 @@ final class AppState: ObservableObject {
         }
         profiles.remove(at: index)
         snapshots[profile.id] = nil
+        try? historyStore?.removeAccount(profile.id)
+        burnRateEstimates[profile.id] = nil
         persistProfiles()
         saveSnapshots()
         updateMenuBarSummary()
@@ -692,7 +777,8 @@ final class AppState: ObservableObject {
 
 @MainActor
 final class UsageAlertController {
-    private var lastNotifiedRisk: [UUID: RiskLevel] = [:]
+    private var lastNotifiedRisk: [AlertWindowKey: RiskLevel] = [:]
+    private let thresholdPlanner = ThresholdAlertPlanner()
     private let notifiedResetsKey = "notifiedResetDates"
 
     /// Reset alerts survive relaunches (persisted, keyed by account+window and
@@ -749,7 +835,10 @@ final class UsageAlertController {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    func handle(snapshot: UsageSnapshot, profile: AccountProfile) {
+    /// Per-window near-limit alerts. Session (5h) windows never notify —
+    /// heavy sessions would fire on every burn-down; they stay visual-only.
+    /// Each window re-arms once it drops back below the warning band.
+    func handleThresholds(snapshot: UsageSnapshot, profile: AccountProfile) {
         guard Bundle.main.bundleIdentifier != nil else {
             return
         }
@@ -758,47 +847,58 @@ final class UsageAlertController {
             return
         }
 
-        guard snapshot.riskLevel == .warning || snapshot.riskLevel == .depleted else {
-            lastNotifiedRisk[profile.id] = nil
-            return
-        }
+        rearmRecoveredWindows(snapshot: snapshot, profile: profile)
 
-        guard lastNotifiedRisk[profile.id] != snapshot.riskLevel else {
-            return
-        }
-
-        lastNotifiedRisk[profile.id] = snapshot.riskLevel
-
-        let content = UNMutableNotificationContent()
-        content.title = notificationTitle(snapshot: snapshot, profile: profile)
-        content.body = notificationBody(snapshot: snapshot, profile: profile)
-        content.sound = .default
-
-        let request = UNNotificationRequest(
-            identifier: "usage-\(profile.id.uuidString)-\(snapshot.riskLevel.rawValue)",
-            content: content,
-            trigger: nil
+        let alerts = thresholdPlanner.alerts(
+            snapshot: snapshot,
+            profile: profile,
+            lastNotified: lastNotifiedRisk
         )
-        UNUserNotificationCenter.current().add(request)
-        NSApplication.shared.requestUserAttention(.informationalRequest)
+        for alert in alerts {
+            lastNotifiedRisk[AlertWindowKey(profileID: alert.profileID, windowID: alert.windowID)] = alert.riskLevel
+
+            let content = UNMutableNotificationContent()
+            content.title = notificationTitle(alert: alert, profile: profile)
+            content.body = notificationBody(alert: alert, snapshot: snapshot, profile: profile)
+            content.sound = .default
+
+            let request = UNNotificationRequest(
+                identifier: "usage-\(alert.profileID.uuidString)-\(alert.windowID)-\(alert.riskLevel.rawValue)",
+                content: content,
+                trigger: nil
+            )
+            UNUserNotificationCenter.current().add(request)
+            NSApplication.shared.requestUserAttention(.informationalRequest)
+        }
     }
 
-    private func notificationTitle(snapshot: UsageSnapshot, profile: AccountProfile) -> String {
-        if snapshot.riskLevel == .depleted {
-            return "\(profile.label) limit reached"
+    private func rearmRecoveredWindows(snapshot: UsageSnapshot, profile: AccountProfile) {
+        var currentRisk: [AlertWindowKey: RiskLevel] = [:]
+        if snapshot.windows.isEmpty {
+            currentRisk[AlertWindowKey(profileID: profile.id, windowID: "quota")] = snapshot.riskLevel
+        } else {
+            for window in snapshot.windows {
+                currentRisk[AlertWindowKey(profileID: profile.id, windowID: window.id)] = window.riskLevel
+            }
         }
-
-        if let used = snapshot.usedFraction {
-            return "\(profile.label) is \(Int((used * 100).rounded()))% used"
+        for (key, risk) in currentRisk where risk != .warning && risk != .depleted {
+            lastNotifiedRisk[key] = nil
         }
-
-        return "\(profile.label) is near its limit"
     }
 
-    private func notificationBody(snapshot: UsageSnapshot, profile: AccountProfile) -> String {
-        var parts = ["\(profile.provider.displayName) included usage is \(snapshot.riskLevel == .depleted ? "depleted" : "near the limit")."]
-        if let reset = snapshot.resetDescription {
-            parts.append("Reset \(reset).")
+    private func notificationTitle(alert: ThresholdAlert, profile: AccountProfile) -> String {
+        if alert.riskLevel == .depleted {
+            return "\(profile.label): \(alert.windowLabel) limit reached"
+        }
+        return "\(profile.label): \(alert.windowLabel) \(Int(alert.usedPercent.rounded()))% used"
+    }
+
+    private func notificationBody(alert: ThresholdAlert, snapshot: UsageSnapshot, profile: AccountProfile) -> String {
+        var parts = [
+            "\(profile.provider.displayName) \(alert.windowLabel) usage is \(alert.riskLevel == .depleted ? "depleted" : "near the limit")."
+        ]
+        if let reset = alert.resetDescription ?? snapshot.resetDescription {
+            parts.append("Resets \(reset).")
         }
         if let credit = snapshot.creditStatus {
             parts.append(credit)
