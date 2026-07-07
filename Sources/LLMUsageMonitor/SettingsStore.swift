@@ -1,5 +1,13 @@
 import Foundation
 
+/// Which quota window the menu-bar percentage (and the summary tiles) show.
+enum MenuBarWindowPreference: String, CaseIterable {
+    /// The window closest to its limit — answers "can I keep working?".
+    case mostConstrained
+    case session
+    case weekly
+}
+
 /// UserDefaults-backed app preferences.
 @MainActor
 final class SettingsStore: ObservableObject {
@@ -7,6 +15,10 @@ final class SettingsStore: ObservableObject {
 
     @Published var refreshIntervalMinutes: Int {
         didSet { defaults.set(refreshIntervalMinutes, forKey: Keys.refreshIntervalMinutes) }
+    }
+
+    @Published var menuBarWindowPreference: MenuBarWindowPreference {
+        didSet { defaults.set(menuBarWindowPreference.rawValue, forKey: Keys.menuBarWindowPreference) }
     }
 
     /// Gates the "usage nearing / at its limit" notifications.
@@ -30,12 +42,15 @@ final class SettingsStore: ObservableObject {
         self.defaults = defaults
         let storedInterval = defaults.object(forKey: Keys.refreshIntervalMinutes) as? Int
         self.refreshIntervalMinutes = min(240, max(1, storedInterval ?? 10))
+        self.menuBarWindowPreference = (defaults.string(forKey: Keys.menuBarWindowPreference))
+            .flatMap(MenuBarWindowPreference.init(rawValue:)) ?? .mostConstrained
         self.usageAlertsEnabled = defaults.object(forKey: Keys.usageAlertsEnabled) as? Bool ?? true
         self.resetAlertsEnabled = defaults.object(forKey: Keys.resetAlertsEnabled) as? Bool ?? true
     }
 
     private enum Keys {
         static let refreshIntervalMinutes = "refreshIntervalMinutes"
+        static let menuBarWindowPreference = "menuBarWindowPreference"
         static let usageAlertsEnabled = "usageAlertsEnabled"
         static let resetAlertsEnabled = "resetAlertsEnabled"
         static let lastUpdateCheck = "lastUpdateCheck"

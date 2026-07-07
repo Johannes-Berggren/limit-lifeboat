@@ -22,7 +22,7 @@ struct MenuRootView: View {
 
             footer
         }
-        .frame(minWidth: 430, minHeight: 560)
+        .frame(minWidth: 430, minHeight: 480)
     }
 
     private var header: some View {
@@ -64,7 +64,11 @@ struct MenuRootView: View {
                 .disabled(state.isRefreshing)
             }
 
-            TopUsageSummaryView(profiles: state.profiles, snapshots: state.snapshots)
+            TopUsageSummaryView(
+                profiles: state.profiles,
+                snapshots: state.snapshots,
+                preferredFraction: { state.preferredUsedFraction(for: $0) }
+            )
 
             if let update = state.availableUpdate {
                 Button {
@@ -146,6 +150,8 @@ struct MenuRootView: View {
                         profile: profile,
                         snapshot: state.snapshots[profile.id],
                         hasStoredSnapshot: state.hasStoredSnapshot(for: profile),
+                        estimates: state.burnRateEstimates[profile.id] ?? [:],
+                        historyRecords: { state.historyRecords(for: profile) },
                         switchCLI: { state.switchCLI(to: profile) },
                         openDashboard: { state.openDashboard(for: profile) },
                         beginCLILogin: { state.beginCLILogin(for: profile) },
@@ -183,6 +189,8 @@ struct AccountRowView: View {
     let profile: AccountProfile
     let snapshot: UsageSnapshot?
     let hasStoredSnapshot: Bool
+    let estimates: [String: BurnRateEstimate]
+    let historyRecords: () -> [UsageHistoryRecord]
     let switchCLI: () -> Void
     let openDashboard: () -> Void
     let beginCLILogin: () -> Void
@@ -192,89 +200,15 @@ struct AccountRowView: View {
 
     @State private var showsRenameAlert = false
     @State private var renameText = ""
+    @State private var showsScopedWindows = false
+    @State private var showsBillingDetails = false
+    @State private var showsHistory = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 8) {
-                Circle()
-                    .fill(riskColor)
-                    .frame(width: 8, height: 8)
-                    .padding(.top, 4)
-
-                VStack(alignment: .leading, spacing: 1) {
-                    HStack(spacing: 6) {
-                        Text(profile.label)
-                            .font(.system(size: 13, weight: .semibold))
-                        if profile.isActiveCLI {
-                            Badge(text: "Active terminal", systemImage: "terminal.fill", color: .green)
-                        }
-                    }
-
-                    Text(identityText)
-                        .font(.caption)
-                        .foregroundStyle(profile.identity == nil ? .tertiary : .secondary)
-                        .lineLimit(1)
-                        .help(identityText)
-
-                    Text(statusText)
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(2)
-                }
-
-                Spacer()
-
-                Menu {
-                    Button("Open Dashboard…") { openDashboard() }
-                    Button("Log In via Terminal") { beginCLILogin() }
-                    Button("Save CLI Snapshot Now") { captureCLI() }
-                    Divider()
-                    Button("Rename…") {
-                        renameText = profile.label
-                        showsRenameAlert = true
-                    }
-                    Button("Remove…", role: .destructive) { remove() }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .help("More actions")
-            }
-
-            if let snapshot, !snapshot.displayWindows.isEmpty {
-                ForEach(snapshot.displayWindows) { window in
-                    UsageGauge(window: window, compact: true)
-                }
-            } else {
-                UsageGauge(window: nil, compact: true)
-            }
-            BillingStatusView(snapshot: snapshot, compact: true)
-
-            if let staleness {
-                Label(staleness.text, systemImage: staleness.isOpportunity ? "arrow.counterclockwise.circle" : "clock")
-                    .font(.caption)
-                    .foregroundStyle(staleness.isOpportunity ? Color.green : Color.secondary)
-            }
-
-            if !profile.isActiveCLI {
-                HStack(spacing: 8) {
-                    Button {
-                        switchCLI()
-                    } label: {
-                        Label("Switch CLI to this account", systemImage: "arrow.triangle.2.circlepath")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!hasStoredSnapshot)
-                    .help(
-                        hasStoredSnapshot
-                            ? "Restore this account's saved CLI credentials"
-                            : "Log into this account once in the terminal so its credentials can be captured"
-                    )
-
-                    Spacer()
-                }
-            }
+        VStack(alignment: .leading, spacing: DS.Spacing.sm) {
+            header
+            gauges
+            footer
         }
         .padding(DS.Spacing.cardPadding)
         .cardSurface()
@@ -283,47 +217,212 @@ struct AccountRowView: View {
             Button("Rename") { rename(renameText) }
             Button("Cancel", role: .cancel) {}
         }
+        .sheet(isPresented: $showsHistory) {
+            UsageHistoryChartView(profile: profile, records: historyRecords())
+        }
     }
 
-    private var staleness: (text: String, isOpportunity: Bool)? {
+    // MARK: Row 1 — header
+
+    private var header: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(riskColor)
+                .frame(width: 8, height: 8)
+
+            Text(profile.label)
+                .font(.system(size: 13, weight: .semibold))
+                .lineLimit(1)
+                .help(identityText)
+
+            if profile.isActiveCLI {
+                Badge(text: "Active", systemImage: "terminal.fill", color: .green)
+                    .help("This account is the current terminal login")
+            }
+
+            Spacer(minLength: DS.Spacing.xs)
+
+            if let billingBadge {
+                Button {
+                    showsBillingDetails = true
+                } label: {
+                    Badge(text: billingBadge.text, color: billingBadge.color)
+                }
+                .buttonStyle(.plain)
+                .help(billingBadge.help)
+                .popover(isPresented: $showsBillingDetails, arrowEdge: .bottom) {
+                    BillingStatusView(snapshot: snapshot, compact: false)
+                        .padding(DS.Spacing.md)
+                        .frame(width: 300)
+                }
+            }
+
+            Menu {
+                Button("Open Dashboard…") { openDashboard() }
+                Button("Log In via Terminal") { beginCLILogin() }
+                Button("Save CLI Snapshot Now") { captureCLI() }
+                Divider()
+                Button("Usage History…") { showsHistory = true }
+                Button("Billing Details…") { showsBillingDetails = true }
+                Divider()
+                Button("Rename…") {
+                    renameText = profile.label
+                    showsRenameAlert = true
+                }
+                Button("Remove…", role: .destructive) { remove() }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("More actions")
+        }
+    }
+
+    // MARK: Rows 2–3 — window gauges
+
+    @ViewBuilder
+    private var gauges: some View {
+        let ordered = snapshot?.orderedDisplayWindows ?? []
+        let primary = ordered.filter { $0.kind != .weeklyScoped }
+        let scoped = ordered.filter { $0.kind == .weeklyScoped }
+        let atRiskScoped = scoped.filter { $0.riskLevel == .warning || $0.riskLevel == .depleted }
+        let collapsibleScoped = scoped.filter { $0.riskLevel != .warning && $0.riskLevel != .depleted }
+
+        ForEach(primary) { window in
+            UsageGauge(window: window, compact: true, estimate: estimates[window.id])
+        }
+
+        if profile.isActiveCLI,
+           profile.provider == .claude,
+           !ordered.isEmpty,
+           !ordered.contains(where: { $0.kind == .session }) {
+            Text("Session — not captured on last refresh")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .help("The last reading predates session-limit support; the next refresh adds it.")
+        }
+
+        // A per-model weekly limit that is actually at risk must not hide.
+        ForEach(atRiskScoped) { window in
+            UsageGauge(window: window, compact: true, micro: true, estimate: estimates[window.id])
+        }
+
+        if !collapsibleScoped.isEmpty {
+            if showsScopedWindows {
+                ForEach(collapsibleScoped) { window in
+                    UsageGauge(window: window, compact: true, micro: true, estimate: estimates[window.id])
+                }
+            }
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    showsScopedWindows.toggle()
+                }
+            } label: {
+                Label(
+                    showsScopedWindows
+                        ? "Show less"
+                        : "\(collapsibleScoped.count) more weekly \(collapsibleScoped.count == 1 ? "limit" : "limits")",
+                    systemImage: showsScopedWindows ? "chevron.up" : "chevron.down"
+                )
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    // MARK: Row 4 — quiet footer (omitted when empty)
+
+    @ViewBuilder
+    private var footer: some View {
+        let note = footerNote
+        let showsSwitchButton = !profile.isActiveCLI
+        if note != nil || showsSwitchButton {
+            HStack(spacing: DS.Spacing.sm) {
+                if let note {
+                    Label(note.text, systemImage: note.icon)
+                        .font(.caption)
+                        .foregroundStyle(note.color)
+                        .lineLimit(2)
+                }
+
+                Spacer(minLength: 0)
+
+                if showsSwitchButton {
+                    switchButton
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var switchButton: some View {
+        let resetElapsed = snapshot?.resetHasElapsed() == true
+        Button {
+            switchCLI()
+        } label: {
+            Label("Switch", systemImage: "arrow.triangle.2.circlepath")
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .tint(resetElapsed ? .green : nil)
+        .disabled(!hasStoredSnapshot)
+        .help(
+            hasStoredSnapshot
+                ? (resetElapsed
+                    ? "This account's limit window has rolled over — switch the CLI to it for fresh quota"
+                    : "Switch the CLI to this account's saved credentials")
+                : "Log into this account once in the terminal so its credentials can be captured"
+        )
+    }
+
+    private var footerNote: (text: String, icon: String, color: Color)? {
         guard let snapshot else {
-            return nil
+            return (
+                hasStoredSnapshot
+                    ? "Credentials saved — usage appears after switching to it"
+                    : "Log in via the terminal to link this account",
+                "person.crop.circle.badge.questionmark",
+                .secondary
+            )
         }
 
         // The opportunity label stays inactive-only: for the active account a
         // refresh simply confirms the reset, but stale readings deserve a
         // flag on every row — active accounts drift too (sleep, failures).
         if !profile.isActiveCLI, snapshot.resetHasElapsed() {
-            return ("Limit window elapsed — likely full quota again", true)
+            return ("Limit window elapsed — likely full quota again", "arrow.counterclockwise.circle", .green)
         }
 
-        guard snapshot.isStale() else {
-            return nil
+        if snapshot.isStale() {
+            return (
+                "Last checked \(snapshot.lastRefreshed.formatted(.relative(presentation: .named)))",
+                "clock",
+                .secondary
+            )
         }
-        return ("Last checked \(snapshot.lastRefreshed.formatted(.relative(presentation: .named)))", false)
+
+        if snapshot.orderedDisplayWindows.isEmpty, !snapshot.message.isEmpty {
+            return (snapshot.message, "info.circle", .secondary)
+        }
+
+        return nil
     }
 
-    private var statusText: String {
-        guard let snapshot else {
-            return hasStoredSnapshot
-                ? "Credentials saved — usage appears after switching to it"
-                : "Log in via the terminal to link this account"
+    /// Only noteworthy billing states earn a badge; a healthy subscription
+    /// is the assumed default and stays quiet.
+    private var billingBadge: (text: String, color: Color, help: String)? {
+        switch snapshot?.billingUsageMode {
+        case .overLimitPayAsYouGo:
+            return ("PAYG", .red, "Included usage appears depleted — extra usage may be billed. Click for details.")
+        case .payAsYouGoVisible:
+            return ("Credits", .orange, "Credit/pay-as-you-go data found; included usage unclear. Click for details.")
+        case .needsLogin:
+            return ("Sign in", DS.staleAmber, "Connect or refresh this account before trusting its numbers. Click for details.")
+        case .includedSubscription, .includedSubscriptionNearLimit, .unknown, .none:
+            return nil
         }
-
-        var parts: [String] = []
-        if let remaining = snapshot.includedRemaining, let limit = snapshot.includedLimit {
-            parts.append("\(format(remaining)) / \(format(limit)) remaining")
-        } else if let remaining = snapshot.includedRemaining {
-            parts.append("\(format(remaining)) remaining")
-        } else {
-            parts.append(snapshot.message)
-        }
-
-        if let resetDescription = snapshot.resetDescription {
-            parts.append("Reset \(resetDescription)")
-        }
-
-        return parts.joined(separator: " • ")
     }
 
     private var identityText: String {
@@ -344,18 +443,13 @@ struct AccountRowView: View {
     private var riskColor: Color {
         DS.riskColor(snapshot?.riskLevel ?? .unknown)
     }
-
-    private func format(_ value: Double) -> String {
-        if value.rounded() == value {
-            return String(Int(value))
-        }
-        return String(format: "%.1f", value)
-    }
 }
 
 struct TopUsageSummaryView: View {
     let profiles: [AccountProfile]
     let snapshots: [UUID: UsageSnapshot]
+    /// Mirrors the menu-bar number so the tile and the title always agree.
+    let preferredFraction: (UsageSnapshot) -> Double?
 
     var body: some View {
         HStack(spacing: DS.Spacing.sm) {
@@ -378,10 +472,15 @@ struct TopUsageSummaryView: View {
                     .foregroundStyle(DS.billingColor(snapshot.billingUsageMode))
                     .contentTransition(.numericText())
                     .animation(.default, value: summaryValue(for: snapshot))
-                Badge(
-                    text: shortBillingLabel(for: snapshot.billingUsageMode),
-                    color: DS.billingColor(snapshot.billingUsageMode)
-                )
+                if let caption = windowsCaption(for: snapshot) {
+                    Text(caption.text)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .help(caption.help)
+                } else if let billing = noteworthyBillingBadge(for: snapshot.billingUsageMode) {
+                    Badge(text: billing.text, color: billing.color)
+                }
             } else {
                 Text("–")
                     .font(.title3.monospacedDigit().weight(.semibold))
@@ -408,30 +507,43 @@ struct TopUsageSummaryView: View {
             return "PAYG"
         }
 
-        guard let usedFraction = snapshot.usedFraction else {
+        guard let usedFraction = preferredFraction(snapshot) else {
             return "–"
         }
 
         return "\(Int((usedFraction * 100).rounded()))%"
     }
 
-    private func shortBillingLabel(for mode: BillingUsageMode) -> String {
-        switch mode {
-        case .includedSubscription:
-            return "Included subscription"
-        case .includedSubscriptionNearLimit:
-            return "Included, near limit"
-        case .overLimitPayAsYouGo:
-            return "Pay-as-you-go"
-        case .payAsYouGoVisible:
-            return "Credits visible"
-        case .needsLogin:
-            return "Needs login"
-        case .unknown:
-            return "Mode unknown"
+    /// "S 53% · W 8%" — both windows at a glance under the big number.
+    private func windowsCaption(for snapshot: UsageSnapshot) -> (text: String, help: String)? {
+        var parts: [String] = []
+        var helpParts: [String] = []
+        if let session = snapshot.window(ofKind: .session) {
+            parts.append("S \(Int(session.usedPercent.rounded()))%")
+            helpParts.append("\(session.label): \(Int(session.usedPercent.rounded()))% used")
         }
+        if let weekly = snapshot.window(ofKind: .weekly) ?? snapshot.window(ofKind: .weeklyScoped) {
+            parts.append("W \(Int(weekly.usedPercent.rounded()))%")
+            helpParts.append("\(weekly.label): \(Int(weekly.usedPercent.rounded()))% used")
+        }
+        guard !parts.isEmpty else {
+            return nil
+        }
+        return (parts.joined(separator: " · "), helpParts.joined(separator: "\n"))
     }
 
+    private func noteworthyBillingBadge(for mode: BillingUsageMode) -> (text: String, color: Color)? {
+        switch mode {
+        case .overLimitPayAsYouGo:
+            return ("Pay-as-you-go", .red)
+        case .payAsYouGoVisible:
+            return ("Credits visible", .orange)
+        case .needsLogin:
+            return ("Needs login", DS.staleAmber)
+        case .includedSubscription, .includedSubscriptionNearLimit, .unknown:
+            return nil
+        }
+    }
 }
 
 struct BillingStatusView: View {
@@ -559,26 +671,38 @@ struct BillingStatusView: View {
 }
 
 /// Renders one quota window as a labelled progress bar. An account shows one
-/// of these per window (Session, Weekly, …); `window == nil` is the empty state.
+/// of these per window (Session, Weekly, …); `micro` is the slimmer variant
+/// for secondary per-model windows; `window == nil` is the empty state.
 struct UsageGauge: View {
     let window: UsageWindow?
     let compact: Bool
+    var micro: Bool = false
+    var estimate: BurnRateEstimate? = nil
 
     var body: some View {
-        VStack(alignment: .leading, spacing: compact ? 4 : 8) {
+        VStack(alignment: .leading, spacing: micro ? 2 : (compact ? 4 : 8)) {
             HStack(spacing: 8) {
                 Text(window?.label ?? "Usage unknown")
-                    .font(compact ? .caption.weight(.medium) : .subheadline.weight(.semibold))
+                    .font(labelFont)
+                    .foregroundStyle(micro ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
                     .lineLimit(1)
                 Spacer()
-                if let reset = window?.resetDescription {
-                    Text("Resets \(reset)")
+                if case .depletesAt(let date) = estimate {
+                    Text("~empty \(Self.shortClock(date))")
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(DS.riskColor(.warning))
+                        .lineLimit(1)
+                        .help("At the current pace this window runs out around \(Self.longClock(date)), before it resets.")
+                }
+                if let reset = resetText {
+                    Text(reset)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .help(resetHelp ?? reset)
                 }
                 Text(usageValue)
-                    .font(.caption.weight(.semibold))
+                    .font(micro ? .caption2.weight(.semibold) : .caption.weight(.semibold))
                     .monospacedDigit()
                     .contentTransition(.numericText())
                     .animation(.default, value: usageValue)
@@ -594,8 +718,42 @@ struct UsageGauge: View {
                 }
                 .animation(.spring(duration: 0.5, bounce: 0.15), value: window?.usedFraction)
             }
-            .frame(height: compact ? 6 : 10)
+            .frame(height: micro ? 3 : (compact ? 6 : 10))
         }
+    }
+
+    private var labelFont: Font {
+        if micro {
+            return .caption2
+        }
+        return compact ? .caption.weight(.medium) : .subheadline.weight(.semibold)
+    }
+
+    /// Short relative reset ("resets in 3h") from the parsed date; the raw
+    /// provider phrasing ("2:50am (Europe/Oslo)") is too long for the row and
+    /// moves to the tooltip.
+    private var resetText: String? {
+        guard let window else {
+            return nil
+        }
+        if let date = window.resetDate {
+            let remaining = date.timeIntervalSinceNow
+            if remaining > 0 {
+                return "resets in \(Self.shortDuration(remaining))"
+            }
+            return "reset elapsed"
+        }
+        return window.resetDescription.map { "Resets \($0)" }
+    }
+
+    private var resetHelp: String? {
+        guard let window else {
+            return nil
+        }
+        if let date = window.resetDate {
+            return "Resets \(date.formatted(date: .abbreviated, time: .shortened))"
+        }
+        return window.resetDescription.map { "Resets \($0)" }
     }
 
     private func fillWidth(in totalWidth: CGFloat) -> CGFloat {
@@ -609,10 +767,33 @@ struct UsageGauge: View {
         guard let window else {
             return "–"
         }
-        return "\(Int(window.usedPercent.rounded()))% used"
+        return "\(Int(window.usedPercent.rounded()))%\(micro ? "" : " used")"
     }
 
     private var riskColor: Color {
         DS.riskColor(window?.riskLevel ?? .unknown)
+    }
+
+    static func shortDuration(_ seconds: TimeInterval) -> String {
+        let minutes = Int(seconds / 60)
+        if minutes < 60 {
+            return "\(max(1, minutes))m"
+        }
+        let hours = minutes / 60
+        if hours < 48 {
+            return "\(hours)h"
+        }
+        return "\(hours / 24)d"
+    }
+
+    static func shortClock(_ date: Date) -> String {
+        if Calendar.current.isDateInToday(date) {
+            return date.formatted(date: .omitted, time: .shortened)
+        }
+        return date.formatted(.dateTime.weekday(.abbreviated).hour().minute())
+    }
+
+    static func longClock(_ date: Date) -> String {
+        date.formatted(date: .abbreviated, time: .shortened)
     }
 }

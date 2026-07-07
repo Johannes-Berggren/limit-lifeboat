@@ -77,6 +77,18 @@ final class AppState: ObservableObject {
                 self.startBackgroundRefresh()
             }
             .store(in: &cancellables)
+
+        // @Published emits on willSet, so rebuild the title on the next
+        // runloop turn — reading the property inside the sink directly would
+        // still see the old preference.
+        self.settings.$menuBarWindowPreference
+            .dropFirst()
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.updateMenuBarSummary()
+            }
+            .store(in: &cancellables)
     }
 
     deinit {
@@ -703,10 +715,26 @@ final class AppState: ObservableObject {
             return "PAYG\(staleMark)"
         }
 
-        guard let used = snapshot.usedFraction else {
+        guard let used = preferredUsedFraction(for: snapshot) else {
             return "?"
         }
         return "\(Int((used * 100).rounded()))%\(staleMark)"
+    }
+
+    /// The fraction behind the menu-bar number, honoring the Settings choice.
+    /// A pinned window that is missing falls back to most-constrained — a
+    /// wrong-but-plausible steady number would hide real risk.
+    func preferredUsedFraction(for snapshot: UsageSnapshot) -> Double? {
+        let mostConstrained = snapshot.mostConstrainedWindow?.usedFraction ?? snapshot.usedFraction
+        switch settings.menuBarWindowPreference {
+        case .mostConstrained:
+            return mostConstrained
+        case .session:
+            return snapshot.window(ofKind: .session)?.usedFraction ?? mostConstrained
+        case .weekly:
+            let weekly = snapshot.window(ofKind: .weekly) ?? snapshot.window(ofKind: .weeklyScoped)
+            return weekly?.usedFraction ?? mostConstrained
+        }
     }
 
     /// Menu-bar risk reflects the accounts the terminal is actually using;
@@ -761,7 +789,12 @@ final class AppState: ObservableObject {
             }
 
             var entry: String
-            if let used = snapshot.usedFraction {
+            let windowSummary = snapshot.orderedDisplayWindows
+                .map { "\($0.label) \(Int($0.usedPercent.rounded())) percent used" }
+                .joined(separator: ", ")
+            if !windowSummary.isEmpty {
+                entry = "\(provider.displayName) active account \(profile.label): \(windowSummary), \(mode)"
+            } else if let used = snapshot.usedFraction {
                 entry = "\(provider.displayName) active account \(profile.label) \(Int((used * 100).rounded())) percent used, \(mode)"
             } else {
                 entry = "\(provider.displayName) active account \(profile.label) \(mode)"
