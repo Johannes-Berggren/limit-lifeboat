@@ -3,15 +3,16 @@ import Security
 
 public enum CredentialStoreError: Error, LocalizedError {
     case encodeFailed
-    case decodeFailed
+    case decodeFailed(underlying: Error?)
     case keychainError(OSStatus)
 
     public var errorDescription: String? {
         switch self {
         case .encodeFailed:
             return "Could not encode the credential snapshot."
-        case .decodeFailed:
-            return "Could not decode the credential snapshot."
+        case .decodeFailed(let underlying):
+            let reason = underlying?.localizedDescription ?? "the data is not in the expected format"
+            return "Could not decode the saved credentials (\(reason))."
         case .keychainError(let status):
             return "Keychain operation failed with status \(status)."
         }
@@ -75,11 +76,14 @@ public final class KeychainCredentialStore: CredentialStoreProtocol {
         guard status == errSecSuccess else {
             throw CredentialStoreError.keychainError(status)
         }
-        guard let data = result as? Data,
-              let snapshot = try? decoder.decode(CredentialSnapshot.self, from: data) else {
-            throw CredentialStoreError.decodeFailed
+        guard let data = result as? Data else {
+            throw CredentialStoreError.decodeFailed(underlying: nil)
         }
-        return snapshot
+        do {
+            return try decoder.decode(CredentialSnapshot.self, from: data)
+        } catch {
+            throw CredentialStoreError.decodeFailed(underlying: error)
+        }
     }
 
     public func deleteSnapshot(for accountID: UUID) throws {
