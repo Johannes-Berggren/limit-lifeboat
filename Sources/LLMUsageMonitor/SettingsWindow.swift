@@ -110,6 +110,13 @@ struct SettingsView: View {
                 Toggle("Alert when an account's quota is likely back", isOn: $settings.resetAlertsEnabled)
             }
 
+            Section("Switching") {
+                Toggle("Switch CLI automatically when the active account is depleted", isOn: $settings.autoSwitchEnabled)
+                Text("Switches to the account with the most remaining quota and sends a notification. Only fires when another account clearly has more headroom.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Updates") {
                 LabeledContent("Version", value: AppInfo.version)
                 if let update = state.availableUpdate {

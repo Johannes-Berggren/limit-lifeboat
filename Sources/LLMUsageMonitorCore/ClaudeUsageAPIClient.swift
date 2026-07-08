@@ -47,6 +47,20 @@ public struct ClaudeAPIUsage: Equatable, Sendable {
     }
 }
 
+/// Who an OAuth access token belongs to and which plan tier the organization
+/// is on, as the api/oauth/profile endpoint reports it.
+public struct ClaudeAPIAccountInfo: Equatable, Sendable {
+    public var identity: AccountIdentity?
+    /// Short human tier ("Max 20x", "Pro"); nil when the response carries no
+    /// recognizable plan signal.
+    public var planLabel: String?
+
+    public init(identity: AccountIdentity? = nil, planLabel: String? = nil) {
+        self.identity = identity
+        self.planLabel = planLabel
+    }
+}
+
 /// Fetches the account-wide usage view from api.anthropic.com with a Claude
 /// Code OAuth access token. Unlike the local TUI scrape this covers every
 /// device on the account, so its snapshots use the same window ids as the
@@ -61,7 +75,15 @@ public struct ClaudeUsageAPIClient: Sendable {
     }
 
     public func fetchUsage(accessToken: String) async throws -> ClaudeAPIUsage {
-        var request = URLRequest(url: ClaudeOAuthConstants.usageEndpoint)
+        let object = try await fetchJSONObject(from: ClaudeOAuthConstants.usageEndpoint, accessToken: accessToken)
+        return parseUsage(from: object)
+    }
+
+    /// Shared GET plumbing for the OAuth endpoints: same header set and the
+    /// same error mapping everywhere (401/403 -> unauthorized, other non-2xx
+    /// -> http, transport failures -> network, non-object JSON -> malformed).
+    private func fetchJSONObject(from url: URL, accessToken: String) async throws -> [String: Any] {
+        var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue(ClaudeOAuthConstants.betaHeader, forHTTPHeaderField: "anthropic-beta")
@@ -88,7 +110,7 @@ public struct ClaudeUsageAPIClient: Sendable {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw ClaudeUsageAPIError.malformedResponse
         }
-        return parseUsage(from: object)
+        return object
     }
 
     public func makeSnapshot(for profile: AccountProfile, usage: ClaudeAPIUsage, now: Date = Date()) -> UsageSnapshot {
@@ -269,5 +291,103 @@ public struct ClaudeUsageAPIClient: Sendable {
 
     private func humanized(_ kindRaw: String) -> String {
         kindRaw.replacingOccurrences(of: "_", with: " ")
+    }
+}
+
+// MARK: - Account info (api/oauth/profile)
+
+extension ClaudeUsageAPIClient {
+    /// GET api/oauth/profile — who the token belongs to plus the plan tier.
+    /// `ClaudeOAuthConstants` (ClaudeOAuthCredentials.swift) is owned by the
+    /// credential layer, so the profile URL lives here with its only caller.
+    public static let profileEndpoint = URL(string: "https://api.anthropic.com/api/oauth/profile")!
+
+    /// Fetches the account identity and plan label behind an access token.
+    /// Field mapping mirrors `ClaudeIdentityReader`'s ~/.claude.json read:
+    /// `accountID` carries the *account* uuid (oauthAccount.accountUuid ==
+    /// profile account.uuid) and `organization` the organization *name*, so
+    /// `CLIAccountSyncPlanner` matching agrees across both identity sources
+    /// — including accounts that share one email across two organizations.
+    public func fetchAccountInfo(accessToken: String, now: Date = Date()) async throws -> ClaudeAPIAccountInfo {
+        let object = try await fetchJSONObject(from: Self.profileEndpoint, accessToken: accessToken)
+        return parseAccountInfo(from: object, now: now)
+    }
+
+    /// Tolerant by design: missing or oddly-typed keys degrade to nil fields,
+    /// never a throw, matching how the usage response is parsed.
+    private func parseAccountInfo(from object: [String: Any], now: Date) -> ClaudeAPIAccountInfo {
+        let account = object["account"] as? [String: Any] ?? [:]
+        let organization = object["organization"] as? [String: Any] ?? [:]
+
+        let email = account["email"] as? String
+        let displayName = (account["full_name"] as? String) ?? (account["display_name"] as? String)
+        let organizationName = organization["name"] as? String
+        // The account uuid, never organization.uuid — see fetchAccountInfo.
+        let accountID = account["uuid"] as? String
+
+        var identity: AccountIdentity?
+        if email != nil || displayName != nil || organizationName != nil || accountID != nil {
+            identity = AccountIdentity(
+                email: email,
+                displayName: displayName,
+                organization: organizationName,
+                accountID: accountID,
+                source: .claudeCodeUsage,
+                updatedAt: now
+            )
+        }
+
+        let planLabel = Self.planLabel(
+            rateLimitTier: organization["rate_limit_tier"] as? String,
+            organizationType: organization["organization_type"] as? String,
+            hasClaudeMax: (account["has_claude_max"] as? Bool) ?? false,
+            hasClaudePro: (account["has_claude_pro"] as? Bool) ?? false
+        )
+
+        return ClaudeAPIAccountInfo(identity: identity, planLabel: planLabel)
+    }
+
+    /// Maps the profile endpoint's plan fields onto a short human tier label.
+    /// The rate-limit tier is the most specific signal; when it is absent or
+    /// unrecognized the organization type, then the account flags, decide.
+    /// Pure so the mapping table is directly testable.
+    static func planLabel(
+        rateLimitTier: String?,
+        organizationType: String?,
+        hasClaudeMax: Bool,
+        hasClaudePro: Bool
+    ) -> String? {
+        if let tier = rateLimitTier?.lowercased() {
+            if let multiplier = maxTierMultiplier(in: tier) {
+                return "Max \(multiplier)x"
+            }
+            if tier.contains("pro") {
+                return "Pro"
+            }
+        }
+        if organizationType?.lowercased() == "claude_max" {
+            return "Max"
+        }
+        // Max outranks Pro when both flags are set — an upgraded account
+        // keeps has_claude_pro true.
+        if hasClaudeMax {
+            return "Max"
+        }
+        if hasClaudePro {
+            return "Pro"
+        }
+        return nil
+    }
+
+    /// The <N> in "default_claude_max_<N>x", so multipliers Anthropic ships
+    /// later ("7x") still label correctly without a table update.
+    private static func maxTierMultiplier(in tier: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: #"default_claude_max_(\d+)x"#),
+              let match = regex.firstMatch(in: tier, range: NSRange(tier.startIndex..<tier.endIndex, in: tier)),
+              match.numberOfRanges > 1,
+              let range = Range(match.range(at: 1), in: tier) else {
+            return nil
+        }
+        return String(tier[range])
     }
 }

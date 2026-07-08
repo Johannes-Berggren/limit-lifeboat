@@ -125,6 +125,11 @@ struct MenuRootView: View {
 
     private func providerSection(_ provider: Provider) -> some View {
         let profiles = state.profiles.filter { $0.provider == provider }
+        // Highlight the advised switch target only while the active account
+        // is actually constrained — a permanent highlight would be noise.
+        let activeSnapshot = profiles.first(where: \.isActiveCLI).flatMap { state.snapshots[$0.id] }
+        let activeAtRisk = activeSnapshot.map { $0.riskLevel == .warning || $0.riskLevel == .depleted } ?? false
+        let advisedID = (provider == .claude && activeAtRisk) ? state.switchAdvice?.bestCandidateID : nil
 
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -151,6 +156,7 @@ struct MenuRootView: View {
                         snapshot: state.snapshots[profile.id],
                         hasStoredSnapshot: state.hasStoredSnapshot(for: profile),
                         estimates: state.burnRateEstimates[profile.id] ?? [:],
+                        adviceReason: advisedID == profile.id ? state.switchAdvice?.reason : nil,
                         historyRecords: { state.historyRecords(for: profile) },
                         switchCLI: { state.switchCLI(to: profile) },
                         openDashboard: { state.openDashboard(for: profile) },
@@ -190,6 +196,8 @@ struct AccountRowView: View {
     let snapshot: UsageSnapshot?
     let hasStoredSnapshot: Bool
     let estimates: [String: BurnRateEstimate]
+    /// Non-nil exactly when this account is the advised switch target.
+    var adviceReason: String? = nil
     let historyRecords: () -> [UsageHistoryRecord]
     let switchCLI: () -> Void
     let openDashboard: () -> Void
@@ -278,7 +286,7 @@ struct AccountRowView: View {
             // Anchored here (not on the conditional badge) so the menu's
             // "Billing Details…" works for healthy accounts with no badge.
             .popover(isPresented: $showsBillingDetails, arrowEdge: .bottom) {
-                BillingStatusView(snapshot: snapshot)
+                BillingStatusView(snapshot: snapshot, planLabel: profile.planLabel)
                     .padding(DS.Spacing.md)
                     .frame(width: 300)
             }
@@ -365,22 +373,31 @@ struct AccountRowView: View {
     @ViewBuilder
     private var switchButton: some View {
         let resetElapsed = snapshot?.resetHasElapsed() == true
+        let isAdvised = adviceReason != nil
+        let highlighted = resetElapsed || isAdvised
         Button {
             switchCLI()
         } label: {
-            Label("Switch", systemImage: "arrow.triangle.2.circlepath")
+            Label(isAdvised ? "Best switch" : "Switch", systemImage: "arrow.triangle.2.circlepath")
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
-        .tint(resetElapsed ? .green : nil)
+        .tint(highlighted ? .green : nil)
         .disabled(!hasStoredSnapshot)
-        .help(
-            hasStoredSnapshot
-                ? (resetElapsed
-                    ? "This account's limit window has rolled over — switch the CLI to it for fresh quota"
-                    : "Switch the CLI to this account's saved credentials")
-                : "Log into this account once in the terminal so its credentials can be captured"
-        )
+        .help(switchHelp(resetElapsed: resetElapsed))
+    }
+
+    private func switchHelp(resetElapsed: Bool) -> String {
+        guard hasStoredSnapshot else {
+            return "Log into this account once in the terminal so its credentials can be captured"
+        }
+        if let adviceReason {
+            return adviceReason
+        }
+        if resetElapsed {
+            return "This account's limit window has rolled over — switch the CLI to it for fresh quota"
+        }
+        return "Switch the CLI to this account's saved credentials"
     }
 
     private var footerNote: (text: String, icon: String, color: Color)? {
@@ -432,16 +449,17 @@ struct AccountRowView: View {
     }
 
     private var identityText: String {
-        guard let identity = profile.identity else {
-            return "Not linked to a login yet"
-        }
-
         var parts: [String] = []
-        if let primary = identity.primaryLabel {
-            parts.append(primary)
+        if let identity = profile.identity {
+            if let primary = identity.primaryLabel {
+                parts.append(primary)
+            }
+            if let organization = identity.organization, !organization.isEmpty {
+                parts.append(organization)
+            }
         }
-        if let organization = identity.organization, !organization.isEmpty {
-            parts.append(organization)
+        if let plan = profile.planLabel, !plan.isEmpty {
+            parts.append(plan)
         }
         return parts.isEmpty ? "Not linked to a login yet" : parts.joined(separator: " • ")
     }
@@ -556,6 +574,7 @@ struct TopUsageSummaryView: View {
 /// card itself only carries a badge for noteworthy modes.
 struct BillingStatusView: View {
     let snapshot: UsageSnapshot?
+    var planLabel: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -568,6 +587,11 @@ struct BillingStatusView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .lineLimit(4)
+            if let planLabel, !planLabel.isEmpty {
+                Text("Plan: \(planLabel)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)

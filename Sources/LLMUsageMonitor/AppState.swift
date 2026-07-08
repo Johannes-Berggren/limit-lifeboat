@@ -31,6 +31,9 @@ final class AppState: ObservableObject {
     /// Per-account, per-window burn-rate projections; only `.depletesAt`
     /// values render anything in the UI.
     @Published private(set) var burnRateEstimates: [UUID: [String: BurnRateEstimate]] = [:]
+    /// Which Claude account is currently the best switch target (recomputed
+    /// each refresh); drives the Switch-button highlight and auto-switching.
+    @Published private(set) var switchAdvice: SwitchAdvice?
 
     let settings: SettingsStore
 
@@ -47,6 +50,8 @@ final class AppState: ObservableObject {
     private let resetAlertPlanner = ResetAlertPlanner()
     private let historyStore: UsageHistoryStore?
     private let burnRateEstimator = BurnRateEstimator()
+    private let switchAdvisor = SwitchAdvisor()
+    private let paceAlertPlanner = PaceAlertPlanner()
     private let updateService = UpdateService()
     private let settingsWindowController = SettingsWindowController()
     private var refreshTask: Task<Void, Never>?
@@ -55,6 +60,15 @@ final class AppState: ObservableObject {
     /// Popover-open refreshes are throttled on attempts, not outcomes — an
     /// account whose fetch keeps failing must not re-trigger on every open.
     private var lastClaudeRefreshAttempt: Date?
+    /// Auto-switch guards: a failed attempt must not retry every cycle, and a
+    /// deliberate manual switch onto a constrained account must not be
+    /// immediately reverted.
+    private var lastAutoSwitchAttempt: Date?
+    private var lastManualSwitchAt: Date?
+    /// Profiles whose account info was fetched this launch — plan tier and
+    /// identity rarely change, and some accounts legitimately map to no plan
+    /// label, so one attempt per launch is enough.
+    private var accountInfoFetched: Set<UUID> = []
 
     init(repository: ProfileRepository, cliSwitcher: CLISwitcher, settings: SettingsStore? = nil) throws {
         self.repository = repository
@@ -201,8 +215,58 @@ final class AppState: ObservableObject {
         await refreshClaudeUsage()
         refreshActiveCodexUsage()
         notifyElapsedResets()
+        updateSwitchAdvice()
         updateMenuBarSummary()
         await checkForUpdatesIfDue()
+    }
+
+    /// Recomputes the best-switch-target hint from the fresh readings and,
+    /// when the opt-in is enabled, performs the switch: active account
+    /// depleted, another account with clearly more headroom.
+    private func updateSwitchAdvice() {
+        let candidates = profiles
+            .filter { $0.provider == .claude }
+            .map { profile in
+                SwitchCandidate(
+                    profileID: profile.id,
+                    label: profile.label,
+                    isActiveCLI: profile.isActiveCLI,
+                    hasStoredCredentials: hasStoredSnapshot(for: profile),
+                    snapshot: snapshots[profile.id]
+                )
+            }
+        let advice = switchAdvisor.advise(candidates: candidates)
+        switchAdvice = advice
+
+        guard settings.autoSwitchEnabled,
+              advice.shouldAutoSwitch,
+              let targetID = advice.bestCandidateID,
+              let target = profiles.first(where: { $0.id == targetID }),
+              !target.isActiveCLI else {
+            return
+        }
+
+        // Back off after any attempt (a failing restore must not re-run every
+        // cycle), and honor a recent manual switch — deliberately parking the
+        // CLI on a constrained account must not be silently reverted.
+        let now = Date()
+        if let lastAttempt = lastAutoSwitchAttempt, now.timeIntervalSince(lastAttempt) < 60 * 60 {
+            return
+        }
+        if let manual = lastManualSwitchAt, now.timeIntervalSince(manual) < 30 * 60 {
+            return
+        }
+        lastAutoSwitchAttempt = now
+
+        let previousLabel = activeProfile(for: .claude)?.label
+        if switchCLI(to: target, interactive: false) {
+            usageAlertController.handleAutoSwitch(
+                fromLabel: previousLabel,
+                toLabel: target.label,
+                provider: .claude,
+                reason: advice.reason
+            )
+        }
     }
 
     /// Polls every Claude account through the usage API (active first, so its
@@ -221,6 +285,7 @@ final class AppState: ObservableObject {
                     isActiveCLI: profile.isActiveCLI
                 )
                 applySnapshot(snapshot, for: profile)
+                await enrichAccountInfoIfMissing(for: profile)
             } catch {
                 if profile.isActiveCLI {
                     await refreshActiveClaudeCodeUsage()
@@ -229,6 +294,47 @@ final class AppState: ObservableObject {
                 // is expected until the account has been the active login
                 // once — the per-cycle capture stores it automatically.
             }
+        }
+    }
+
+    /// Plan tier and identity rarely change; fetch them only while a profile
+    /// is missing them, and at most once per launch — some accounts (Team,
+    /// Enterprise) legitimately map to no plan label and must not trigger an
+    /// extra profile call every cycle forever.
+    private func enrichAccountInfoIfMissing(for profile: AccountProfile) async {
+        guard profile.planLabel == nil || profile.identity?.email == nil else {
+            return
+        }
+        guard !accountInfoFetched.contains(profile.id) else {
+            return
+        }
+        guard let info = try? await claudeUsageService.fetchAccountInfo(
+            for: profile,
+            isActiveCLI: profile.isActiveCLI
+        ) else {
+            // Thrown errors (network, missing token) retry next cycle.
+            return
+        }
+        accountInfoFetched.insert(profile.id)
+
+        guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else {
+            return
+        }
+        var changed = false
+        if let plan = info.planLabel, profiles[index].planLabel != plan {
+            profiles[index].planLabel = plan
+            changed = true
+        }
+        if let identity = info.identity {
+            let merged = mergedIdentity(existing: profiles[index].identity, new: identity)
+            if profiles[index].identity != merged {
+                profiles[index].identity = merged
+                changed = true
+            }
+        }
+        if changed {
+            profiles[index].updatedAt = Date()
+            persistProfiles()
         }
     }
 
@@ -374,11 +480,26 @@ final class AppState: ObservableObject {
         // alert again once the account becomes active.
         if settings.usageAlertsEnabled, profile.isActiveCLI {
             usageAlertController.handleThresholds(snapshot: snapshot, profile: profile)
+            notifyPaceAlerts(snapshot: snapshot, profile: profile)
         } else {
             usageAlertController.rearmThresholds(snapshot: snapshot, profile: profile)
         }
         saveSnapshots()
         statusMessage = "\(profile.label): \(snapshot.message)"
+    }
+
+    /// "On pace to run out before the reset" — weekly windows only, active
+    /// account only, once per reset period (mirrors the reset-alert dedupe).
+    private func notifyPaceAlerts(snapshot: UsageSnapshot, profile: AccountProfile) {
+        let alerts = paceAlertPlanner.alerts(
+            snapshot: snapshot,
+            profile: profile,
+            estimates: burnRateEstimates[profile.id] ?? [:],
+            alreadyNotified: usageAlertController.notifiedPaceKeys()
+        )
+        for alert in alerts {
+            usageAlertController.handlePaceAlert(alert, provider: profile.provider)
+        }
     }
 
     // MARK: - Burn rate
@@ -482,6 +603,7 @@ final class AppState: ObservableObject {
         snapshots[profile.id] = nil
         try? historyStore?.removeAccount(profile.id)
         burnRateEstimates[profile.id] = nil
+        usageAlertController.forgetProfile(profile.id)
         persistProfiles()
         saveSnapshots()
         updateMenuBarSummary()
@@ -490,23 +612,28 @@ final class AppState: ObservableObject {
 
     // MARK: - CLI switching
 
-    func switchCLI(to profile: AccountProfile) {
+    /// Switches the CLI to `profile`. `interactive: false` (auto-switch path)
+    /// skips confirmation dialogs and reports problems via status/notification
+    /// text instead of modals. Returns whether the switch happened.
+    @discardableResult
+    func switchCLI(to profile: AccountProfile, interactive: Bool = true) -> Bool {
         guard hasStoredSnapshot(for: profile) else {
-            showError(
+            reportSwitchProblem(
+                interactive: interactive,
                 message: "No saved credentials for \(profile.label)",
                 details: "Log into this account once in the terminal (\(profile.provider.loginCommand)); the app captures its credentials automatically."
             )
-            return
+            return false
         }
 
-        if cliSwitcher.hasActiveProcesses(provider: profile.provider) {
+        if interactive, cliSwitcher.hasActiveProcesses(provider: profile.provider) {
             let alert = NSAlert()
             alert.messageText = "\(profile.provider.displayName) is running"
             alert.informativeText = "The account will be switched for new credential reads. Existing sessions may keep credentials they already loaded."
             alert.addButton(withTitle: "Switch")
             alert.addButton(withTitle: "Cancel")
             guard alert.runModal() == .alertFirstButtonReturn else {
-                return
+                return false
             }
         }
 
@@ -515,11 +642,12 @@ final class AppState: ObservableObject {
             try captureActiveCredentials(provider: profile.provider)
         } catch {
             statusMessage = "Switch cancelled: \(error.localizedDescription)"
-            showError(
+            reportSwitchProblem(
+                interactive: interactive,
                 message: "Switch cancelled",
                 details: "Could not capture the current \(profile.provider.displayName) login first, so nothing was changed. \(error.localizedDescription)"
             )
-            return
+            return false
         }
 
         do {
@@ -534,15 +662,25 @@ final class AppState: ObservableObject {
             if let newIdentity = cliSwitcher.currentIdentity(provider: profile.provider),
                let targetIdentity = profile.identity,
                !targetIdentity.matches(newIdentity) {
-                showError(
+                reportSwitchProblem(
+                    interactive: interactive,
                     message: "Switch finished with a different account",
                     details: "The CLI now reports \(newIdentity.primaryLabel ?? "an unknown account"), which does not match \(profile.label). The previous files were backed up to: \(result.backupURLs.map(\.path).joined(separator: ", "))"
                 )
-            } else {
-                statusMessage = "Switched \(profile.provider.displayName) CLI to \(profile.label)."
+                // Not a success: the auto-switch path must not announce
+                // "New terminal sessions use <target>" for the wrong account.
+                if interactive {
+                    Task { await refreshAll() }
+                }
+                return false
             }
 
-            Task { await refreshAll() }
+            statusMessage = "Switched \(profile.provider.displayName) CLI to \(profile.label)."
+            if interactive {
+                lastManualSwitchAt = Date()
+                Task { await refreshAll() }
+            }
+            return true
         } catch {
             if let storeError = error as? CredentialStoreError, case .decodeFailed = storeError {
                 // The stored snapshot is unreadable (e.g. written by an older
@@ -552,14 +690,24 @@ final class AppState: ObservableObject {
                 try? cliSwitcher.deleteStoredSnapshot(for: profile.id)
                 objectWillChange.send()
                 statusMessage = "Cleared unreadable credentials for \(profile.label)."
-                showError(
+                reportSwitchProblem(
+                    interactive: interactive,
                     message: "Saved credentials for \(profile.label) were unreadable",
                     details: "They were likely written by an older version and have been cleared. Log into this account once in the terminal (\(profile.provider.loginCommand)); the app captures its credentials automatically."
                 )
             } else {
                 statusMessage = "Switch failed for \(profile.label): \(error.localizedDescription)"
-                showError(message: "Switch failed", details: error.localizedDescription)
+                reportSwitchProblem(interactive: interactive, message: "Switch failed", details: error.localizedDescription)
             }
+            return false
+        }
+    }
+
+    private func reportSwitchProblem(interactive: Bool, message: String, details: String) {
+        if interactive {
+            showError(message: message, details: details)
+        } else {
+            statusMessage = "\(message). \(details)"
         }
     }
 
@@ -832,12 +980,22 @@ final class UsageAlertController {
     private var lastNotifiedRisk: [AlertWindowKey: RiskLevel] = [:]
     private let thresholdPlanner = ThresholdAlertPlanner()
     private let notifiedResetsKey = "notifiedResetDates"
+    private let notifiedPaceKey = "notifiedPaceAlerts"
 
     /// Reset alerts survive relaunches (persisted, keyed by account+window and
     /// reset date) so a restart does not re-announce quotas that were already
     /// reported back. The UserDefaults key is `"<profileID>|<windowID>"`.
     func notifiedResetKeys() -> [AlertWindowKey: Date] {
-        let stored = UserDefaults.standard.dictionary(forKey: notifiedResetsKey) as? [String: Double] ?? [:]
+        windowKeyedDates(forKey: notifiedResetsKey)
+    }
+
+    /// Same persistence scheme for "on pace to run out" alerts.
+    func notifiedPaceKeys() -> [AlertWindowKey: Date] {
+        windowKeyedDates(forKey: notifiedPaceKey)
+    }
+
+    private func windowKeyedDates(forKey defaultsKey: String) -> [AlertWindowKey: Date] {
+        let stored = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double] ?? [:]
         var result: [AlertWindowKey: Date] = [:]
         for (key, value) in stored {
             // Legacy entries were bare UUIDs (no window component); drop them —
@@ -855,27 +1013,94 @@ final class UsageAlertController {
         return result
     }
 
-    func handleResetElapsed(_ alert: ResetAlert) {
-        var stored = UserDefaults.standard.dictionary(forKey: notifiedResetsKey) as? [String: Double] ?? [:]
-        stored["\(alert.profileID.uuidString)|\(alert.windowID)"] = alert.resetDate.timeIntervalSince1970
-        UserDefaults.standard.set(stored, forKey: notifiedResetsKey)
+    func handlePaceAlert(_ alert: PaceAlert, provider: Provider) {
+        markWindowNotified(
+            defaultsKey: notifiedPaceKey,
+            profileID: alert.profileID,
+            windowID: alert.windowID,
+            date: alert.resetDate ?? Date()
+        )
 
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+
+        var parts = [
+            "At the current pace, \(provider.displayName) \(alert.windowLabel) usage runs out around \(formatter.string(from: alert.projectedDepletion))."
+        ]
+        if let reset = alert.resetDate {
+            parts.append("The window resets \(formatter.string(from: reset)).")
+        }
+        postNotification(
+            identifier: "pace-\(alert.profileID.uuidString)-\(alert.windowID)-\(Int(alert.projectedDepletion.timeIntervalSince1970))",
+            title: "\(alert.profileLabel): on pace to hit the \(alert.windowLabel) limit",
+            body: parts.joined(separator: " ")
+        )
+    }
+
+    func handleAutoSwitch(fromLabel: String?, toLabel: String, provider: Provider, reason: String?) {
+        var parts: [String] = []
+        if let fromLabel {
+            parts.append("\(fromLabel) hit its limit.")
+        }
+        if let reason {
+            parts.append(reason)
+        }
+        parts.append("New terminal sessions use \(toLabel).")
+        postNotification(
+            identifier: "autoswitch-\(toLabel)-\(Int(Date().timeIntervalSince1970))",
+            title: "Switched \(provider.displayName) CLI to \(toLabel)",
+            body: parts.joined(separator: " ")
+        )
+    }
+
+    /// Drops every persisted and in-memory dedupe key for a removed profile
+    /// so UserDefaults does not accumulate dead entries forever.
+    func forgetProfile(_ profileID: UUID) {
+        let prefix = "\(profileID.uuidString)|"
+        for defaultsKey in [notifiedResetsKey, notifiedPaceKey] {
+            let stored = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double] ?? [:]
+            let remaining = stored.filter { !$0.key.hasPrefix(prefix) }
+            UserDefaults.standard.set(remaining, forKey: defaultsKey)
+        }
+        lastNotifiedRisk = lastNotifiedRisk.filter { $0.key.profileID != profileID }
+    }
+
+    // MARK: - Shared posting/persistence
+
+    private func markWindowNotified(defaultsKey: String, profileID: UUID, windowID: String, date: Date) {
+        var stored = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double] ?? [:]
+        stored["\(profileID.uuidString)|\(windowID)"] = date.timeIntervalSince1970
+        UserDefaults.standard.set(stored, forKey: defaultsKey)
+    }
+
+    private func postNotification(identifier: String, title: String, body: String) {
+        // UNUserNotificationCenter requires a real bundle; an unbundled
+        // `swift run` must not crash.
         guard Bundle.main.bundleIdentifier != nil else {
             return
         }
-
         let content = UNMutableNotificationContent()
-        content.title = "\(alert.profileLabel): \(alert.windowLabel) quota likely back"
-        content.body = "The \(alert.provider.displayName) \(alert.windowLabel) limit window has rolled over since the last reading. Switch the CLI to \(alert.profileLabel) to keep using included usage."
+        content.title = title
+        content.body = body
         content.sound = .default
-
-        let request = UNNotificationRequest(
-            identifier: "reset-\(alert.profileID.uuidString)-\(alert.windowID)-\(Int(alert.resetDate.timeIntervalSince1970))",
-            content: content,
-            trigger: nil
-        )
+        let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
         NSApplication.shared.requestUserAttention(.informationalRequest)
+    }
+
+    func handleResetElapsed(_ alert: ResetAlert) {
+        markWindowNotified(
+            defaultsKey: notifiedResetsKey,
+            profileID: alert.profileID,
+            windowID: alert.windowID,
+            date: alert.resetDate
+        )
+        postNotification(
+            identifier: "reset-\(alert.profileID.uuidString)-\(alert.windowID)-\(Int(alert.resetDate.timeIntervalSince1970))",
+            title: "\(alert.profileLabel): \(alert.windowLabel) quota likely back",
+            body: "The \(alert.provider.displayName) \(alert.windowLabel) limit window has rolled over since the last reading. Switch the CLI to \(alert.profileLabel) to keep using included usage."
+        )
     }
 
     func requestAuthorization() {
@@ -908,19 +1133,11 @@ final class UsageAlertController {
         )
         for alert in alerts {
             lastNotifiedRisk[AlertWindowKey(profileID: alert.profileID, windowID: alert.windowID)] = alert.riskLevel
-
-            let content = UNMutableNotificationContent()
-            content.title = notificationTitle(alert: alert, profile: profile)
-            content.body = notificationBody(alert: alert, snapshot: snapshot, profile: profile)
-            content.sound = .default
-
-            let request = UNNotificationRequest(
+            postNotification(
                 identifier: "usage-\(alert.profileID.uuidString)-\(alert.windowID)-\(alert.riskLevel.rawValue)",
-                content: content,
-                trigger: nil
+                title: notificationTitle(alert: alert, profile: profile),
+                body: notificationBody(alert: alert, snapshot: snapshot, profile: profile)
             )
-            UNUserNotificationCenter.current().add(request)
-            NSApplication.shared.requestUserAttention(.informationalRequest)
         }
     }
 
