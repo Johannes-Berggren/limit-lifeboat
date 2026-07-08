@@ -257,8 +257,11 @@ public struct AccountProfile: Codable, Identifiable, Hashable, Sendable {
         self.id = try container.decode(UUID.self, forKey: .id)
         self.provider = try container.decode(Provider.self, forKey: .provider)
         self.label = try container.decode(String.self, forKey: .label)
-        // Absent in profiles.json written before plan labels existed.
-        self.planLabel = try container.decodeIfPresent(String.self, forKey: .planLabel)
+        // Absent in profiles.json written before plan labels existed; one
+        // interim build persisted an empty-string default, which must decode
+        // as "unknown" or the plan-tier fetch never runs for those profiles.
+        let decodedPlanLabel = try container.decodeIfPresent(String.self, forKey: .planLabel)
+        self.planLabel = (decodedPlanLabel?.isEmpty == true) ? nil : decodedPlanLabel
         self.webDataStoreKind = try container.decodeIfPresent(WebDataStoreKind.self, forKey: .webDataStoreKind) ?? .isolated
         self.webDataStoreID = try container.decode(UUID.self, forKey: .webDataStoreID)
         self.identity = try container.decodeIfPresent(AccountIdentity.self, forKey: .identity)

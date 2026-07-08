@@ -368,11 +368,13 @@ extension ClaudeUsageAPIClient {
         if organizationType?.lowercased() == "claude_max" {
             return "Max"
         }
-        if hasClaudePro {
-            return "Pro"
-        }
+        // Max outranks Pro when both flags are set — an upgraded account
+        // keeps has_claude_pro true.
         if hasClaudeMax {
             return "Max"
+        }
+        if hasClaudePro {
+            return "Pro"
         }
         return nil
     }

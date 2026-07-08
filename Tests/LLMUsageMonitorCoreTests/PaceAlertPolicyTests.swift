@@ -62,6 +62,29 @@ final class PaceAlertPlannerTests: XCTestCase {
         )
     }
 
+    /// The active account's snapshots alternate between the usage API's exact
+    /// `resets_at` and the TUI text parse's minutes-coarse value, so the same
+    /// reset can be stored and re-read minutes apart — a source flip must not
+    /// re-fire the alert within the same period.
+    func testSourceFlipMinutesApartDoesNotRefire() {
+        let apiReset = now.addingTimeInterval(3 * 86_400 + 250)
+        let parsedReset = apiReset.addingTimeInterval(-600)
+        let snapshot = windowedSnapshot([weeklyWindow(resetDate: parsedReset)])
+
+        XCTAssertTrue(
+            planner.alerts(
+                snapshot: snapshot,
+                profile: profile,
+                estimates: ["weekly-all": .depletesAt(now.addingTimeInterval(86_400))],
+                alreadyNotified: [AlertWindowKey(profileID: profile.id, windowID: "weekly-all"): apiReset],
+                now: now
+            ).isEmpty
+        )
+    }
+
+    /// A stored date from the previous period sits a full week from the
+    /// current reset — far beyond `resetMatchTolerance` — so the alert
+    /// re-arms.
     func testNewResetPeriodRefires() {
         let previousReset = now.addingTimeInterval(-4 * 86_400)
         let currentReset = previousReset.addingTimeInterval(7 * 86_400)

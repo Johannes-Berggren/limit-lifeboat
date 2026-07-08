@@ -36,7 +36,7 @@ final class SwitchAdvisorTests: XCTestCase {
     }
 
     func testStaleTargetWithElapsedResetIsEligibleAndScoresFullQuota() {
-        // Constrained old reading, but the window rolled over since: full
+        // Constrained old reading, but every window rolled over since: full
         // quota regardless of staleness, so the depleted active auto-switches.
         let target = candidate(
             label: "Claude B",
@@ -48,6 +48,82 @@ final class SwitchAdvisorTests: XCTestCase {
         XCTAssertEqual(advice.bestCandidateID, target.profileID)
         XCTAssertTrue(advice.shouldAutoSwitch)
         XCTAssertEqual(advice.reason, "Claude B's limit window has reset")
+    }
+
+    func testStaleTargetWithElapsedSessionButPendingWeeklyIsIneligible() {
+        // The session reset rolling over restores only the session quota; the
+        // stale reading's nearly-depleted weekly window still stands, so the
+        // candidate must not score as full quota or auto-switch — even though
+        // the snapshot's scalar resetDate mirrors the elapsed session window.
+        let snapshot = UsageSnapshot(
+            accountID: UUID(),
+            provider: .claude,
+            windows: [
+                window(
+                    id: "session",
+                    kind: .session,
+                    label: "Session",
+                    usedPercent: 96,
+                    resetDate: now.addingTimeInterval(-600)
+                ),
+                window(
+                    id: "weekly-all",
+                    kind: .weekly,
+                    label: "Weekly (all models)",
+                    usedPercent: 95,
+                    resetDate: now.addingTimeInterval(5 * 86_400)
+                )
+            ],
+            resetDate: now.addingTimeInterval(-600),
+            riskLevel: UsageThresholds.standard.riskLevel(usedPercent: 96),
+            source: "test",
+            lastRefreshed: now.addingTimeInterval(-4 * 3600),
+            parseConfidence: .high
+        )
+        let target = candidate(label: "Claude B", snapshot: snapshot)
+
+        let advice = advisor.advise(candidates: [depletedActive(), target], now: now)
+
+        XCTAssertNil(advice.bestCandidateID)
+        XCTAssertFalse(advice.shouldAutoSwitch)
+        XCTAssertNil(advice.reason)
+    }
+
+    func testFreshTargetWithElapsedSessionScoresTheRemainingWeekly() {
+        // The elapsed session reset counts as full headroom, so the weekly
+        // window's 40% remainder is the score — not an unconditional 100.
+        let snapshot = UsageSnapshot(
+            accountID: UUID(),
+            provider: .claude,
+            windows: [
+                window(
+                    id: "session",
+                    kind: .session,
+                    label: "Session",
+                    usedPercent: 96,
+                    resetDate: now.addingTimeInterval(-600)
+                ),
+                window(
+                    id: "weekly-all",
+                    kind: .weekly,
+                    label: "Weekly (all models)",
+                    usedPercent: 60,
+                    resetDate: now.addingTimeInterval(5 * 86_400)
+                )
+            ],
+            resetDate: now.addingTimeInterval(-600),
+            riskLevel: UsageThresholds.standard.riskLevel(usedPercent: 96),
+            source: "test",
+            lastRefreshed: now.addingTimeInterval(-600),
+            parseConfidence: .high
+        )
+        let target = candidate(label: "Claude B", snapshot: snapshot)
+
+        let advice = advisor.advise(candidates: [depletedActive(), target], now: now)
+
+        XCTAssertEqual(advice.bestCandidateID, target.profileID)
+        XCTAssertTrue(advice.shouldAutoSwitch)
+        XCTAssertEqual(advice.reason, "Claude B has ~40% of its weekly window left")
     }
 
     func testWarningActiveHintsWithoutAutoSwitch() {
@@ -170,7 +246,9 @@ final class SwitchAdvisorTests: XCTestCase {
         UsageSnapshot(
             accountID: UUID(),
             provider: .claude,
-            windows: [window(id: "session", kind: .session, label: "Session", usedPercent: usedPercent)],
+            windows: [
+                window(id: "session", kind: .session, label: "Session", usedPercent: usedPercent, resetDate: resetDate)
+            ],
             resetDate: resetDate,
             riskLevel: UsageThresholds.standard.riskLevel(usedPercent: usedPercent),
             source: "test",
@@ -179,12 +257,19 @@ final class SwitchAdvisorTests: XCTestCase {
         )
     }
 
-    private func window(id: String, kind: UsageWindowKind, label: String, usedPercent: Double) -> UsageWindow {
+    private func window(
+        id: String,
+        kind: UsageWindowKind,
+        label: String,
+        usedPercent: Double,
+        resetDate: Date? = nil
+    ) -> UsageWindow {
         UsageWindow(
             id: id,
             kind: kind,
             label: label,
             usedPercent: usedPercent,
+            resetDate: resetDate,
             riskLevel: UsageThresholds.standard.riskLevel(usedPercent: usedPercent)
         )
     }

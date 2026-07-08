@@ -156,7 +156,6 @@ struct MenuRootView: View {
                         snapshot: state.snapshots[profile.id],
                         hasStoredSnapshot: state.hasStoredSnapshot(for: profile),
                         estimates: state.burnRateEstimates[profile.id] ?? [:],
-                        isAdvisedSwitchTarget: advisedID == profile.id,
                         adviceReason: advisedID == profile.id ? state.switchAdvice?.reason : nil,
                         historyRecords: { state.historyRecords(for: profile) },
                         switchCLI: { state.switchCLI(to: profile) },
@@ -197,7 +196,7 @@ struct AccountRowView: View {
     let snapshot: UsageSnapshot?
     let hasStoredSnapshot: Bool
     let estimates: [String: BurnRateEstimate]
-    var isAdvisedSwitchTarget: Bool = false
+    /// Non-nil exactly when this account is the advised switch target.
     var adviceReason: String? = nil
     let historyRecords: () -> [UsageHistoryRecord]
     let switchCLI: () -> Void
@@ -374,11 +373,12 @@ struct AccountRowView: View {
     @ViewBuilder
     private var switchButton: some View {
         let resetElapsed = snapshot?.resetHasElapsed() == true
-        let highlighted = resetElapsed || isAdvisedSwitchTarget
+        let isAdvised = adviceReason != nil
+        let highlighted = resetElapsed || isAdvised
         Button {
             switchCLI()
         } label: {
-            Label(isAdvisedSwitchTarget ? "Best switch" : "Switch", systemImage: "arrow.triangle.2.circlepath")
+            Label(isAdvised ? "Best switch" : "Switch", systemImage: "arrow.triangle.2.circlepath")
         }
         .buttonStyle(.bordered)
         .controlSize(.small)

@@ -465,10 +465,11 @@ final class ClaudeUsageAPIClientTests: XCTestCase {
         // Unknown or absent tier: organization type decides first...
         XCTAssertEqual(planLabel(organizationType: "claude_max"), "Max")
         XCTAssertEqual(planLabel(tier: "default_enterprise", organizationType: "claude_max"), "Max")
-        // ...then the account flags, has_claude_pro before has_claude_max.
+        // ...then the account flags; Max outranks Pro when both are set
+        // (an upgraded account keeps has_claude_pro true).
         XCTAssertEqual(planLabel(hasClaudePro: true), "Pro")
         XCTAssertEqual(planLabel(hasClaudeMax: true), "Max")
-        XCTAssertEqual(planLabel(hasClaudeMax: true, hasClaudePro: true), "Pro")
+        XCTAssertEqual(planLabel(hasClaudeMax: true, hasClaudePro: true), "Max")
 
         // No plan signal at all.
         XCTAssertNil(planLabel())

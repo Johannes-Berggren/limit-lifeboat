@@ -43,12 +43,23 @@ public struct PaceAlert: Equatable, Sendable {
 /// Dedupe contract: one alert per window per reset period. The caller persists
 /// `alreadyNotified` keyed by the alerted window's `resetDate` (or `now` when
 /// the window has no reset date). A window stays quiet while the stored date
-/// matches its current `resetDate` within 1s, and re-arms when the reset rolls
-/// over to a new period. Windows without a reset date fall back to a time
-/// throttle: any stored entry newer than `now - 7 days` suppresses them, so a
-/// nil-reset weekly window cannot re-fire more than weekly.
+/// matches its current `resetDate` within `resetMatchTolerance`, and re-arms
+/// when the reset rolls over to a new period. Windows without a reset date
+/// fall back to a time throttle: any stored entry newer than `now - 7 days`
+/// suppresses them, so a nil-reset weekly window cannot re-fire more than
+/// weekly.
 public struct PaceAlertPlanner: Sendable {
-    public init() {}
+    /// Stored-vs-current reset dates within this interval count as the same
+    /// reset period. The active account's snapshots alternate between the
+    /// usage API's exact `resets_at` and the TUI text parse's minutes-coarse
+    /// (or missing) value, so the same weekly reset can be reported minutes
+    /// apart; a day of tolerance absorbs that while staying far inside the
+    /// 7-day period, so a genuine roll-over still re-arms.
+    public var resetMatchTolerance: TimeInterval
+
+    public init(resetMatchTolerance: TimeInterval = 24 * 3600) {
+        self.resetMatchTolerance = resetMatchTolerance
+    }
 
     public func alerts(
         snapshot: UsageSnapshot,
@@ -99,11 +110,12 @@ public struct PaceAlertPlanner: Sendable {
         return isSameReset(notified, resetDate)
     }
 
-    /// Snapshot dates lose sub-second precision on their .iso8601 disk
-    /// round-trip while the notified store keeps the full value, so exact
-    /// equality would re-fire after a relaunch. Same second = same reset
-    /// (same rule as `ResetAlertPlanner`).
+    /// Reported dates for the same reset rarely agree exactly: snapshot dates
+    /// lose sub-second precision on their .iso8601 disk round-trip, and a
+    /// source flip between the usage API and the TUI text parse shifts the
+    /// reset by minutes. Dates within `resetMatchTolerance` count as the same
+    /// reset.
     private func isSameReset(_ lhs: Date, _ rhs: Date) -> Bool {
-        abs(lhs.timeIntervalSince(rhs)) < 1
+        abs(lhs.timeIntervalSince(rhs)) < resetMatchTolerance
     }
 }

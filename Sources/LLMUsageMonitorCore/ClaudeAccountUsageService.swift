@@ -56,25 +56,7 @@ public struct ClaudeAccountUsageService {
         isActiveCLI: Bool,
         now: Date = Date()
     ) async throws -> UsageSnapshot {
-        // The active profile prefers the live keychain item — the CLI keeps
-        // it fresh, so a valid live token must never be refreshed out from
-        // under it. Inactive profiles poll with their stored snapshot token.
-        var cameFromLiveItem = false
-        var current: ClaudeOAuthCredentials?
-        if isActiveCLI, let live = credentials.liveClaudeOAuthCredentials() {
-            current = live
-            cameFromLiveItem = true
-        } else {
-            current = try? credentials.storedClaudeOAuthCredentials(for: profile.id)
-        }
-
-        guard var active = current else {
-            throw ClaudeAccountUsageFetchError.noCredentials
-        }
-
-        if active.isExpired(asOf: now) {
-            active = try await refreshAndPersist(active, for: profile, updateLiveItem: cameFromLiveItem, now: now)
-        }
+        let (active, cameFromLiveItem) = try await resolveCredentials(for: profile, isActiveCLI: isActiveCLI, now: now)
 
         do {
             let usage = try await fetchUsage(with: active, for: profile, updateLiveItem: cameFromLiveItem, now: now)
@@ -100,6 +82,28 @@ public struct ClaudeAccountUsageService {
         isActiveCLI: Bool,
         now: Date = Date()
     ) async throws -> ClaudeAPIAccountInfo {
+        let (active, _) = try await resolveCredentials(for: profile, isActiveCLI: isActiveCLI, now: now)
+
+        do {
+            return try await apiClient.fetchAccountInfo(accessToken: active.accessToken, now: now)
+        } catch ClaudeUsageAPIError.unauthorized {
+            throw ClaudeAccountUsageFetchError.unauthorized
+        } catch let error as ClaudeAccountUsageFetchError {
+            throw error
+        } catch {
+            throw ClaudeAccountUsageFetchError.transport(error)
+        }
+    }
+
+    /// The active profile prefers the live keychain item — the CLI keeps it
+    /// fresh, so a valid live token must never be refreshed out from under
+    /// it. Inactive profiles resolve their stored snapshot token. Expired
+    /// tokens get one persisted refresh.
+    private func resolveCredentials(
+        for profile: AccountProfile,
+        isActiveCLI: Bool,
+        now: Date
+    ) async throws -> (credentials: ClaudeOAuthCredentials, cameFromLiveItem: Bool) {
         var cameFromLiveItem = false
         var current: ClaudeOAuthCredentials?
         if isActiveCLI, let live = credentials.liveClaudeOAuthCredentials() {
@@ -116,16 +120,7 @@ public struct ClaudeAccountUsageService {
         if active.isExpired(asOf: now) {
             active = try await refreshAndPersist(active, for: profile, updateLiveItem: cameFromLiveItem, now: now)
         }
-
-        do {
-            return try await apiClient.fetchAccountInfo(accessToken: active.accessToken, now: now)
-        } catch ClaudeUsageAPIError.unauthorized {
-            throw ClaudeAccountUsageFetchError.unauthorized
-        } catch let error as ClaudeAccountUsageFetchError {
-            throw error
-        } catch {
-            throw ClaudeAccountUsageFetchError.transport(error)
-        }
+        return (active, cameFromLiveItem)
     }
 
     private func fetchUsage(

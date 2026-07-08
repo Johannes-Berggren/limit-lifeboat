@@ -53,13 +53,15 @@ public struct SwitchAdvice: Equatable, Sendable {
 /// performing the actual switch live in the app layer.
 ///
 /// Eligible switch targets are inactive accounts with stored credentials
-/// whose limit window has rolled over since the last reading (full quota
-/// regardless of staleness) or whose reading is fresh and not depleted.
-/// An automatic switch additionally requires the active account to be
-/// depleted and the best target to clear both headroom bars.
+/// whose every limit window has rolled over since the last reading (full
+/// quota regardless of staleness) or whose reading is fresh and whose
+/// tightest window is not depleted. An automatic switch additionally requires
+/// the active account to be depleted and the best target to clear both
+/// headroom bars.
 public struct SwitchAdvisor: Sendable {
     public struct Configuration: Sendable {
-        /// Candidate readings older than this only count via `resetHasElapsed`.
+        /// Candidate readings older than this only count once every
+        /// window's reset has elapsed.
         public var staleAfter: TimeInterval
         /// Candidate must have at least this much headroom to auto-switch.
         public var minimumHeadroomPercent: Double
@@ -110,7 +112,7 @@ public struct SwitchAdvisor: Sendable {
 
     /// An eligible target with its headroom score. All eligible targets
     /// already satisfy the auto-switch freshness bar by construction: they
-    /// are either fresh or their reset has elapsed.
+    /// are either fresh or every window's reset has elapsed.
     private struct ScoredTarget {
         var candidate: SwitchCandidate
         var score: Double
@@ -127,9 +129,41 @@ public struct SwitchAdvisor: Sendable {
             return nil
         }
 
-        // A rolled-over limit window means the full quota is likely back, no
+        // `orderedDisplayWindows` already synthesizes a window from the
+        // scalar usedFraction for legacy snapshots; when even that is missing
+        // the snapshot-level reset date is the only signal left, so keep the
+        // whole-snapshot roll-over rule for those.
+        let windows = snapshot.orderedDisplayWindows
+        guard !windows.isEmpty else {
+            if snapshot.resetHasElapsed(asOf: now) {
+                return ScoredTarget(
+                    candidate: candidate,
+                    score: 100,
+                    resetElapsed: true,
+                    limitingWindow: nil,
+                    canAutoSwitch: true
+                )
+            }
+            guard !snapshot.isStale(asOf: now, maxAge: configuration.staleAfter),
+                  effectiveRiskLevel(of: snapshot) != .depleted else {
+                return nil
+            }
+            // No usage data to score, so the candidate ranks last and never
+            // auto-switches.
+            return ScoredTarget(
+                candidate: candidate,
+                score: 0,
+                resetElapsed: false,
+                limitingWindow: nil,
+                canAutoSwitch: false
+            )
+        }
+
+        // Resets roll over per window: an elapsed session reset restores the
+        // session quota but says nothing about the weekly window. Only when
+        // every window has rolled over is the full quota likely back, no
         // matter how old the reading is.
-        if snapshot.resetHasElapsed(asOf: now) {
+        if windows.allSatisfy({ $0.resetHasElapsed(asOf: now) }) {
             return ScoredTarget(
                 candidate: candidate,
                 score: 100,
@@ -139,23 +173,21 @@ public struct SwitchAdvisor: Sendable {
             )
         }
 
-        guard !snapshot.isStale(asOf: now, maxAge: configuration.staleAfter),
-              effectiveRiskLevel(of: snapshot) != .depleted else {
+        // A stale reading with any window still inside its period cannot be
+        // trusted — and its elapsed session must not mask a nearly-depleted
+        // weekly.
+        guard !snapshot.isStale(asOf: now, maxAge: configuration.staleAfter) else {
             return nil
         }
 
-        // `orderedDisplayWindows` already synthesizes a window from the
-        // scalar usedFraction for legacy snapshots; when even that is missing
-        // there is no usage data to score, so the candidate ranks last and
-        // never auto-switches.
-        guard let limiting = limitingWindow(of: snapshot) else {
-            return ScoredTarget(
-                candidate: candidate,
-                score: 0,
-                resetElapsed: false,
-                limitingWindow: nil,
-                canAutoSwitch: false
-            )
+        // Windows whose reset has elapsed count as full headroom, so the
+        // tightest window is always one still inside its period — and its
+        // reading is fresh, so a depleted one keeps the candidate ineligible.
+        let limiting = windows
+            .filter { !$0.resetHasElapsed(asOf: now) }
+            .min { $0.remainingPercent < $1.remainingPercent }
+        guard let limiting, limiting.riskLevel != .depleted else {
+            return nil
         }
 
         return ScoredTarget(
@@ -178,17 +210,20 @@ public struct SwitchAdvisor: Sendable {
         return best.score - headroomScore(of: activeSnapshot, now: now) >= configuration.minimumImprovementPercent
     }
 
-    /// The percentage of quota left on the tightest window, 100 when the
-    /// limit window has rolled over since the reading.
+    /// The percentage of quota left on the tightest window as of `now`;
+    /// windows whose reset has rolled over since the reading count as full.
     private func headroomScore(of snapshot: UsageSnapshot, now: Date) -> Double {
-        if snapshot.resetHasElapsed(asOf: now) {
-            return 100
+        let windows = snapshot.orderedDisplayWindows
+        guard !windows.isEmpty else {
+            return snapshot.resetHasElapsed(asOf: now) ? 100 : 0
         }
-        return limitingWindow(of: snapshot)?.remainingPercent ?? 0
+        return windows.map { effectiveHeadroom(of: $0, now: now) }.min() ?? 0
     }
 
-    private func limitingWindow(of snapshot: UsageSnapshot) -> UsageWindow? {
-        snapshot.orderedDisplayWindows.min { $0.remainingPercent < $1.remainingPercent }
+    /// A window's quota left as of `now`: full once its reset has rolled
+    /// over since the reading, the recorded remainder otherwise.
+    private func effectiveHeadroom(of window: UsageWindow, now: Date) -> Double {
+        window.resetHasElapsed(asOf: now) ? 100 : window.remainingPercent
     }
 
     /// The snapshot's most-constrained window leads; the scalar risk level is
