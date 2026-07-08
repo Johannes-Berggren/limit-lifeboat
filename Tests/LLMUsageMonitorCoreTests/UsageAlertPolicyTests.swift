@@ -314,12 +314,60 @@ final class ThresholdAlertPlannerTests: XCTestCase {
 
         let alerts = planner.alerts(snapshot: snapshot, profile: profile, lastNotified: [:])
 
+        // The synthesized legacy window comes from `orderedDisplayWindows`,
+        // so its id/label match the display fallback ("primary"/"Quota").
         XCTAssertEqual(alerts.count, 1)
-        XCTAssertEqual(alerts[0].windowID, "quota")
+        XCTAssertEqual(alerts[0].windowID, "primary")
         XCTAssertEqual(alerts[0].windowLabel, "Quota")
         XCTAssertEqual(alerts[0].riskLevel, .warning)
         XCTAssertEqual(alerts[0].usedPercent, 92, accuracy: 0.0001)
         XCTAssertEqual(alerts[0].resetDescription, "Resets Tuesday")
+    }
+
+    func testDuplicateWindowIDsAlertOnceWithFreshestReading() {
+        let snapshot = windowedSnapshot([
+            weeklyWindow(id: "weekly-all", label: "Weekly (all models)", usedPercent: 40),
+            weeklyWindow(id: "weekly-all", label: "Weekly (all models)", usedPercent: 85)
+        ])
+
+        let alerts = planner.alerts(snapshot: snapshot, profile: profile, lastNotified: [:])
+
+        XCTAssertEqual(alerts.count, 1)
+        XCTAssertEqual(alerts[0].windowID, "weekly-all")
+        XCTAssertEqual(alerts[0].usedPercent, 85, accuracy: 0.0001)
+    }
+
+    func testCurrentRiskCoversEveryWindowIncludingSession() {
+        let snapshot = windowedSnapshot([
+            sessionWindow(usedPercent: 95),
+            weeklyWindow(id: "weekly-all", label: "Weekly (all models)", usedPercent: 40)
+        ])
+
+        let risk = planner.currentRisk(snapshot: snapshot, profile: profile)
+
+        XCTAssertEqual(risk.count, 2)
+        // Session windows do not alert by default, but their risk is still
+        // reported so the app layer can re-arm their dedupe keys.
+        XCTAssertEqual(risk[AlertWindowKey(profileID: profile.id, windowID: "session")], .warning)
+        XCTAssertEqual(risk[AlertWindowKey(profileID: profile.id, windowID: "weekly-all")], .healthy)
+    }
+
+    func testCurrentRiskUsesSynthesizedWindowForLegacyScalarSnapshot() {
+        let snapshot = UsageSnapshot(
+            accountID: profile.id,
+            provider: profile.provider,
+            includedRemaining: 8,
+            includedLimit: 100,
+            riskLevel: UsageThresholds.standard.riskLevel(usedPercent: 92),
+            source: "test",
+            lastRefreshed: now,
+            parseConfidence: .high
+        )
+
+        let risk = planner.currentRisk(snapshot: snapshot, profile: profile)
+
+        // Same key the legacy alert fires under, so recovery re-arms it.
+        XCTAssertEqual(risk, [AlertWindowKey(profileID: profile.id, windowID: "primary"): .warning])
     }
 
     func testMultipleWeeklyWindowsAlertIndependently() {

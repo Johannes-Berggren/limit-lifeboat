@@ -143,11 +143,14 @@ final class BurnRateEstimatorTests: XCTestCase {
         XCTAssertEqual(interval, 2_400, accuracy: 60)
     }
 
-    func testResetDateMatchToleratesSubSecondSkewOnly() {
+    /// TUI-sourced readings re-anchor their reset date to "now" each poll, so
+    /// minute-scale skew must still read as the same window life; only skew
+    /// past the 5-minute tolerance excludes a point.
+    func testResetDateMatchToleratesMinuteScaleSkew() {
         let reset = now.addingTimeInterval(2 * 3_600)
         let readings = [
-            reading(minutesAgo: 60, usedPercent: 5, resetDate: reset.addingTimeInterval(5)),    // >1s off: excluded
-            reading(minutesAgo: 40, usedPercent: 20, resetDate: reset.addingTimeInterval(0.5)), // <1s off: included
+            reading(minutesAgo: 60, usedPercent: 5, resetDate: reset.addingTimeInterval(600)), // 10min off: excluded
+            reading(minutesAgo: 40, usedPercent: 20, resetDate: reset.addingTimeInterval(60)), // 60s off: included
             reading(minutesAgo: 20, usedPercent: 35, resetDate: reset),
             reading(minutesAgo: 0, usedPercent: 60, resetDate: reset),
         ]
@@ -159,8 +162,9 @@ final class BurnRateEstimatorTests: XCTestCase {
         )
 
         // 20/35/60 over 40 minutes -> least-squares slope 1%/min -> 40% left
-        // in ~2,400s. Admitting the 5s-skewed point (~2,667s) or dropping the
-        // 0.5s-skewed one (~1,920s) both land outside the tolerance.
+        // in ~2,400s. Admitting the 10-minute-skewed point (~2,667s) or
+        // dropping the 60-second-skewed one (~1,920s) both land outside the
+        // tolerance.
         guard let interval = depletionInterval(estimate) else { return }
         XCTAssertEqual(interval, 2_400, accuracy: 60)
     }

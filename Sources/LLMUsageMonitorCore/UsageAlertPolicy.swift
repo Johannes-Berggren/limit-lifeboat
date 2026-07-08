@@ -121,25 +121,26 @@ public struct ThresholdAlertPlanner: Sendable {
         return result
     }
 
-    /// Legacy and web-dashboard snapshots have no `windows`; fall back to a
-    /// single synthetic evaluation of the scalar fields (carrying the
-    /// snapshot's risk level so a depleted reading still alerts even when the
-    /// used fraction could not be parsed) so they keep alerting exactly as
-    /// before per-window tracking existed.
-    private func windows(for snapshot: UsageSnapshot) -> [UsageWindow] {
-        if !snapshot.windows.isEmpty {
-            return snapshot.windows.filter { includeSessionWindows || $0.kind != .session }
+    /// The current per-window risk keyed exactly as `alerts` keys its dedupe
+    /// entries, so the app layer can re-arm keys whose window recovered.
+    /// Unlike `alerts`, session windows are always included — re-arming a
+    /// session key is harmless when session alerts are off, and it keeps the
+    /// key fresh for users who opt session windows in later.
+    public func currentRisk(snapshot: UsageSnapshot, profile: AccountProfile) -> [AlertWindowKey: RiskLevel] {
+        var result: [AlertWindowKey: RiskLevel] = [:]
+        for window in snapshot.orderedDisplayWindows {
+            result[AlertWindowKey(profileID: profile.id, windowID: window.id)] = window.riskLevel
         }
-        return [
-            UsageWindow(
-                id: "quota",
-                kind: .other,
-                label: "Quota",
-                usedPercent: (snapshot.usedFraction ?? 0) * 100,
-                resetDescription: snapshot.resetDescription,
-                riskLevel: snapshot.riskLevel
-            )
-        ]
+        return result
+    }
+
+    /// `orderedDisplayWindows` is the single source of the window list: it
+    /// dedupes repeated ids and synthesizes the "primary"/"Quota" window for
+    /// legacy scalar-only snapshots, so those keep alerting without a
+    /// planner-private synth path. Session windows drop out here unless
+    /// opted in.
+    private func windows(for snapshot: UsageSnapshot) -> [UsageWindow] {
+        snapshot.orderedDisplayWindows.filter { includeSessionWindows || $0.kind != .session }
     }
 }
 

@@ -52,6 +52,9 @@ final class AppState: ObservableObject {
     private var refreshTask: Task<Void, Never>?
     private var wakeObserver: NSObjectProtocol?
     private var cancellables: Set<AnyCancellable> = []
+    /// Popover-open refreshes are throttled on attempts, not outcomes — an
+    /// account whose fetch keeps failing must not re-trigger on every open.
+    private var lastClaudeRefreshAttempt: Date?
 
     init(repository: ProfileRepository, cliSwitcher: CLISwitcher, settings: SettingsStore? = nil) throws {
         self.repository = repository
@@ -61,9 +64,17 @@ final class AppState: ObservableObject {
         self.profiles = try repository.loadProfiles()
         self.snapshots = try repository.loadUsageSnapshots()
         self.historyStore = try? UsageHistoryStore(applicationSupportDirectory: repository.applicationSupportDirectory)
-        try? historyStore?.load()
-        recomputeAllEstimates()
         updateMenuBarSummary()
+        // History can be tens of thousands of lines; load it off the launch
+        // path. Appends before this finishes are safe — the store lazily
+        // loads before its first mutation.
+        Task { [weak self] in
+            guard let self else {
+                return
+            }
+            try? self.historyStore?.load()
+            self.recomputeAllEstimates()
+        }
         usageAlertController.requestAuthorization()
         observeWake()
 
@@ -142,6 +153,10 @@ final class AppState: ObservableObject {
         guard !isRefreshing else {
             return false
         }
+        if let lastAttempt = lastClaudeRefreshAttempt,
+           Date().timeIntervalSince(lastAttempt) < TimeInterval(settings.refreshIntervalMinutes * 60) {
+            return false
+        }
         return profiles.contains { profile in
             guard profile.provider == .claude,
                   profile.isActiveCLI || hasStoredSnapshot(for: profile) else {
@@ -194,6 +209,7 @@ final class AppState: ObservableObject {
     /// numbers land even if an inactive account's refresh stalls). The slow
     /// expect-probe of the CLI remains the fallback for the active account.
     private func refreshClaudeUsage() async {
+        lastClaudeRefreshAttempt = Date()
         let claudeProfiles = profiles
             .filter { $0.provider == .claude }
             .sorted { $0.isActiveCLI && !$1.isActiveCLI }
@@ -353,9 +369,13 @@ final class AppState: ObservableObject {
         updateMenuBarSummary()
         // Near-limit alerts stay active-account-only: an inactive account
         // nearing its limit is not actionable (nobody is burning it down);
-        // its "quota is back" reset alert is the one that matters.
+        // its "quota is back" reset alert is the one that matters. Inactive
+        // snapshots still re-arm the dedupe keys so a healed window can
+        // alert again once the account becomes active.
         if settings.usageAlertsEnabled, profile.isActiveCLI {
             usageAlertController.handleThresholds(snapshot: snapshot, profile: profile)
+        } else {
+            usageAlertController.rearmThresholds(snapshot: snapshot, profile: profile)
         }
         saveSnapshots()
         statusMessage = "\(profile.label): \(snapshot.message)"
@@ -732,8 +752,7 @@ final class AppState: ObservableObject {
         case .session:
             return snapshot.window(ofKind: .session)?.usedFraction ?? mostConstrained
         case .weekly:
-            let weekly = snapshot.window(ofKind: .weekly) ?? snapshot.window(ofKind: .weeklyScoped)
-            return weekly?.usedFraction ?? mostConstrained
+            return snapshot.primaryWeeklyWindow?.usedFraction ?? mostConstrained
         }
     }
 
@@ -905,15 +924,17 @@ final class UsageAlertController {
         }
     }
 
-    private func rearmRecoveredWindows(snapshot: UsageSnapshot, profile: AccountProfile) {
-        var currentRisk: [AlertWindowKey: RiskLevel] = [:]
-        if snapshot.windows.isEmpty {
-            currentRisk[AlertWindowKey(profileID: profile.id, windowID: "quota")] = snapshot.riskLevel
-        } else {
-            for window in snapshot.windows {
-                currentRisk[AlertWindowKey(profileID: profile.id, windowID: window.id)] = window.riskLevel
-            }
+    /// Clears dedupe keys for windows that dropped back below the warning
+    /// band, without firing anything — used directly for inactive accounts.
+    func rearmThresholds(snapshot: UsageSnapshot, profile: AccountProfile) {
+        guard snapshot.parseConfidence != .none else {
+            return
         }
+        rearmRecoveredWindows(snapshot: snapshot, profile: profile)
+    }
+
+    private func rearmRecoveredWindows(snapshot: UsageSnapshot, profile: AccountProfile) {
+        let currentRisk = thresholdPlanner.currentRisk(snapshot: snapshot, profile: profile)
         for (key, risk) in currentRisk where risk != .warning && risk != .depleted {
             lastNotifiedRisk[key] = nil
         }

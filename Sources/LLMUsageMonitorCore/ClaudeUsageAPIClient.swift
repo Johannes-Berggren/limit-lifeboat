@@ -175,22 +175,17 @@ public struct ClaudeUsageAPIClient: Sendable {
     }
 
     private func parseResetDate(_ value: String?) -> Date? {
-        guard let value else {
-            return nil
-        }
-
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: value) {
-            return date
-        }
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: value)
+        value.flatMap(FlexibleISO8601.date(from:))
     }
 
+    /// Accepts numeric and string-typed numbers: the API has been seen
+    /// emitting both, and the Codex log reader coerces the same way.
     private func number(_ value: Any?) -> Double? {
         if let value = value as? NSNumber {
             return value.doubleValue
+        }
+        if let value = value as? String {
+            return Double(value)
         }
         return nil
     }
@@ -226,13 +221,13 @@ public struct ClaudeUsageAPIClient: Sendable {
             guard let scopeName = window.scopeName else {
                 return ("weekly-scoped", .weeklyScoped, "Weekly (scoped)", 10080)
             }
-            return ("weekly-\(slug(scopeName))", .weeklyScoped, "Weekly (\(scopeName))", 10080)
+            return ("weekly-\(UsageWindowID.slug(scopeName))", .weeklyScoped, "Weekly (\(scopeName))", 10080)
         case "seven_day_opus":
             return ("weekly-opus", .weeklyScoped, "Weekly (Opus)", 10080)
         case "seven_day_sonnet":
             return ("weekly-sonnet", .weeklyScoped, "Weekly (Sonnet)", 10080)
         default:
-            return (slug(window.kindRaw), .other, humanized(window.kindRaw).capitalized, nil)
+            return (UsageWindowID.slug(window.kindRaw), .other, humanized(window.kindRaw).capitalized, nil)
         }
     }
 
@@ -274,17 +269,5 @@ public struct ClaudeUsageAPIClient: Sendable {
 
     private func humanized(_ kindRaw: String) -> String {
         kindRaw.replacingOccurrences(of: "_", with: " ")
-    }
-
-    /// Same slug rules as `ClaudeCodeUsageReport`: lowercase alphanumerics
-    /// joined by dashes.
-    private func slug(_ text: String) -> String {
-        let mapped = text.lowercased().unicodeScalars.map { scalar -> Character in
-            CharacterSet.alphanumerics.contains(scalar) ? Character(scalar) : "-"
-        }
-        let collapsed = String(mapped)
-            .split(separator: "-", omittingEmptySubsequences: true)
-            .joined(separator: "-")
-        return collapsed.isEmpty ? "window" : collapsed
     }
 }

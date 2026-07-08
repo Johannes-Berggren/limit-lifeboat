@@ -42,6 +42,12 @@ public struct BurnRateEstimator: Sendable {
         public var weeklyMinimumSpan: TimeInterval
         /// Minimum number of surviving points before any slope is trusted.
         public var minimumPoints: Int
+        /// How far apart two reset dates may sit and still count as the same
+        /// window life. TUI-sourced readings re-anchor their reset date to
+        /// "now" on every poll, jittering it by up to minutes, so this must
+        /// be generous; the backward-usage-increase truncation in
+        /// `estimate` is the real reset detector.
+        public var resetDateTolerance: TimeInterval
 
         public static let standard = Configuration()
 
@@ -50,13 +56,15 @@ public struct BurnRateEstimator: Sendable {
             weeklyLookback: TimeInterval = 48 * 3600,
             sessionMinimumSpan: TimeInterval = 10 * 60,
             weeklyMinimumSpan: TimeInterval = 3 * 3600,
-            minimumPoints: Int = 2
+            minimumPoints: Int = 2,
+            resetDateTolerance: TimeInterval = 300
         ) {
             self.sessionLookback = sessionLookback
             self.weeklyLookback = weeklyLookback
             self.sessionMinimumSpan = sessionMinimumSpan
             self.weeklyMinimumSpan = weeklyMinimumSpan
             self.minimumPoints = minimumPoints
+            self.resetDateTolerance = resetDateTolerance
         }
     }
 
@@ -134,15 +142,16 @@ public struct BurnRateEstimator: Sendable {
     }
 
     /// A reading belongs to the window's current life when its reset date
-    /// matches the window's (sub-second skew from ISO8601 round-trips is
-    /// tolerated), or when it carries no reset date and is recent enough that
+    /// matches the window's within `resetDateTolerance` (TUI-sourced reset
+    /// dates are re-anchored to "now" each poll, so minute-scale jitter is
+    /// normal), or when it carries no reset date and is recent enough that
     /// the window cannot have rolled over since.
     private func matchesWindow(_ reading: Reading, window: UsageWindow, now: Date) -> Bool {
         if let readingReset = reading.resetDate {
             guard let windowReset = window.resetDate else {
                 return false
             }
-            return abs(readingReset.timeIntervalSince(windowReset)) < 1
+            return abs(readingReset.timeIntervalSince(windowReset)) < configuration.resetDateTolerance
         }
         guard let windowMinutes = window.windowMinutes else {
             return true

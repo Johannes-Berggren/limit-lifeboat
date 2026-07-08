@@ -130,3 +130,65 @@ final class ClaudeOAuthCredentialsTests: XCTestCase {
         return try XCTUnwrap(ClaudeOAuthCredentials(claudeAiOauthJSON: json))
     }
 }
+
+/// The keychain type shells out to /usr/bin/security, so these exercise the
+/// pure output-normalization and command-building helpers directly.
+final class ClaudeCodeCredentialsKeychainTests: XCTestCase {
+    func testDecodePasswordOutputPassesASCIIJSONThrough() {
+        let json = #"{"claudeAiOauth":{"accessToken":"tok"}}"#
+        XCTAssertEqual(
+            ClaudeCodeCredentialsKeychain.decodePasswordOutput(json + "\n"),
+            Data(json.utf8)
+        )
+    }
+
+    func testDecodePasswordOutputDecodesBareHex() {
+        // security prints a password containing any non-ASCII byte as bare
+        // lowercase hex with no 0x prefix: {"k":"café"}.
+        let decoded = ClaudeCodeCredentialsKeychain.decodePasswordOutput("7b226b223a22636166c3a9227d\n")
+        XCTAssertEqual(decoded, Data(#"{"k":"café"}"#.utf8))
+    }
+
+    func testDecodePasswordOutputDecodes0xPrefixedHex() {
+        let decoded = ClaudeCodeCredentialsKeychain.decodePasswordOutput("0x7b226b223a22636166c3a9227d")
+        XCTAssertEqual(decoded, Data(#"{"k":"café"}"#.utf8))
+    }
+
+    func testDecodePasswordOutputFallsBackToUTF8ForNonHexText() {
+        XCTAssertEqual(
+            ClaudeCodeCredentialsKeychain.decodePasswordOutput("not-hex-at-all"),
+            Data("not-hex-at-all".utf8)
+        )
+        // Odd-length hex-looking text is not valid hex output either.
+        XCTAssertEqual(
+            ClaudeCodeCredentialsKeychain.decodePasswordOutput("abc"),
+            Data("abc".utf8)
+        )
+    }
+
+    func testDecodePasswordOutputReturnsNilForEmptyOutput() {
+        XCTAssertNil(ClaudeCodeCredentialsKeychain.decodePasswordOutput(""))
+        XCTAssertNil(ClaudeCodeCredentialsKeychain.decodePasswordOutput(" \n"))
+    }
+
+    func testAddCommandEscapesQuotesAndBackslashes() {
+        let command = ClaudeCodeCredentialsKeychain.makeAddGenericPasswordCommand(
+            account: "user",
+            service: "Claude Code-credentials",
+            value: #"{"k":"a\"b","p":"x\y"}"#
+        )
+        XCTAssertEqual(
+            command,
+            #"add-generic-password -U -a "user" -s "Claude Code-credentials" -w "{\"k\":\"a\\\"b\",\"p\":\"x\\y\"}""#
+        )
+    }
+
+    func testAddCommandPassesNonASCIIValueThrough() {
+        let command = ClaudeCodeCredentialsKeychain.makeAddGenericPasswordCommand(
+            account: "user",
+            service: "svc",
+            value: #"{"k":"café"}"#
+        )
+        XCTAssertEqual(command, #"add-generic-password -U -a "user" -s "svc" -w "{\"k\":\"café\"}""#)
+    }
+}

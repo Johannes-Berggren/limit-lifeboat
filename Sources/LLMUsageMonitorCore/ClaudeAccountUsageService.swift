@@ -78,6 +78,12 @@ public struct ClaudeAccountUsageService {
 
         do {
             let usage = try await fetchUsage(with: active, for: profile, updateLiveItem: cameFromLiveItem, now: now)
+            // A 2xx body with no recognizable windows must fail the fetch:
+            // a parseConfidence-.none snapshot would overwrite the last good
+            // one and bypass AppState's CLI fallback.
+            guard !usage.windows.isEmpty else {
+                throw ClaudeAccountUsageFetchError.transport(ClaudeUsageAPIError.malformedResponse)
+            }
             return apiClient.makeSnapshot(for: profile, usage: usage, now: now)
         } catch let error as ClaudeAccountUsageFetchError {
             throw error
@@ -122,9 +128,14 @@ public struct ClaudeAccountUsageService {
         // Persistence is best-effort: a failed write costs one extra refresh
         // on the next cycle, never the reading we just paid for. The live
         // item is only rewritten when the stale token came from it, so a
-        // logged-out terminal is never silently logged back in.
+        // logged-out terminal is never silently logged back in — and only
+        // when the live token is still the one we refreshed. Anything else
+        // means the item changed owner mid-flight (the user switched
+        // accounts during the await), and the old profile's tokens must not
+        // overwrite the new live item.
         try? credentials.updateStoredClaudeOAuthCredentials(refreshed, for: profile.id)
-        if updateLiveItem {
+        if updateLiveItem,
+           credentials.liveClaudeOAuthCredentials()?.accessToken == stale.accessToken {
             try? credentials.writeLiveClaudeOAuthCredentials(refreshed)
         }
         return refreshed

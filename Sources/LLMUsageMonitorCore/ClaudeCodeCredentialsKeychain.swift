@@ -51,27 +51,19 @@ public struct ClaudeCodeCredentialsKeychain: ClaudeCLICredentialSource {
             )
         }
 
-        let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !output.isEmpty else {
-            return nil
-        }
-
-        // `security -w` prints non-ASCII passwords as "0x<HEX>  \"...\"";
-        // decode that form defensively before assuming plain text.
-        if output.hasPrefix("0x"), let decoded = decodeHexPassword(output) {
-            return decoded
-        }
-        return Data(output.utf8)
+        return Self.decodePasswordOutput(result.output)
     }
 
     public func writeLiveItemJSON(_ data: Data) throws {
-        let result = try runSecurity(arguments: [
-            "add-generic-password",
-            "-U",
-            "-a", NSUserName(),
-            "-s", Self.serviceName,
-            "-w", String(decoding: data, as: UTF8.self)
-        ])
+        // The item JSON is secret material, so it must never appear in the
+        // process argument list (visible to `ps`). `security -i` reads the
+        // whole add command from stdin instead.
+        let command = Self.makeAddGenericPasswordCommand(
+            account: NSUserName(),
+            service: Self.serviceName,
+            value: String(decoding: data, as: UTF8.self)
+        )
+        let result = try runSecurity(arguments: ["-i"], input: Data((command + "\n").utf8))
 
         guard result.status == 0 else {
             throw ClaudeCodeCredentialsKeychainError.securityToolFailed(
@@ -81,11 +73,49 @@ public struct ClaudeCodeCredentialsKeychain: ClaudeCLICredentialSource {
         }
     }
 
-    private func decodeHexPassword(_ output: String) -> Data? {
-        let hexText = output
-            .dropFirst(2)
-            .prefix { !$0.isWhitespace }
-        guard !hexText.isEmpty, hexText.count.isMultiple(of: 2) else {
+    /// Normalizes `security find-generic-password -w` output into the stored
+    /// password bytes, or nil when the output is empty.
+    ///
+    /// `-w` prints an ASCII password as plain text, but a password containing
+    /// ANY non-ASCII byte as bare lowercase hex with no "0x" prefix (the
+    /// "0x<HEX> \"...\"" form only appears in `-g` output). Our passwords are
+    /// JSON, so text starting with "{" or "[" is taken verbatim before the
+    /// hex interpretation gets a chance to misread an all-hex-looking value.
+    static func decodePasswordOutput(_ raw: String) -> Data? {
+        let output = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !output.isEmpty else {
+            return nil
+        }
+        if output.hasPrefix("{") || output.hasPrefix("[") {
+            return Data(output.utf8)
+        }
+        if let decoded = decodeHexPassword(output) {
+            return decoded
+        }
+        return Data(output.utf8)
+    }
+
+    /// Builds the `add-generic-password` line fed to `security -i`. The value
+    /// is double-quoted with backslashes escaped before inner quotes; raw
+    /// UTF-8 passes through unchanged.
+    static func makeAddGenericPasswordCommand(account: String, service: String, value: String) -> String {
+        "add-generic-password -U -a \"\(escapeQuoted(account))\" -s \"\(escapeQuoted(service))\" -w \"\(escapeQuoted(value))\""
+    }
+
+    private static func escapeQuoted(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    private static func decodeHexPassword(_ output: String) -> Data? {
+        var hexText = Substring(output)
+        if hexText.hasPrefix("0x") {
+            hexText = hexText.dropFirst(2)
+        }
+        guard !hexText.isEmpty,
+              hexText.count.isMultiple(of: 2),
+              hexText.allSatisfy(\.isHexDigit) else {
             return nil
         }
 
@@ -102,7 +132,7 @@ public struct ClaudeCodeCredentialsKeychain: ClaudeCLICredentialSource {
         return data
     }
 
-    private func runSecurity(arguments: [String]) throws -> (status: Int32, output: String, errorOutput: String) {
+    private func runSecurity(arguments: [String], input: Data? = nil) throws -> (status: Int32, output: String, errorOutput: String) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
         process.arguments = arguments
@@ -112,7 +142,20 @@ public struct ClaudeCodeCredentialsKeychain: ClaudeCLICredentialSource {
         process.standardOutput = outputPipe
         process.standardError = errorPipe
 
+        let inputPipe: Pipe?
+        if input != nil {
+            let pipe = Pipe()
+            process.standardInput = pipe
+            inputPipe = pipe
+        } else {
+            inputPipe = nil
+        }
+
         try process.run()
+        if let input, let inputPipe {
+            inputPipe.fileHandleForWriting.write(input)
+            try? inputPipe.fileHandleForWriting.close()
+        }
         let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
         let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()

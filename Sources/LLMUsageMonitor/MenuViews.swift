@@ -218,7 +218,11 @@ struct AccountRowView: View {
             Button("Cancel", role: .cancel) {}
         }
         .sheet(isPresented: $showsHistory) {
-            UsageHistoryChartView(profile: profile, records: historyRecords())
+            UsageHistoryChartView(
+                profile: profile,
+                records: historyRecords(),
+                currentWindows: snapshot?.orderedDisplayWindows ?? []
+            )
         }
     }
 
@@ -250,11 +254,6 @@ struct AccountRowView: View {
                 }
                 .buttonStyle(.plain)
                 .help(billingBadge.help)
-                .popover(isPresented: $showsBillingDetails, arrowEdge: .bottom) {
-                    BillingStatusView(snapshot: snapshot, compact: false)
-                        .padding(DS.Spacing.md)
-                        .frame(width: 300)
-                }
             }
 
             Menu {
@@ -276,6 +275,13 @@ struct AccountRowView: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
             .help("More actions")
+            // Anchored here (not on the conditional badge) so the menu's
+            // "Billing Details…" works for healthy accounts with no badge.
+            .popover(isPresented: $showsBillingDetails, arrowEdge: .bottom) {
+                BillingStatusView(snapshot: snapshot)
+                    .padding(DS.Spacing.md)
+                    .frame(width: 300)
+            }
         }
     }
 
@@ -290,7 +296,7 @@ struct AccountRowView: View {
         let collapsibleScoped = scoped.filter { $0.riskLevel != .warning && $0.riskLevel != .depleted }
 
         ForEach(primary) { window in
-            UsageGauge(window: window, compact: true, estimate: estimates[window.id])
+            UsageGauge(window: window, estimate: estimates[window.id])
         }
 
         if profile.isActiveCLI,
@@ -305,13 +311,13 @@ struct AccountRowView: View {
 
         // A per-model weekly limit that is actually at risk must not hide.
         ForEach(atRiskScoped) { window in
-            UsageGauge(window: window, compact: true, micro: true, estimate: estimates[window.id])
+            UsageGauge(window: window, micro: true, estimate: estimates[window.id])
         }
 
         if !collapsibleScoped.isEmpty {
             if showsScopedWindows {
                 ForEach(collapsibleScoped) { window in
-                    UsageGauge(window: window, compact: true, micro: true, estimate: estimates[window.id])
+                    UsageGauge(window: window, micro: true, estimate: estimates[window.id])
                 }
             }
             Button {
@@ -522,7 +528,7 @@ struct TopUsageSummaryView: View {
             parts.append("S \(Int(session.usedPercent.rounded()))%")
             helpParts.append("\(session.label): \(Int(session.usedPercent.rounded()))% used")
         }
-        if let weekly = snapshot.window(ofKind: .weekly) ?? snapshot.window(ofKind: .weeklyScoped) {
+        if let weekly = snapshot.primaryWeeklyWindow {
             parts.append("W \(Int(weekly.usedPercent.rounded()))%")
             helpParts.append("\(weekly.label): \(Int(weekly.usedPercent.rounded()))% used")
         }
@@ -546,26 +552,12 @@ struct TopUsageSummaryView: View {
     }
 }
 
+/// Full billing-mode explanation; lives in the badge/menu popover since the
+/// card itself only carries a badge for noteworthy modes.
 struct BillingStatusView: View {
     let snapshot: UsageSnapshot?
-    let compact: Bool
 
     var body: some View {
-        if compact {
-            content
-        } else {
-            content
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    color.opacity(0.10),
-                    in: RoundedRectangle(cornerRadius: DS.Radius.small, style: .continuous)
-                )
-        }
-    }
-
-    private var content: some View {
         VStack(alignment: .leading, spacing: 2) {
             Label(title, systemImage: icon)
                 .font(.caption.weight(.semibold))
@@ -574,9 +566,16 @@ struct BillingStatusView: View {
                 .lineLimit(1)
             Text(detail)
                 .font(.caption2)
-                .foregroundStyle(compact ? .tertiary : .secondary)
-                .lineLimit(compact ? 2 : 3)
+                .foregroundStyle(.secondary)
+                .lineLimit(4)
         }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            color.opacity(0.10),
+            in: RoundedRectangle(cornerRadius: DS.Radius.small, style: .continuous)
+        )
     }
 
     private var mode: BillingUsageMode {
@@ -672,18 +671,17 @@ struct BillingStatusView: View {
 
 /// Renders one quota window as a labelled progress bar. An account shows one
 /// of these per window (Session, Weekly, …); `micro` is the slimmer variant
-/// for secondary per-model windows; `window == nil` is the empty state.
+/// for secondary per-model windows.
 struct UsageGauge: View {
-    let window: UsageWindow?
-    let compact: Bool
+    let window: UsageWindow
     var micro: Bool = false
     var estimate: BurnRateEstimate? = nil
 
     var body: some View {
-        VStack(alignment: .leading, spacing: micro ? 2 : (compact ? 4 : 8)) {
+        VStack(alignment: .leading, spacing: micro ? 2 : 4) {
             HStack(spacing: 8) {
-                Text(window?.label ?? "Usage unknown")
-                    .font(labelFont)
+                Text(window.label)
+                    .font(micro ? .caption2 : .caption.weight(.medium))
                     .foregroundStyle(micro ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
                     .lineLimit(1)
                 Spacer()
@@ -716,30 +714,20 @@ struct UsageGauge: View {
                         .fill(riskColor.gradient)
                         .frame(width: fillWidth(in: proxy.size.width))
                 }
-                .animation(.spring(duration: 0.5, bounce: 0.15), value: window?.usedFraction)
+                .animation(.spring(duration: 0.5, bounce: 0.15), value: window.usedFraction)
             }
-            .frame(height: micro ? 3 : (compact ? 6 : 10))
+            .frame(height: micro ? 3 : 6)
         }
-    }
-
-    private var labelFont: Font {
-        if micro {
-            return .caption2
-        }
-        return compact ? .caption.weight(.medium) : .subheadline.weight(.semibold)
     }
 
     /// Short relative reset ("resets in 3h") from the parsed date; the raw
     /// provider phrasing ("2:50am (Europe/Oslo)") is too long for the row and
     /// moves to the tooltip.
     private var resetText: String? {
-        guard let window else {
-            return nil
-        }
         if let date = window.resetDate {
             let remaining = date.timeIntervalSinceNow
             if remaining > 0 {
-                return "resets in \(Self.shortDuration(remaining))"
+                return "resets in \(DurationPhrase.short(remaining))"
             }
             return "reset elapsed"
         }
@@ -747,9 +735,6 @@ struct UsageGauge: View {
     }
 
     private var resetHelp: String? {
-        guard let window else {
-            return nil
-        }
         if let date = window.resetDate {
             return "Resets \(date.formatted(date: .abbreviated, time: .shortened))"
         }
@@ -757,33 +742,19 @@ struct UsageGauge: View {
     }
 
     private func fillWidth(in totalWidth: CGFloat) -> CGFloat {
-        guard let fraction = window?.usedFraction, fraction > 0 else {
+        let fraction = window.usedFraction
+        guard fraction > 0 else {
             return 0
         }
         return max(4, totalWidth * CGFloat(min(fraction, 1)))
     }
 
     private var usageValue: String {
-        guard let window else {
-            return "–"
-        }
-        return "\(Int(window.usedPercent.rounded()))%\(micro ? "" : " used")"
+        "\(Int(window.usedPercent.rounded()))%\(micro ? "" : " used")"
     }
 
     private var riskColor: Color {
-        DS.riskColor(window?.riskLevel ?? .unknown)
-    }
-
-    static func shortDuration(_ seconds: TimeInterval) -> String {
-        let minutes = Int(seconds / 60)
-        if minutes < 60 {
-            return "\(max(1, minutes))m"
-        }
-        let hours = minutes / 60
-        if hours < 48 {
-            return "\(hours)h"
-        }
-        return "\(hours / 24)d"
+        DS.riskColor(window.riskLevel)
     }
 
     static func shortClock(_ date: Date) -> String {

@@ -97,11 +97,16 @@ public final class UsageHistoryStore {
 
     /// Reads the whole log into the in-memory cache, then prunes. Malformed or
     /// truncated lines (e.g. a crash mid-append) are skipped silently rather
-    /// than failing the load and losing the rest of the history.
+    /// than failing the load and losing the rest of the history. A missing
+    /// file is a successful empty load, but a read that THROWS leaves the
+    /// store unloaded: marking it loaded would let a later `prune()` or
+    /// `removeAccount()` rewrite mistake the empty cache for the real history
+    /// and truncate the file.
     public func load(now: Date = Date()) throws {
-        hasLoaded = true
+        hasLoaded = false
         cache = [:]
         guard fileManager.fileExists(atPath: historyURL.path) else {
+            hasLoaded = true
             lastPruned = now
             return
         }
@@ -117,6 +122,7 @@ public final class UsageHistoryStore {
         for accountID in cache.keys {
             cache[accountID]?.sort { $0.timestamp < $1.timestamp }
         }
+        hasLoaded = true
         try prune(now: now)
     }
 
@@ -130,7 +136,9 @@ public final class UsageHistoryStore {
         guard snapshot.parseConfidence != .none else {
             return false
         }
-        let readings = snapshot.displayWindows.map(UsageWindowReading.init(window:))
+        // orderedDisplayWindows rather than the raw windows so the persisted
+        // history is deduped and display-ordered at the source.
+        let readings = snapshot.orderedDisplayWindows.map(UsageWindowReading.init(window:))
         guard !readings.isEmpty else {
             return false
         }

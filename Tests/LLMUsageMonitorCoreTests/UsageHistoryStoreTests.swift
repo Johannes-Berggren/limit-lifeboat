@@ -108,6 +108,55 @@ final class UsageHistoryStoreTests: XCTestCase {
         XCTAssertEqual(store.records(for: accountID), [])
     }
 
+    /// Windows are persisted through `orderedDisplayWindows`, so a snapshot
+    /// carrying duplicate ids or display-misordered windows lands on disk
+    /// deduped (last occurrence wins) and session-first.
+    func testAppendPersistsDedupedDisplayOrderedWindows() throws {
+        let store = try makeStore()
+        XCTAssertTrue(try store.append(snapshot(windows: [
+            window(id: "weekly-all", kind: .weekly, label: "Weekly (all models)", usedPercent: 40),
+            window(id: "session", kind: .session, usedPercent: 10),
+            window(id: "weekly-all", kind: .weekly, label: "Weekly (all models)", usedPercent: 86),
+        ])))
+
+        let record = try XCTUnwrap(store.records(for: accountID).first)
+        XCTAssertEqual(record.windows.map(\.id), ["session", "weekly-all"])
+        XCTAssertEqual(record.windows.last?.usedPercent, 86)
+
+        let reloaded = try UsageHistoryStore(applicationSupportDirectory: root)
+        try reloaded.load(now: now)
+        XCTAssertEqual(reloaded.records(for: accountID), store.records(for: accountID))
+    }
+
+    /// A failed read must leave the store unloaded: treating the empty cache
+    /// as the real history would let the next prune/removeAccount rewrite
+    /// truncate the file on disk.
+    func testFailedLoadPropagatesAndLaterMutationsDoNotTruncateFile() throws {
+        let store = try makeStore()
+        XCTAssertTrue(try store.append(snapshot(windows: [window(usedPercent: 20)])))
+
+        // Make the file unreadable so the load's read throws.
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: historyURL.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: historyURL.path)
+        }
+
+        let broken = try UsageHistoryStore(applicationSupportDirectory: root)
+        XCTAssertThrowsError(try broken.load(now: now))
+
+        // The mutating methods retry the load and propagate its failure
+        // instead of rewriting from the empty cache.
+        XCTAssertThrowsError(try broken.removeAccount(accountID))
+        XCTAssertThrowsError(try broken.prune(now: now))
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: historyURL.path)
+        XCTAssertEqual(try fileLineCount(), 1)
+
+        let reloaded = try UsageHistoryStore(applicationSupportDirectory: root)
+        try reloaded.load(now: now)
+        XCTAssertEqual(reloaded.records(for: accountID).count, 1)
+    }
+
     func testMalformedTrailingLineIsSkippedOnLoad() throws {
         let store = try makeStore()
         XCTAssertTrue(try store.append(snapshot(windows: [window(usedPercent: 20)])))

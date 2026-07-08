@@ -137,6 +137,28 @@ final class ClaudeUsageAPIClientTests: XCTestCase {
         XCTAssertEqual(usage.windows[0].usedPercent, 41)
     }
 
+    /// Numbers arrive both numeric and string-typed; the client coerces
+    /// String the same way the Codex log reader does.
+    func testParsesStringTypedUtilization() async throws {
+        let stringNumbersJSON = """
+        {
+            "limits": [
+                {"kind": "session", "percent": null, "utilization": "53.5", "resets_at": "2026-07-13T06:00:00+00:00"}
+            ],
+            "five_hour": {"utilization": "53.5", "resets_at": "2026-07-13T06:00:00+00:00"}
+        }
+        """
+        let httpClient = MockHTTPClient()
+        httpClient.stub(status: 200, bodyText: stringNumbersJSON)
+        let client = ClaudeUsageAPIClient(httpClient: httpClient)
+
+        let usage = try await client.fetchUsage(accessToken: "token")
+
+        XCTAssertEqual(usage.windows.count, 1)
+        XCTAssertEqual(usage.windows[0].kindRaw, "session")
+        XCTAssertEqual(usage.windows[0].usedPercent, 53.5)
+    }
+
     func testThrowsUnauthorizedOn401And403() async {
         let httpClient = MockHTTPClient()
         httpClient.stub(status: 401, bodyText: "{}")

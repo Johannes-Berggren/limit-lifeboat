@@ -171,17 +171,7 @@ public struct CodexLocalUsageReader {
     }
 
     private func parseTimestamp(_ value: String?) -> Date? {
-        guard let value else {
-            return nil
-        }
-
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: value) {
-            return date
-        }
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: value)
+        value.flatMap(FlexibleISO8601.date(from:))
     }
 
     private func number(_ value: Any?) -> Double? {
@@ -201,20 +191,7 @@ public struct CodexLocalUsageReader {
         guard let date else {
             return nil
         }
-
-        let seconds = max(0, date.timeIntervalSince(now))
-        let minutes = Int((seconds / 60).rounded(.up))
-        if minutes < 60 {
-            return "in \(max(1, minutes))m"
-        }
-
-        let hours = Int((Double(minutes) / 60).rounded(.up))
-        if hours < 48 {
-            return "in \(hours)h"
-        }
-
-        let days = Int((Double(hours) / 24).rounded(.up))
-        return "in \(days)d"
+        return "in \(DurationPhrase.short(date.timeIntervalSince(now)))"
     }
 
     private func creditStatus(from event: RateLimitEvent) -> String? {

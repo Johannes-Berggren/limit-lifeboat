@@ -7,6 +7,9 @@ import SwiftUI
 struct UsageHistoryChartView: View {
     let profile: AccountProfile
     let records: [UsageHistoryRecord]
+    /// The account's current windows, for resolving display labels; readings
+    /// deliberately store no label (it would defeat history dedupe).
+    var currentWindows: [UsageWindow] = []
 
     @Environment(\.dismiss) private var dismiss
     @State private var scope: Scope = .day
@@ -28,10 +31,13 @@ struct UsageHistoryChartView: View {
     }
 
     private struct Point: Identifiable {
-        let id = UUID()
         let timestamp: Date
         let label: String
         let usedPercent: Double
+
+        /// Stable across renders so Swift Charts can diff instead of
+        /// rebuilding the whole chart every body evaluation.
+        var id: String { "\(label)|\(timestamp.timeIntervalSince1970)" }
     }
 
     var body: some View {
@@ -107,14 +113,18 @@ struct UsageHistoryChartView: View {
     }
 
     private func label(for reading: UsageWindowReading) -> String {
+        // Prefer the real label from the account's current windows; fall
+        // back to reconstructing one from the id for windows that no longer
+        // exist ("weekly-fable" → "Weekly (Fable)").
+        if let current = currentWindows.first(where: { $0.id == reading.id }) {
+            return current.label
+        }
         switch reading.kind {
         case .session:
             return "Session"
         case .weekly:
             return "Weekly"
         case .weeklyScoped:
-            // Readings carry no display label by design; recover a short one
-            // from the id ("weekly-fable" → "Weekly (Fable)").
             let scope = reading.id
                 .replacingOccurrences(of: "weekly-", with: "")
                 .replacingOccurrences(of: "-", with: " ")

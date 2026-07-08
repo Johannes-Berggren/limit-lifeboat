@@ -142,6 +142,59 @@ final class ClaudeAccountUsageServiceTests: XCTestCase {
         }
     }
 
+    func testLiveItemChangedDuringRefreshIsNotOverwritten() async throws {
+        let store = FakeCredentialProvider()
+        store.live = makeCredentials(
+            accessToken: "stale",
+            refreshToken: "refresh-1",
+            expiresAt: now.addingTimeInterval(-60)
+        )
+        let http = ScriptedHTTPClient(responses: [
+            (refreshJSON(accessToken: "fresh"), 200),
+            (usageJSON, 200)
+        ])
+        // The user switches accounts while the token refresh is in flight:
+        // the live item now belongs to another profile.
+        http.onRequest = { request in
+            if request.url == ClaudeOAuthConstants.tokenEndpoint {
+                store.live = self.makeCredentials(
+                    accessToken: "other-account",
+                    expiresAt: self.now.addingTimeInterval(3600)
+                )
+            }
+        }
+
+        let service = makeService(http: http, credentials: store)
+        _ = try await service.fetchSnapshot(for: profile, isActiveCLI: true, now: now)
+
+        XCTAssertEqual(
+            store.live?.accessToken, "other-account",
+            "The old profile's refreshed tokens must not overwrite the new owner's live item"
+        )
+        XCTAssertEqual(
+            store.stored[profile.id]?.accessToken, "fresh",
+            "The refreshed tokens still belong in the profile's stored snapshot"
+        )
+    }
+
+    func testEmptyWindowsResponseThrowsInsteadOfOverwritingSnapshot() async {
+        let store = FakeCredentialProvider()
+        store.stored[profile.id] = makeCredentials(accessToken: "token", expiresAt: now.addingTimeInterval(3600))
+        let http = ScriptedHTTPClient(responses: [(Data(#"{"limits":[]}"#.utf8), 200)])
+
+        let service = makeService(http: http, credentials: store)
+        do {
+            _ = try await service.fetchSnapshot(for: profile, isActiveCLI: false, now: now)
+            XCTFail("Expected transport error for a 2xx body without windows")
+        } catch let error as ClaudeAccountUsageFetchError {
+            guard case .transport = error else {
+                return XCTFail("Expected transport, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error \(error)")
+        }
+    }
+
     func testMissingCredentialsThrowsNoCredentials() async {
         let service = makeService(http: ScriptedHTTPClient(responses: []), credentials: FakeCredentialProvider())
         do {
@@ -217,9 +270,11 @@ private final class FakeCredentialProvider: ClaudeOAuthCredentialProviding, @unc
 }
 
 /// Replays queued (body, status) pairs in order and records every request.
+/// `onRequest` lets a test mutate state "while a request is in flight".
 private final class ScriptedHTTPClient: HTTPClienting, @unchecked Sendable {
     private(set) var requests: [URLRequest] = []
     private var responses: [(Data, Int)]
+    var onRequest: ((URLRequest) -> Void)?
 
     init(responses: [(Data, Int)]) {
         self.responses = responses
@@ -227,6 +282,7 @@ private final class ScriptedHTTPClient: HTTPClienting, @unchecked Sendable {
 
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         requests.append(request)
+        onRequest?(request)
         guard !responses.isEmpty else {
             throw URLError(.badServerResponse)
         }

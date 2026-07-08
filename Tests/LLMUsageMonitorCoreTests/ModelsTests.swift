@@ -176,6 +176,52 @@ final class ModelsTests: XCTestCase {
         XCTAssertNil(snapshot.window(ofKind: .weekly))
     }
 
+    func testPrimaryWeeklyWindowPrefersWeeklyThenFallsBackToScoped() {
+        let both = makeSnapshot(windows: [
+            makeWindow(id: "weekly-fable", kind: .weeklyScoped),
+            makeWindow(id: "weekly-all", kind: .weekly)
+        ])
+        XCTAssertEqual(both.primaryWeeklyWindow?.id, "weekly-all")
+
+        let scopedOnly = makeSnapshot(windows: [
+            makeWindow(id: "session", kind: .session),
+            makeWindow(id: "weekly-fable", kind: .weeklyScoped)
+        ])
+        XCTAssertEqual(scopedOnly.primaryWeeklyWindow?.id, "weekly-fable")
+
+        XCTAssertNil(makeSnapshot(windows: [makeWindow(id: "session", kind: .session)]).primaryWeeklyWindow)
+    }
+
+    /// Window-id slugs are a contract between the TUI parser and the usage
+    /// API client: alert dedupe keys must survive flipping between sources,
+    /// so the shared slug behavior is pinned here.
+    func testUsageWindowIDSlug() {
+        XCTAssertEqual(UsageWindowID.slug("Fable"), "fable")
+        XCTAssertEqual(UsageWindowID.slug("All Models"), "all-models")
+        XCTAssertEqual(UsageWindowID.slug(""), "window")
+    }
+
+    func testFlexibleISO8601ParsesWithAndWithoutFractionalSeconds() throws {
+        XCTAssertEqual(
+            FlexibleISO8601.date(from: "2026-07-13T06:00:00+00:00"),
+            Date(timeIntervalSince1970: 1_783_922_400)
+        )
+        let fractional = try XCTUnwrap(FlexibleISO8601.date(from: "2026-07-08T00:49:59.940321+00:00"))
+        XCTAssertEqual(fractional.timeIntervalSince1970, 1_783_471_799.940321, accuracy: 0.01)
+        XCTAssertNil(FlexibleISO8601.date(from: "not a date"))
+    }
+
+    func testDurationPhraseShortRoundsUpThroughTiers() {
+        XCTAssertEqual(DurationPhrase.short(0), "1m")
+        XCTAssertEqual(DurationPhrase.short(-30), "1m")
+        XCTAssertEqual(DurationPhrase.short(59 * 60), "59m")
+        XCTAssertEqual(DurationPhrase.short(59 * 60 + 1), "1h")
+        XCTAssertEqual(DurationPhrase.short(3 * 3_600), "3h")
+        XCTAssertEqual(DurationPhrase.short(47 * 3_600), "47h")
+        XCTAssertEqual(DurationPhrase.short(47 * 3_600 + 1), "2d")
+        XCTAssertEqual(DurationPhrase.short(5 * 24 * 3_600), "5d")
+    }
+
     func testMostConstrainedWindowPicksHighestUsedPercent() {
         let snapshot = makeSnapshot(windows: [
             makeWindow(id: "session", kind: .session, usedPercent: 23),

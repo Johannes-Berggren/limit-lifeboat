@@ -98,19 +98,9 @@ public struct ClaudeCodeUsageReport: Equatable, Sendable {
             return ("weekly-all", .weekly, "Weekly (all models)")
         }
         if let organization = firstCapture(#"\(([^)]+)\)"#, in: name) {
-            return ("weekly-\(slug(organization))", .weeklyScoped, "Weekly (\(organization))")
+            return ("weekly-\(UsageWindowID.slug(organization))", .weeklyScoped, "Weekly (\(organization))")
         }
-        return (slug(name), .other, name)
-    }
-
-    private func slug(_ text: String) -> String {
-        let mapped = text.lowercased().unicodeScalars.map { scalar -> Character in
-            CharacterSet.alphanumerics.contains(scalar) ? Character(scalar) : "-"
-        }
-        let collapsed = String(mapped)
-            .split(separator: "-", omittingEmptySubsequences: true)
-            .joined(separator: "-")
-        return collapsed.isEmpty ? "window" : collapsed
+        return (UsageWindowID.slug(name), .other, name)
     }
 
     private var creditStatus: String {
