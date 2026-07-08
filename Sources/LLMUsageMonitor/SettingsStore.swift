@@ -26,6 +26,12 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(usageAlertsEnabled, forKey: Keys.usageAlertsEnabled) }
     }
 
+    /// Opt-in: switch the CLI automatically when the active Claude account is
+    /// depleted and another account has clearly more headroom.
+    @Published var autoSwitchEnabled: Bool {
+        didSet { defaults.set(autoSwitchEnabled, forKey: Keys.autoSwitchEnabled) }
+    }
+
     /// Gates the "quota is likely back — switch" notifications.
     @Published var resetAlertsEnabled: Bool {
         didSet { defaults.set(resetAlertsEnabled, forKey: Keys.resetAlertsEnabled) }
@@ -41,10 +47,13 @@ final class SettingsStore: ObservableObject {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let storedInterval = defaults.object(forKey: Keys.refreshIntervalMinutes) as? Int
-        self.refreshIntervalMinutes = min(240, max(1, storedInterval ?? 10))
+        // A refresh is now a sub-second API call, so the default cadence
+        // dropped from 10 to 5 minutes; an explicitly chosen interval wins.
+        self.refreshIntervalMinutes = min(240, max(1, storedInterval ?? 5))
         self.menuBarWindowPreference = (defaults.string(forKey: Keys.menuBarWindowPreference))
             .flatMap(MenuBarWindowPreference.init(rawValue:)) ?? .mostConstrained
         self.usageAlertsEnabled = defaults.object(forKey: Keys.usageAlertsEnabled) as? Bool ?? true
+        self.autoSwitchEnabled = defaults.object(forKey: Keys.autoSwitchEnabled) as? Bool ?? false
         self.resetAlertsEnabled = defaults.object(forKey: Keys.resetAlertsEnabled) as? Bool ?? true
     }
 
@@ -52,6 +61,7 @@ final class SettingsStore: ObservableObject {
         static let refreshIntervalMinutes = "refreshIntervalMinutes"
         static let menuBarWindowPreference = "menuBarWindowPreference"
         static let usageAlertsEnabled = "usageAlertsEnabled"
+        static let autoSwitchEnabled = "autoSwitchEnabled"
         static let resetAlertsEnabled = "resetAlertsEnabled"
         static let lastUpdateCheck = "lastUpdateCheck"
     }

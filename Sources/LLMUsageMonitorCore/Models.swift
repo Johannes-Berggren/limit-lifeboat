@@ -204,7 +204,10 @@ public struct AccountProfile: Codable, Identifiable, Hashable, Sendable {
     public var id: UUID
     public var provider: Provider
     public var label: String
-    public var planLabel: String
+    /// Human plan tier ("Max 20x", "Pro") from the provider's profile
+    /// endpoint; nil until fetched, and in profiles.json written before the
+    /// field existed.
+    public var planLabel: String?
     public var webDataStoreKind: WebDataStoreKind
     public var webDataStoreID: UUID
     public var identity: AccountIdentity?
@@ -216,7 +219,7 @@ public struct AccountProfile: Codable, Identifiable, Hashable, Sendable {
         id: UUID = UUID(),
         provider: Provider,
         label: String,
-        planLabel: String = "",
+        planLabel: String? = nil,
         webDataStoreKind: WebDataStoreKind = .isolated,
         webDataStoreID: UUID = UUID(),
         identity: AccountIdentity? = nil,
@@ -254,7 +257,8 @@ public struct AccountProfile: Codable, Identifiable, Hashable, Sendable {
         self.id = try container.decode(UUID.self, forKey: .id)
         self.provider = try container.decode(Provider.self, forKey: .provider)
         self.label = try container.decode(String.self, forKey: .label)
-        self.planLabel = try container.decode(String.self, forKey: .planLabel)
+        // Absent in profiles.json written before plan labels existed.
+        self.planLabel = try container.decodeIfPresent(String.self, forKey: .planLabel)
         self.webDataStoreKind = try container.decodeIfPresent(WebDataStoreKind.self, forKey: .webDataStoreKind) ?? .isolated
         self.webDataStoreID = try container.decode(UUID.self, forKey: .webDataStoreID)
         self.identity = try container.decodeIfPresent(AccountIdentity.self, forKey: .identity)
@@ -268,7 +272,7 @@ public struct AccountProfile: Codable, Identifiable, Hashable, Sendable {
         try container.encode(id, forKey: .id)
         try container.encode(provider, forKey: .provider)
         try container.encode(label, forKey: .label)
-        try container.encode(planLabel, forKey: .planLabel)
+        try container.encodeIfPresent(planLabel, forKey: .planLabel)
         try container.encode(webDataStoreKind, forKey: .webDataStoreKind)
         try container.encode(webDataStoreID, forKey: .webDataStoreID)
         try container.encodeIfPresent(identity, forKey: .identity)

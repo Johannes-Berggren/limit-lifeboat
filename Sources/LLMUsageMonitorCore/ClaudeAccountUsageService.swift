@@ -92,6 +92,42 @@ public struct ClaudeAccountUsageService {
         }
     }
 
+    /// Identity + plan tier from the profile endpoint. Called sparingly (only
+    /// when a profile is missing them) — same credential resolution and
+    /// single-refresh policy as `fetchSnapshot`.
+    public func fetchAccountInfo(
+        for profile: AccountProfile,
+        isActiveCLI: Bool,
+        now: Date = Date()
+    ) async throws -> ClaudeAPIAccountInfo {
+        var cameFromLiveItem = false
+        var current: ClaudeOAuthCredentials?
+        if isActiveCLI, let live = credentials.liveClaudeOAuthCredentials() {
+            current = live
+            cameFromLiveItem = true
+        } else {
+            current = try? credentials.storedClaudeOAuthCredentials(for: profile.id)
+        }
+
+        guard var active = current else {
+            throw ClaudeAccountUsageFetchError.noCredentials
+        }
+
+        if active.isExpired(asOf: now) {
+            active = try await refreshAndPersist(active, for: profile, updateLiveItem: cameFromLiveItem, now: now)
+        }
+
+        do {
+            return try await apiClient.fetchAccountInfo(accessToken: active.accessToken, now: now)
+        } catch ClaudeUsageAPIError.unauthorized {
+            throw ClaudeAccountUsageFetchError.unauthorized
+        } catch let error as ClaudeAccountUsageFetchError {
+            throw error
+        } catch {
+            throw ClaudeAccountUsageFetchError.transport(error)
+        }
+    }
+
     private func fetchUsage(
         with credentials: ClaudeOAuthCredentials,
         for profile: AccountProfile,

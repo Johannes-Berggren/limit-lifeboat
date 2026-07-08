@@ -26,6 +26,51 @@ final class ModelsTests: XCTestCase {
         XCTAssertFalse(left.matches(right))
     }
 
+    func testAccountProfileRoundTripsPlanLabel() throws {
+        // Whole-second dates: appEncoder's ISO8601 drops fractional seconds,
+        // so Date() would round-trip unequal by microseconds.
+        let stamp = Date(timeIntervalSince1970: 1_783_000_000)
+        let profile = AccountProfile(
+            provider: .claude,
+            label: "Personal",
+            planLabel: "Max 20x",
+            createdAt: stamp,
+            updatedAt: stamp
+        )
+
+        let data = try JSONEncoder.appEncoder.encode(profile)
+        let decoded = try JSONDecoder.appDecoder.decode(AccountProfile.self, from: data)
+
+        XCTAssertEqual(decoded, profile)
+        XCTAssertEqual(decoded.planLabel, "Max 20x")
+    }
+
+    /// Profiles persisted before `planLabel` existed must still decode (with
+    /// a nil plan) rather than throwing and wiping profiles.json on launch.
+    func testDecodesLegacyProfileWithoutPlanLabelKey() throws {
+        let id = UUID()
+        let storeID = UUID()
+        let json = """
+        {
+          "id": "\(id.uuidString)",
+          "provider": "claude",
+          "label": "Personal",
+          "webDataStoreKind": "isolated",
+          "webDataStoreID": "\(storeID.uuidString)",
+          "isActiveCLI": false,
+          "createdAt": "2026-07-07T00:00:00Z",
+          "updatedAt": "2026-07-07T00:00:00Z"
+        }
+        """
+
+        let profile = try JSONDecoder.appDecoder.decode(AccountProfile.self, from: Data(json.utf8))
+
+        XCTAssertNil(profile.planLabel)
+        XCTAssertEqual(profile.id, id)
+        XCTAssertEqual(profile.label, "Personal")
+        XCTAssertEqual(profile.webDataStoreID, storeID)
+    }
+
     func testSnapshotStaleness() {
         let now = Date()
         let fresh = makeSnapshot(lastRefreshed: now.addingTimeInterval(-60))

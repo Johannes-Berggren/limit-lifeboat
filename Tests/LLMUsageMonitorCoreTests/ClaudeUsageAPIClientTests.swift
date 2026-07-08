@@ -313,4 +313,180 @@ final class ClaudeUsageAPIClientTests: XCTestCase {
         XCTAssertEqual(snapshot.source, "Anthropic usage API")
         XCTAssertEqual(snapshot.message, "Anthropic usage API did not include a recognizable limit.")
     }
+
+    // MARK: - Account info (api/oauth/profile)
+
+    /// Copied from a live api/oauth/profile response, trimmed to the keys the
+    /// client reads plus ones it must ignore.
+    private let liveProfileJSON = """
+    {
+        "account": {
+            "uuid": "0338f627-88b8-4a33-9df2-a4a723a29b09",
+            "full_name": "Johannes Berggren",
+            "display_name": "Johannes",
+            "email": "johannes@berggren.co",
+            "has_claude_max": true,
+            "has_claude_pro": false
+        },
+        "organization": {
+            "uuid": "61105391-4d29-42fa-8a29-c26652444ba1",
+            "name": "johannes@berggren.co's Organization",
+            "organization_type": "claude_max",
+            "billing_type": "stripe_subscription",
+            "rate_limit_tier": "default_claude_max_20x",
+            "seat_tier": null,
+            "subscription_status": "active"
+        },
+        "application": {"client_id": "test-client"},
+        "enabled_plugins": []
+    }
+    """
+
+    func testFetchAccountInfoSendsAuthorizedRequestAndParsesProfile() async throws {
+        let httpClient = MockHTTPClient()
+        httpClient.stub(status: 200, bodyText: liveProfileJSON)
+        let client = ClaudeUsageAPIClient(httpClient: httpClient)
+        let now = Date(timeIntervalSince1970: 1_783_000_000)
+
+        let info = try await client.fetchAccountInfo(accessToken: "test-access-token", now: now)
+
+        let request = try XCTUnwrap(httpClient.requests.first)
+        XCTAssertEqual(request.url?.absoluteString, "https://api.anthropic.com/api/oauth/profile")
+        XCTAssertEqual(request.url, ClaudeUsageAPIClient.profileEndpoint)
+        XCTAssertEqual(request.httpMethod, "GET")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-access-token")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "anthropic-beta"), "oauth-2025-04-20")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/json")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "User-Agent"), "LLMUsageMonitor")
+
+        let identity = try XCTUnwrap(info.identity)
+        XCTAssertEqual(identity.email, "johannes@berggren.co")
+        XCTAssertEqual(identity.displayName, "Johannes Berggren")
+        XCTAssertEqual(identity.organization, "johannes@berggren.co's Organization")
+        // accountID carries the *account* uuid, mirroring ClaudeIdentityReader's
+        // oauthAccount.accountUuid mapping — never the organization uuid — so
+        // profiles sharing one email across two organizations keep matching
+        // exactly as the ~/.claude.json source does.
+        XCTAssertEqual(identity.accountID, "0338f627-88b8-4a33-9df2-a4a723a29b09")
+        XCTAssertNotEqual(identity.accountID, "61105391-4d29-42fa-8a29-c26652444ba1")
+        XCTAssertEqual(identity.source, .claudeCodeUsage)
+        XCTAssertEqual(identity.updatedAt, now)
+        XCTAssertTrue(identity.isLikelyValid)
+
+        XCTAssertEqual(info.planLabel, "Max 20x")
+    }
+
+    /// The same login seen through both identity sources — the profile API
+    /// and ~/.claude.json via ClaudeIdentityReader — must map uuids the same
+    /// way, so CLIAccountSyncPlanner activates the existing profile instead
+    /// of creating a duplicate.
+    func testFetchAccountInfoIdentityMatchesClaudeIdentityReaderIdentity() async throws {
+        let home = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let claudeConfigJSON = """
+        {
+            "oauthAccount": {
+                "accountUuid": "0338f627-88b8-4a33-9df2-a4a723a29b09",
+                "emailAddress": "johannes@berggren.co",
+                "organizationUuid": "61105391-4d29-42fa-8a29-c26652444ba1",
+                "organizationName": "johannes@berggren.co's Organization",
+                "displayName": "Johannes"
+            }
+        }
+        """
+        try Data(claudeConfigJSON.utf8).write(to: home.appendingPathComponent(".claude.json"))
+        let readerIdentity = try XCTUnwrap(ClaudeIdentityReader(homeDirectory: home).readIdentity())
+
+        let httpClient = MockHTTPClient()
+        httpClient.stub(status: 200, bodyText: liveProfileJSON)
+        let info = try await ClaudeUsageAPIClient(httpClient: httpClient).fetchAccountInfo(accessToken: "token")
+        let apiIdentity = try XCTUnwrap(info.identity)
+
+        XCTAssertEqual(apiIdentity.accountID, readerIdentity.accountID)
+        XCTAssertTrue(apiIdentity.matches(readerIdentity))
+
+        let profile = AccountProfile(provider: .claude, label: "Claude", identity: readerIdentity)
+        let action = CLIAccountSyncPlanner().plan(
+            provider: .claude,
+            currentIdentity: apiIdentity,
+            profiles: [profile]
+        )
+        XCTAssertEqual(action, .activate(profile.id))
+    }
+
+    func testFetchAccountInfoThrowsUnauthorizedOn401And403() async {
+        let httpClient = MockHTTPClient()
+        httpClient.stub(status: 401, bodyText: "{}")
+        httpClient.stub(status: 403, bodyText: "{}")
+        let client = ClaudeUsageAPIClient(httpClient: httpClient)
+
+        for _ in 0..<2 {
+            do {
+                _ = try await client.fetchAccountInfo(accessToken: "expired-token")
+                XCTFail("Expected unauthorized")
+            } catch let error as ClaudeUsageAPIError {
+                guard case .unauthorized = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+            } catch {
+                XCTFail("Unexpected error: \(error)")
+            }
+        }
+    }
+
+    /// Tolerant decoding: an object without account/organization keys yields
+    /// empty info rather than throwing.
+    func testFetchAccountInfoWithUnrecognizedObjectYieldsEmptyInfo() async throws {
+        let httpClient = MockHTTPClient()
+        httpClient.stub(status: 200, bodyText: #"{"something_else": true}"#)
+        let client = ClaudeUsageAPIClient(httpClient: httpClient)
+
+        let info = try await client.fetchAccountInfo(accessToken: "token")
+
+        XCTAssertNil(info.identity)
+        XCTAssertNil(info.planLabel)
+    }
+
+    func testPlanLabelMapping() {
+        // Known rate-limit tiers.
+        XCTAssertEqual(planLabel(tier: "default_claude_max_20x"), "Max 20x")
+        XCTAssertEqual(planLabel(tier: "default_claude_max_5x"), "Max 5x")
+        // Multipliers Anthropic ships later generalize via the <N> capture.
+        XCTAssertEqual(planLabel(tier: "default_claude_max_7x"), "Max 7x")
+        XCTAssertEqual(planLabel(tier: "default_claude_max_100x"), "Max 100x")
+        // Pro-flavored tiers.
+        XCTAssertEqual(planLabel(tier: "default_claude_pro"), "Pro")
+
+        // The tier outranks the coarser signals when it is recognized.
+        XCTAssertEqual(planLabel(tier: "default_claude_pro", organizationType: "claude_max"), "Pro")
+
+        // Unknown or absent tier: organization type decides first...
+        XCTAssertEqual(planLabel(organizationType: "claude_max"), "Max")
+        XCTAssertEqual(planLabel(tier: "default_enterprise", organizationType: "claude_max"), "Max")
+        // ...then the account flags, has_claude_pro before has_claude_max.
+        XCTAssertEqual(planLabel(hasClaudePro: true), "Pro")
+        XCTAssertEqual(planLabel(hasClaudeMax: true), "Max")
+        XCTAssertEqual(planLabel(hasClaudeMax: true, hasClaudePro: true), "Pro")
+
+        // No plan signal at all.
+        XCTAssertNil(planLabel())
+        XCTAssertNil(planLabel(tier: "mystery_tier"))
+        XCTAssertNil(planLabel(organizationType: "claude_enterprise"))
+    }
+
+    private func planLabel(
+        tier: String? = nil,
+        organizationType: String? = nil,
+        hasClaudeMax: Bool = false,
+        hasClaudePro: Bool = false
+    ) -> String? {
+        ClaudeUsageAPIClient.planLabel(
+            rateLimitTier: tier,
+            organizationType: organizationType,
+            hasClaudeMax: hasClaudeMax,
+            hasClaudePro: hasClaudePro
+        )
+    }
 }
