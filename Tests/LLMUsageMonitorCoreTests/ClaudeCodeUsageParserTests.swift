@@ -137,6 +137,100 @@ final class ClaudeCodeUsageParserTests: XCTestCase {
         XCTAssertEqual(snapshot.riskLevel, .warning)
     }
 
+    func testDedupesSectionsAcrossProgressiveTUIFrames() throws {
+        // The expect probe captures several progressive redraw frames: sections
+        // repeat, early occurrences can lack the reset line, and overwrites can
+        // mangle a header that an earlier frame still has intact.
+        let output = """
+        \u{001B}[2mWelcome to Claude Code\u{001B}[0m
+        | berggren@findable.ai's Organization |
+        | Claude Max |
+
+        Current session
+        70% used
+
+        Current week (all models)
+        24% used
+        Resets Jul 10 at 6am (Europe/Oslo)
+
+        Current week (Fable)
+        26% used
+        Resets Jul 10 at 5:59am (Europe/Oslo)
+        \u{001B}[2J\u{001B}[H
+        Current session
+        70% used
+        Resets 8pm (Europe/Oslo)
+
+        Current week (all models)
+        24% used
+        Resets Jul 10 at 6am (Europe/Oslo)
+
+        Esc to cancelrrent week (Fable)
+        26% used
+        Resets Jul 10 at 5:59am (Europe/Oslo)
+        """
+
+        let report = try XCTUnwrap(parser.parse(text: output))
+
+        // Exactly one limit per logical section, in first-seen order.
+        XCTAssertEqual(report.limits.count, 3)
+        XCTAssertEqual(report.limits[0].name, "Current session")
+        XCTAssertEqual(report.limits[0].usedPercent, 70)
+        // The second frame completes the session section with its reset line.
+        XCTAssertEqual(report.limits[0].resetDescription, "8pm (Europe/Oslo)")
+        XCTAssertEqual(report.limits[1].name, "Current week (all models)")
+        XCTAssertEqual(report.limits[1].usedPercent, 24)
+        XCTAssertEqual(report.limits[1].resetDescription, "Jul 10 at 6am (Europe/Oslo)")
+        // The mangled header drops out of the second frame; the intact first
+        // frame keeps the Fable section alive.
+        XCTAssertEqual(report.limits[2].name, "Current week (Fable)")
+        XCTAssertEqual(report.limits[2].usedPercent, 26)
+        XCTAssertEqual(report.limits[2].resetDescription, "Jul 10 at 5:59am (Europe/Oslo)")
+
+        let profile = AccountProfile(provider: .claude, label: "Claude")
+        let snapshot = report.makeSnapshot(for: profile)
+        let ids = snapshot.windows.map(\.id)
+        XCTAssertEqual(ids, ["session", "weekly-all", "weekly-fable"])
+        XCTAssertEqual(Set(ids).count, ids.count)
+    }
+
+    func testKeepsResetDescriptionWhenLaterFrameLacksIt() throws {
+        let report = try XCTUnwrap(parser.parse(text: """
+        Current session
+        70% used
+        Resets 8pm (Europe/Oslo)
+
+        Current session
+        72% used
+        """))
+
+        // Never trade a reset description away for a later frame without one.
+        XCTAssertEqual(report.limits.count, 1)
+        XCTAssertEqual(report.limits[0].usedPercent, 70)
+        XCTAssertEqual(report.limits[0].resetDescription, "8pm (Europe/Oslo)")
+    }
+
+    func testMakeSnapshotDedupesDuplicateWindowIDs() throws {
+        // Defensive: even a report built directly with duplicate limits must
+        // never hand SwiftUI ForEach two windows with the same id.
+        let report = ClaudeCodeUsageReport(
+            identity: nil,
+            limits: [
+                ClaudeCodeUsageLimit(name: "Current session", usedPercent: 55, resetDescription: nil),
+                ClaudeCodeUsageLimit(name: "Current session", usedPercent: 60, resetDescription: "9pm (Europe/Oslo)")
+            ]
+        )
+
+        let profile = AccountProfile(provider: .claude, label: "Claude")
+        let snapshot = report.makeSnapshot(for: profile)
+
+        XCTAssertEqual(snapshot.windows.count, 1)
+        let window = try XCTUnwrap(snapshot.windows.first)
+        XCTAssertEqual(window.id, "session")
+        XCTAssertEqual(window.usedPercent, 60)
+        XCTAssertEqual(window.resetDescription, "9pm (Europe/Oslo)")
+    }
+
     func testReturnsNilForUnknownOutput() {
         XCTAssertNil(parser.parse(text: "Welcome to Claude Code. Type a prompt to begin."))
     }

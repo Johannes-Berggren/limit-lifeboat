@@ -24,25 +24,44 @@ public enum CLISwitcherError: Error, LocalizedError {
 }
 
 public final class CLISwitcher {
+    /// Marker `relativePath` for the CLI's login-keychain credentials item;
+    /// snapshot items with this path are keychain merges, not file writes.
+    public static let claudeKeychainItemPath = "keychain/Claude Code-credentials"
+
     private let fileManager: FileManager
     private let homeDirectory: URL
     private let backupDirectory: URL
     private let credentialStore: CredentialStoreProtocol
+    private let claudeCLICredentialSource: ClaudeCLICredentialSource
 
     public init(
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         backupDirectory: URL,
         credentialStore: CredentialStoreProtocol,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        claudeCLICredentialSource: ClaudeCLICredentialSource = ClaudeCodeCredentialsKeychain()
     ) {
         self.homeDirectory = homeDirectory
         self.backupDirectory = backupDirectory
         self.credentialStore = credentialStore
         self.fileManager = fileManager
+        self.claudeCLICredentialSource = claudeCLICredentialSource
     }
 
     public func captureAndStoreSnapshot(for profile: AccountProfile) throws -> CredentialSnapshot {
-        let snapshot = try captureSnapshot(provider: profile.provider)
+        var snapshot = try captureSnapshot(provider: profile.provider)
+
+        // A logged-out terminal must not erase the profile's captured OAuth
+        // token: when the fresh capture has no keychain item but the stored
+        // snapshot does, carry the stored item over (it belonged to this
+        // same profile).
+        if profile.provider == .claude,
+           !snapshot.items.contains(where: { $0.kind == .keychainJSONFields }),
+           let stored = try credentialStore.loadSnapshot(for: profile.id),
+           let keychainItem = stored.items.first(where: { $0.kind == .keychainJSONFields }) {
+            snapshot.items.append(keychainItem)
+        }
+
         try credentialStore.save(snapshot: snapshot, for: profile.id)
         return snapshot
     }
@@ -65,14 +84,18 @@ public final class CLISwitcher {
             throw CLISwitcherError.providerMismatch(expected: profile.provider, actual: snapshot.provider)
         }
 
+        let fileItems = snapshot.items.filter { $0.kind != .keychainJSONFields }
+        let keychainItems = snapshot.items.filter { $0.kind == .keychainJSONFields }
+
         // Phase 1: back up every existing destination into one directory per
         // restore call before writing a single byte, so a failure here leaves
-        // the credentials untouched.
+        // the credentials untouched. The live keychain item is backed up as a
+        // JSON file alongside the file backups.
         let restoreBackupDirectory = backupDirectory.appendingPathComponent(uniqueBackupDirectoryName(), isDirectory: true)
         var backups: [URL] = []
         var backedUp: [(destination: URL, backup: URL)] = []
 
-        for item in snapshot.items {
+        for item in fileItems {
             let destination = resolve(relativePath: item.relativePath)
             guard fileManager.fileExists(atPath: destination.path) else {
                 continue
@@ -91,10 +114,37 @@ public final class CLISwitcher {
             }
         }
 
+        var liveKeychainBackup: Data?
+        if snapshot.provider == .claude {
+            // A failed keychain read must abort the restore before a single
+            // write happens — treating it as "absent" would merge into {}
+            // (dropping mcpOAuth) or skip the logout below.
+            do {
+                liveKeychainBackup = try claudeCLICredentialSource.readLiveItemJSON()
+            } catch {
+                throw CLISwitcherError.backupFailed(path: Self.claudeKeychainItemPath, underlying: error)
+            }
+            if let liveKeychainBackup {
+                do {
+                    try fileManager.createDirectory(at: restoreBackupDirectory, withIntermediateDirectories: true)
+                    let backup = restoreBackupDirectory
+                        .appendingPathComponent(sanitizedBackupName(for: Self.claudeKeychainItemPath) + ".json")
+                    try liveKeychainBackup.write(to: backup, options: [.atomic])
+                    try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backup.path)
+                    backups.append(backup)
+                } catch {
+                    throw CLISwitcherError.backupFailed(path: Self.claudeKeychainItemPath, underlying: error)
+                }
+            }
+        }
+
         // Phase 2: write all items; on failure roll back from the backups.
+        // The keychain merge goes last so a file failure never leaves the CLI
+        // logged into a half-switched account.
         var touched: [URL] = []
+        var wroteKeychain = false
         do {
-            for item in snapshot.items {
+            for item in fileItems {
                 let destination = resolve(relativePath: item.relativePath)
                 try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
                 switch item.kind {
@@ -102,6 +152,8 @@ public final class CLISwitcher {
                     try item.contents.write(to: destination, options: [.atomic])
                 case .jsonFields:
                     try mergeJSONFields(item.contents, into: destination)
+                case .keychainJSONFields:
+                    break
                 }
                 try fileManager.setAttributes(
                     [.posixPermissions: item.posixPermissions ?? 0o600],
@@ -109,10 +161,31 @@ public final class CLISwitcher {
                 )
                 touched.append(destination)
             }
+            for item in keychainItems {
+                let merged = mergeClaudeAiOauth(item.contents, intoItemJSON: liveKeychainBackup)
+                try claudeCLICredentialSource.writeLiveItemJSON(merged)
+                wroteKeychain = true
+            }
+            if snapshot.provider == .claude, keychainItems.isEmpty,
+               let liveKeychainBackup,
+               var liveObject = try? JSONSerialization.jsonObject(with: liveKeychainBackup) as? [String: Any],
+               liveObject["claudeAiOauth"] != nil {
+                // Legacy snapshot without a captured token: strip the
+                // previous account's claudeAiOauth so the CLI is honestly
+                // logged out instead of silently staying on the old account.
+                // Every sibling key (especially mcpOAuth) stays in place.
+                liveObject.removeValue(forKey: "claudeAiOauth")
+                let loggedOut = try JSONSerialization.data(withJSONObject: liveObject, options: [.sortedKeys])
+                try claudeCLICredentialSource.writeLiveItemJSON(loggedOut)
+                wroteKeychain = true
+            }
         } catch {
             for (destination, backup) in backedUp {
                 try? fileManager.removeItem(at: destination)
                 try? fileManager.copyItem(at: backup, to: destination)
+            }
+            if wroteKeychain, let liveKeychainBackup {
+                try? claudeCLICredentialSource.writeLiveItemJSON(liveKeychainBackup)
             }
             throw error
         }
@@ -143,12 +216,67 @@ public final class CLISwitcher {
             let authURL = resolve(relativePath: ".codex/auth.json")
             return fileManager.fileExists(atPath: authURL.path) && ((try? Data(contentsOf: authURL).isEmpty) == false)
         case .claude:
+            if liveClaudeOAuthCredentials() != nil {
+                return true
+            }
             if let fields = try? readClaudeConfigAuthFields(), !fields.isEmpty {
                 return true
             }
             let claudeJSONURL = resolve(relativePath: ".claude.json")
             return containsAuthMaterial(in: claudeJSONURL)
         }
+    }
+
+    // MARK: - Claude OAuth credential access
+
+    /// The CLI's current login tokens, straight from the login keychain.
+    public func liveClaudeOAuthCredentials() -> ClaudeOAuthCredentials? {
+        guard let item = try? claudeCLICredentialSource.readLiveItemJSON() else {
+            return nil
+        }
+        return ClaudeOAuthCredentials.extract(fromKeychainItemJSON: item)
+    }
+
+    /// Merge-writes refreshed tokens into the live keychain item so the CLI
+    /// keeps working after the app refreshes an access token (`mcpOAuth` and
+    /// unknown siblings are preserved).
+    public func writeLiveClaudeOAuthCredentials(_ credentials: ClaudeOAuthCredentials) throws {
+        // A thrown read must abort the write: collapsing it into nil would
+        // merge into {} and drop the item's siblings (mcpOAuth). Only a
+        // genuine nil (item absent) starts a fresh item.
+        let live = try claudeCLICredentialSource.readLiveItemJSON()
+        let merged = mergeClaudeAiOauth(credentials.rawClaudeAiOauth, intoItemJSON: live)
+        try claudeCLICredentialSource.writeLiveItemJSON(merged)
+    }
+
+    /// The OAuth tokens captured into a profile's stored snapshot, if any.
+    public func storedClaudeOAuthCredentials(for profileID: UUID) throws -> ClaudeOAuthCredentials? {
+        guard let snapshot = try credentialStore.loadSnapshot(for: profileID),
+              let item = snapshot.items.first(where: { $0.kind == .keychainJSONFields }) else {
+            return nil
+        }
+        return ClaudeOAuthCredentials(claudeAiOauthJSON: item.contents)
+    }
+
+    /// Persists refreshed tokens back into the profile's stored snapshot so
+    /// the next poll (and a later switch) starts from the fresh tokens.
+    public func updateStoredClaudeOAuthCredentials(_ credentials: ClaudeOAuthCredentials, for profileID: UUID) throws {
+        guard var snapshot = try credentialStore.loadSnapshot(for: profileID) else {
+            throw CLISwitcherError.missingStoredSnapshot(profileID)
+        }
+        if let index = snapshot.items.firstIndex(where: { $0.kind == .keychainJSONFields }) {
+            snapshot.items[index].contents = credentials.rawClaudeAiOauth
+        } else {
+            snapshot.items.append(
+                CredentialSnapshotItem(
+                    relativePath: Self.claudeKeychainItemPath,
+                    kind: .keychainJSONFields,
+                    contents: credentials.rawClaudeAiOauth,
+                    posixPermissions: nil
+                )
+            )
+        }
+        try credentialStore.save(snapshot: snapshot, for: profileID)
     }
 
     public func hasActiveProcesses(provider: Provider) -> Bool {
@@ -186,6 +314,23 @@ public final class CLISwitcher {
 
     private func captureClaudeSnapshot() throws -> CredentialSnapshot {
         var items: [CredentialSnapshotItem] = []
+
+        // The CLI's tokens live in the login keychain; capturing them per
+        // profile is what makes switching and per-account API polling work
+        // for modern Claude Code. A failed read aborts the capture — a
+        // transient keychain error must never be mistaken for "logged out"
+        // and produce a snapshot missing the tokens.
+        if let liveItem = try claudeCLICredentialSource.readLiveItemJSON(),
+           let credentials = ClaudeOAuthCredentials.extract(fromKeychainItemJSON: liveItem) {
+            items.append(
+                CredentialSnapshotItem(
+                    relativePath: Self.claudeKeychainItemPath,
+                    kind: .keychainJSONFields,
+                    contents: credentials.rawClaudeAiOauth,
+                    posixPermissions: nil
+                )
+            )
+        }
 
         let configRelativePath = "Library/Application Support/Claude/config.json"
         let fields = try readClaudeConfigAuthFields()
