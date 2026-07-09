@@ -242,10 +242,17 @@ struct AccountRowView: View {
                 .fill(riskColor)
                 .frame(width: 8, height: 8)
 
-            Text(profile.label)
-                .font(.system(size: 13, weight: .semibold))
-                .lineLimit(1)
-                .help(identityText)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(profile.label)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+
+                Text(identityText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .help(identityText)
 
             if profile.isActiveCLI {
                 Badge(text: "Active", systemImage: "terminal.fill", color: .green)

@@ -210,6 +210,7 @@ public struct ClaudeIdentityReader {
         let email = account["emailAddress"] as? String
         let displayName = account["displayName"] as? String
         let organization = account["organizationName"] as? String
+        let organizationID = account["organizationUuid"] as? String
         let accountID = account["accountUuid"] as? String
 
         guard email != nil || displayName != nil || organization != nil || accountID != nil else {
@@ -220,6 +221,7 @@ public struct ClaudeIdentityReader {
             email: email,
             displayName: displayName,
             organization: organization,
+            organizationID: organizationID,
             accountID: accountID,
             source: .claudeCodeUsage,
             updatedAt: now

@@ -25,6 +25,30 @@ final class CLIAccountSyncPlannerTests: XCTestCase {
         XCTAssertEqual(planner.plan(provider: .claude, currentIdentity: identity, profiles: profiles), .activate(match.id))
     }
 
+    func testDoesNotActivateClaudeProfileWithSameEmailAndDifferentOrganizationID() {
+        let team = profile(
+            .claude,
+            email: "user@example.com",
+            accountID: "acct-1",
+            organization: "Team",
+            organizationID: "org-team"
+        )
+        let individualPlaceholder = placeholder(.claude)
+        let profiles = [team, individualPlaceholder]
+        let identity = AccountIdentity(
+            email: "user@example.com",
+            organization: "user@example.com's Organization",
+            organizationID: "org-individual",
+            accountID: "acct-1",
+            source: .claudeCodeUsage
+        )
+
+        XCTAssertEqual(
+            planner.plan(provider: .claude, currentIdentity: identity, profiles: profiles),
+            .adopt(individualPlaceholder.id)
+        )
+    }
+
     func testAdoptsFirstIdentityLessProfileOfSameProvider() {
         let codexPlaceholder = placeholder(.codex)
         let claudeFirstPlaceholder = placeholder(.claude)
@@ -68,12 +92,19 @@ final class CLIAccountSyncPlannerTests: XCTestCase {
         _ provider: Provider,
         email: String,
         accountID: String? = nil,
-        organization: String? = nil
+        organization: String? = nil,
+        organizationID: String? = nil
     ) -> AccountProfile {
         AccountProfile(
             provider: provider,
             label: email,
-            identity: AccountIdentity(email: email, organization: organization, accountID: accountID, source: .manual)
+            identity: AccountIdentity(
+                email: email,
+                organization: organization,
+                organizationID: organizationID,
+                accountID: accountID,
+                source: .manual
+            )
         )
     }
 
