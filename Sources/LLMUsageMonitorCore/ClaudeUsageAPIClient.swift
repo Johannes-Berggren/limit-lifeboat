@@ -304,10 +304,9 @@ extension ClaudeUsageAPIClient {
 
     /// Fetches the account identity and plan label behind an access token.
     /// Field mapping mirrors `ClaudeIdentityReader`'s ~/.claude.json read:
-    /// `accountID` carries the *account* uuid (oauthAccount.accountUuid ==
-    /// profile account.uuid) and `organization` the organization *name*, so
-    /// `CLIAccountSyncPlanner` matching agrees across both identity sources
-    /// — including accounts that share one email across two organizations.
+    /// `accountID` carries the account uuid and `organizationID` carries the
+    /// organization uuid, so same-email Claude accounts in different orgs stay
+    /// distinct.
     public func fetchAccountInfo(accessToken: String, now: Date = Date()) async throws -> ClaudeAPIAccountInfo {
         let object = try await fetchJSONObject(from: Self.profileEndpoint, accessToken: accessToken)
         return parseAccountInfo(from: object, now: now)
@@ -322,6 +321,7 @@ extension ClaudeUsageAPIClient {
         let email = account["email"] as? String
         let displayName = (account["full_name"] as? String) ?? (account["display_name"] as? String)
         let organizationName = organization["name"] as? String
+        let organizationID = organization["uuid"] as? String
         // The account uuid, never organization.uuid — see fetchAccountInfo.
         let accountID = account["uuid"] as? String
 
@@ -331,6 +331,7 @@ extension ClaudeUsageAPIClient {
                 email: email,
                 displayName: displayName,
                 organization: organizationName,
+                organizationID: organizationID,
                 accountID: accountID,
                 source: .claudeCodeUsage,
                 updatedAt: now
@@ -338,8 +339,11 @@ extension ClaudeUsageAPIClient {
         }
 
         let planLabel = Self.planLabel(
-            rateLimitTier: organization["rate_limit_tier"] as? String,
+            accountRateLimitTier: (account["user_rate_limit_tier"] as? String) ?? (account["rate_limit_tier"] as? String),
+            organizationRateLimitTier: organization["rate_limit_tier"] as? String,
             organizationType: organization["organization_type"] as? String,
+            billingType: organization["billing_type"] as? String,
+            seatTier: organization["seat_tier"] as? String,
             hasClaudeMax: (account["has_claude_max"] as? Bool) ?? false,
             hasClaudePro: (account["has_claude_pro"] as? Bool) ?? false
         )
@@ -352,12 +356,35 @@ extension ClaudeUsageAPIClient {
     /// unrecognized the organization type, then the account flags, decide.
     /// Pure so the mapping table is directly testable.
     static func planLabel(
-        rateLimitTier: String?,
+        accountRateLimitTier: String?,
+        organizationRateLimitTier: String?,
         organizationType: String?,
+        billingType: String?,
+        seatTier: String?,
         hasClaudeMax: Bool,
         hasClaudePro: Bool
     ) -> String? {
-        if let tier = rateLimitTier?.lowercased() {
+        if organizationType?.lowercased() == "claude_team" {
+            switch seatTier?.lowercased() {
+            case "team_tier_1", "premium":
+                return "Team Premium"
+            case "team_tier_0", "standard":
+                return "Team Standard"
+            default:
+                return billingType == nil ? "Team" : "Team"
+            }
+        }
+
+        if let tier = accountRateLimitTier?.lowercased() {
+            if let multiplier = maxTierMultiplier(in: tier) {
+                return "Max \(multiplier)x"
+            }
+            if tier.contains("pro") {
+                return "Pro"
+            }
+        }
+
+        if let tier = organizationRateLimitTier?.lowercased() {
             if let multiplier = maxTierMultiplier(in: tier) {
                 return "Max \(multiplier)x"
             }

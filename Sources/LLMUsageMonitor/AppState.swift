@@ -55,6 +55,7 @@ final class AppState: ObservableObject {
     private let updateService = UpdateService()
     private let settingsWindowController = SettingsWindowController()
     private var refreshTask: Task<Void, Never>?
+    private var loginFollowUpTask: Task<Void, Never>?
     private var wakeObserver: NSObjectProtocol?
     private var cancellables: Set<AnyCancellable> = []
     /// Popover-open refreshes are throttled on attempts, not outcomes — an
@@ -118,6 +119,7 @@ final class AppState: ObservableObject {
 
     deinit {
         refreshTask?.cancel()
+        loginFollowUpTask?.cancel()
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
         }
@@ -297,14 +299,10 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Plan tier and identity rarely change; fetch them only while a profile
-    /// is missing them, and at most once per launch — some accounts (Team,
-    /// Enterprise) legitimately map to no plan label and must not trigger an
-    /// extra profile call every cycle forever.
+    /// Plan tier and identity rarely change; fetch them at most once per
+    /// launch. This also lets new mapping logic repair labels written by
+    /// older builds (for example Team Premium previously showing as Max 5x).
     private func enrichAccountInfoIfMissing(for profile: AccountProfile) async {
-        guard profile.planLabel == nil || profile.identity?.email == nil else {
-            return
-        }
         guard !accountInfoFetched.contains(profile.id) else {
             return
         }
@@ -741,8 +739,10 @@ final class AppState: ObservableObject {
     }
 
     func beginCLILogin(for profile: AccountProfile) {
+        let initialIdentity = cliSwitcher.currentIdentity(provider: profile.provider)
         if runTerminalCommand(profile.provider.loginCommand) {
             statusMessage = "Started \(profile.provider.loginCommand) for \(profile.label). The account links automatically after login."
+            watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialIdentity: initialIdentity)
             return
         }
 
@@ -750,6 +750,48 @@ final class AppState: ObservableObject {
         NSPasteboard.general.setString(profile.provider.loginCommand, forType: .string)
         statusMessage = "Copied \(profile.provider.loginCommand). Run it in the terminal; the account links automatically after login."
         openTerminal()
+        watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialIdentity: initialIdentity)
+    }
+
+    private func watchForCompletedLogin(
+        profileID: UUID,
+        provider: Provider,
+        initialIdentity: AccountIdentity?
+    ) {
+        loginFollowUpTask?.cancel()
+        loginFollowUpTask = Task { [weak self] in
+            for _ in 0..<60 {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard !Task.isCancelled else {
+                    return
+                }
+
+                let linked = await self?.refreshAfterCompletedLogin(
+                    profileID: profileID,
+                    provider: provider,
+                    initialIdentity: initialIdentity
+                ) ?? true
+                if linked {
+                    return
+                }
+            }
+        }
+    }
+
+    private func refreshAfterCompletedLogin(
+        profileID: UUID,
+        provider: Provider,
+        initialIdentity: AccountIdentity?
+    ) async -> Bool {
+        guard let currentIdentity = cliSwitcher.currentIdentity(provider: provider) else {
+            return false
+        }
+        if let initialIdentity, currentIdentity.matches(initialIdentity) {
+            return false
+        }
+
+        await refreshAll()
+        return profiles.first(where: { $0.id == profileID })?.identity != nil
     }
 
     func quit() {
@@ -805,6 +847,7 @@ final class AppState: ObservableObject {
             email: new.email ?? existing.email,
             displayName: new.displayName ?? existing.displayName,
             organization: new.organization ?? existing.organization,
+            organizationID: new.organizationID ?? existing.organizationID,
             accountID: new.accountID ?? existing.accountID,
             source: new.source,
             updatedAt: new.updatedAt
@@ -824,8 +867,8 @@ final class AppState: ObservableObject {
             .replacingOccurrences(of: "\"", with: "\\\"")
         let scriptSource = """
         tell application "Terminal"
-            activate
             do script "\(escaped)"
+            activate
         end tell
         """
 

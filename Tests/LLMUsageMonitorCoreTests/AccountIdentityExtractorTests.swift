@@ -46,7 +46,8 @@ final class AccountIdentityExtractorTests: XCTestCase {
             "accountUuid": "account-1",
             "displayName": "Johannes",
             "emailAddress": "berggren@findable.ai",
-            "organizationName": "berggren@findable.ai's Organization"
+            "organizationName": "berggren@findable.ai's Organization",
+            "organizationUuid": "org-1"
           }
         }
         """.data(using: .utf8)!.write(to: configURL)
@@ -56,6 +57,7 @@ final class AccountIdentityExtractorTests: XCTestCase {
         XCTAssertEqual(identity.email, "berggren@findable.ai")
         XCTAssertEqual(identity.displayName, "Johannes")
         XCTAssertEqual(identity.organization, "berggren@findable.ai's Organization")
+        XCTAssertEqual(identity.organizationID, "org-1")
         XCTAssertEqual(identity.accountID, "account-1")
         XCTAssertEqual(identity.source, .claudeCodeUsage)
     }

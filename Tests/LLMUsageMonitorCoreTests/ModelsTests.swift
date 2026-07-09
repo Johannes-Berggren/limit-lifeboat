@@ -2,6 +2,11 @@ import XCTest
 @testable import LLMUsageMonitorCore
 
 final class ModelsTests: XCTestCase {
+    func testProviderLoginCommandsMatchCurrentCLIs() {
+        XCTAssertEqual(Provider.claude.loginCommand, "claude auth login")
+        XCTAssertEqual(Provider.codex.loginCommand, "codex login")
+    }
+
     func testIdentitiesMatchOnAccountID() {
         let left = AccountIdentity(email: "left@example.com", accountID: "acct-1", source: .codexIDToken)
         let right = AccountIdentity(email: "right@example.com", accountID: "acct-1", source: .dashboard)
@@ -18,6 +23,42 @@ final class ModelsTests: XCTestCase {
         let left = AccountIdentity(displayName: "A", accountID: "acct-1", source: .codexIDToken)
         let right = AccountIdentity(displayName: "A", accountID: "acct-2", source: .codexIDToken)
         XCTAssertFalse(left.matches(right))
+    }
+
+    func testSameEmailAndAccountIDDifferentOrganizationsDoNotMatch() {
+        let team = AccountIdentity(
+            email: "user@example.com",
+            organization: "Team",
+            organizationID: "org-team",
+            accountID: "acct-1",
+            source: .claudeCodeUsage
+        )
+        let individual = AccountIdentity(
+            email: "user@example.com",
+            organization: "user@example.com's Organization",
+            organizationID: "org-individual",
+            accountID: "acct-1",
+            source: .claudeCodeUsage
+        )
+
+        XCTAssertFalse(team.matches(individual))
+    }
+
+    func testSameAccountIDDifferentOrganizationNamesDoNotMatchWhenOrganizationIDsAreMissing() {
+        let team = AccountIdentity(
+            email: "user@example.com",
+            organization: "Team",
+            accountID: "acct-1",
+            source: .claudeCodeUsage
+        )
+        let individual = AccountIdentity(
+            email: "user@example.com",
+            organization: "user@example.com's Organization",
+            accountID: "acct-1",
+            source: .claudeCodeUsage
+        )
+
+        XCTAssertFalse(team.matches(individual))
     }
 
     func testMatchingOrganizationAloneDoesNotMatch() {

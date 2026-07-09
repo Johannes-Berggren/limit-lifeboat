@@ -9,7 +9,7 @@ public enum ClaudeOAuthError: Error, LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .missingRefreshToken:
-            return "The stored Claude credentials have no refresh token; sign in with claude login again."
+            return "The stored Claude credentials have no refresh token; sign in with claude auth login again."
         case .refreshRejected(let status, let body):
             let detail = body.isEmpty ? "no response body" : body
             return "Claude token refresh was rejected with status \(status) (\(detail))."

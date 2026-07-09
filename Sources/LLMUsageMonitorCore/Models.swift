@@ -43,7 +43,12 @@ public enum Provider: String, Codable, CaseIterable, Identifiable, Sendable {
     }
 
     public var loginCommand: String {
-        "\(commandName) login"
+        switch self {
+        case .claude:
+            return "claude auth login"
+        case .codex:
+            return "\(commandName) login"
+        }
     }
 }
 
@@ -134,6 +139,7 @@ public struct AccountIdentity: Codable, Hashable, Sendable {
     public var email: String?
     public var displayName: String?
     public var organization: String?
+    public var organizationID: String?
     public var accountID: String?
     public var source: AccountIdentitySource
     public var updatedAt: Date
@@ -142,6 +148,7 @@ public struct AccountIdentity: Codable, Hashable, Sendable {
         email: String? = nil,
         displayName: String? = nil,
         organization: String? = nil,
+        organizationID: String? = nil,
         accountID: String? = nil,
         source: AccountIdentitySource,
         updatedAt: Date = Date()
@@ -149,6 +156,7 @@ public struct AccountIdentity: Codable, Hashable, Sendable {
         self.email = email
         self.displayName = displayName
         self.organization = organization
+        self.organizationID = organizationID
         self.accountID = accountID
         self.source = source
         self.updatedAt = updatedAt
@@ -163,9 +171,26 @@ public struct AccountIdentity: Codable, Hashable, Sendable {
     /// accounts can share an organization.
     public func matches(_ other: AccountIdentity) -> Bool {
         if let leftAccountID = accountID,
-           let rightAccountID = other.accountID,
-           leftAccountID == rightAccountID {
+           let rightAccountID = other.accountID {
+            guard leftAccountID == rightAccountID else {
+                return false
+            }
+            if let leftOrganizationID = organizationID,
+               let rightOrganizationID = other.organizationID {
+                return leftOrganizationID == rightOrganizationID
+            }
+            if let leftOrganization = organization?.lowercased(),
+               let rightOrganization = other.organization?.lowercased(),
+               leftOrganization != rightOrganization {
+                return false
+            }
             return true
+        }
+
+        if let leftOrganizationID = organizationID,
+           let rightOrganizationID = other.organizationID,
+           leftOrganizationID != rightOrganizationID {
+            return false
         }
 
         if let leftEmail = email?.lowercased(),

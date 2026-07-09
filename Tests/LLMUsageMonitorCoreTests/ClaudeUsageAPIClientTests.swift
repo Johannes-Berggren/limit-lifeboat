@@ -326,7 +326,8 @@ final class ClaudeUsageAPIClientTests: XCTestCase {
             "display_name": "Johannes",
             "email": "johannes@berggren.co",
             "has_claude_max": true,
-            "has_claude_pro": false
+            "has_claude_pro": false,
+            "user_rate_limit_tier": "default_claude_max_20x"
         },
         "organization": {
             "uuid": "61105391-4d29-42fa-8a29-c26652444ba1",
@@ -339,6 +340,27 @@ final class ClaudeUsageAPIClientTests: XCTestCase {
         },
         "application": {"client_id": "test-client"},
         "enabled_plugins": []
+    }
+    """
+
+    private let teamPremiumProfileJSON = """
+    {
+        "account": {
+            "uuid": "8142983e-e1ea-4a09-84d9-ede155c0b073",
+            "full_name": "Johannes",
+            "display_name": "Johannes",
+            "email": "berggren@findable.ai",
+            "has_claude_max": true,
+            "has_claude_pro": false
+        },
+        "organization": {
+            "uuid": "f13b6774-ab52-4e8a-95da-cbccfcf0a9a8",
+            "name": "Findable",
+            "organization_type": "claude_team",
+            "billing_type": "stripe_subscription",
+            "rate_limit_tier": "default_claude_max_5x",
+            "seat_tier": "team_tier_1"
+        }
     }
     """
 
@@ -363,10 +385,9 @@ final class ClaudeUsageAPIClientTests: XCTestCase {
         XCTAssertEqual(identity.email, "johannes@berggren.co")
         XCTAssertEqual(identity.displayName, "Johannes Berggren")
         XCTAssertEqual(identity.organization, "johannes@berggren.co's Organization")
-        // accountID carries the *account* uuid, mirroring ClaudeIdentityReader's
-        // oauthAccount.accountUuid mapping — never the organization uuid — so
-        // profiles sharing one email across two organizations keep matching
-        // exactly as the ~/.claude.json source does.
+        XCTAssertEqual(identity.organizationID, "61105391-4d29-42fa-8a29-c26652444ba1")
+        // accountID carries the account uuid, while organizationID carries
+        // the org uuid. Together they distinguish same-email Claude orgs.
         XCTAssertEqual(identity.accountID, "0338f627-88b8-4a33-9df2-a4a723a29b09")
         XCTAssertNotEqual(identity.accountID, "61105391-4d29-42fa-8a29-c26652444ba1")
         XCTAssertEqual(identity.source, .claudeCodeUsage)
@@ -374,6 +395,19 @@ final class ClaudeUsageAPIClientTests: XCTestCase {
         XCTAssertTrue(identity.isLikelyValid)
 
         XCTAssertEqual(info.planLabel, "Max 20x")
+    }
+
+    func testFetchAccountInfoLabelsTeamPremiumBeforeRateLimitMultiplier() async throws {
+        let httpClient = MockHTTPClient()
+        httpClient.stub(status: 200, bodyText: teamPremiumProfileJSON)
+
+        let info = try await ClaudeUsageAPIClient(httpClient: httpClient).fetchAccountInfo(accessToken: "token")
+
+        let identity = try XCTUnwrap(info.identity)
+        XCTAssertEqual(identity.email, "berggren@findable.ai")
+        XCTAssertEqual(identity.organization, "Findable")
+        XCTAssertEqual(identity.organizationID, "f13b6774-ab52-4e8a-95da-cbccfcf0a9a8")
+        XCTAssertEqual(info.planLabel, "Team Premium")
     }
 
     /// The same login seen through both identity sources — the profile API
@@ -405,6 +439,7 @@ final class ClaudeUsageAPIClientTests: XCTestCase {
         let apiIdentity = try XCTUnwrap(info.identity)
 
         XCTAssertEqual(apiIdentity.accountID, readerIdentity.accountID)
+        XCTAssertEqual(apiIdentity.organizationID, readerIdentity.organizationID)
         XCTAssertTrue(apiIdentity.matches(readerIdentity))
 
         let profile = AccountProfile(provider: .claude, label: "Claude", identity: readerIdentity)
@@ -451,20 +486,38 @@ final class ClaudeUsageAPIClientTests: XCTestCase {
 
     func testPlanLabelMapping() {
         // Known rate-limit tiers.
-        XCTAssertEqual(planLabel(tier: "default_claude_max_20x"), "Max 20x")
-        XCTAssertEqual(planLabel(tier: "default_claude_max_5x"), "Max 5x")
+        XCTAssertEqual(planLabel(organizationTier: "default_claude_max_20x"), "Max 20x")
+        XCTAssertEqual(planLabel(organizationTier: "default_claude_max_5x"), "Max 5x")
         // Multipliers Anthropic ships later generalize via the <N> capture.
-        XCTAssertEqual(planLabel(tier: "default_claude_max_7x"), "Max 7x")
-        XCTAssertEqual(planLabel(tier: "default_claude_max_100x"), "Max 100x")
+        XCTAssertEqual(planLabel(organizationTier: "default_claude_max_7x"), "Max 7x")
+        XCTAssertEqual(planLabel(organizationTier: "default_claude_max_100x"), "Max 100x")
         // Pro-flavored tiers.
-        XCTAssertEqual(planLabel(tier: "default_claude_pro"), "Pro")
+        XCTAssertEqual(planLabel(organizationTier: "default_claude_pro"), "Pro")
 
         // The tier outranks the coarser signals when it is recognized.
-        XCTAssertEqual(planLabel(tier: "default_claude_pro", organizationType: "claude_max"), "Pro")
+        XCTAssertEqual(planLabel(organizationTier: "default_claude_pro", organizationType: "claude_max"), "Pro")
+        XCTAssertEqual(
+            planLabel(accountTier: "default_claude_max_20x", organizationTier: "default_claude_max_5x"),
+            "Max 20x"
+        )
+
+        // Team org seat tiers outrank Max-flavored rate-limit tiers.
+        XCTAssertEqual(
+            planLabel(organizationTier: "default_claude_max_5x", organizationType: "claude_team", seatTier: "team_tier_1"),
+            "Team Premium"
+        )
+        XCTAssertEqual(
+            planLabel(organizationTier: "default_claude_max_5x", organizationType: "claude_team", seatTier: "team_tier_0"),
+            "Team Standard"
+        )
+        XCTAssertEqual(
+            planLabel(organizationType: "claude_team"),
+            "Team"
+        )
 
         // Unknown or absent tier: organization type decides first...
         XCTAssertEqual(planLabel(organizationType: "claude_max"), "Max")
-        XCTAssertEqual(planLabel(tier: "default_enterprise", organizationType: "claude_max"), "Max")
+        XCTAssertEqual(planLabel(organizationTier: "default_enterprise", organizationType: "claude_max"), "Max")
         // ...then the account flags; Max outranks Pro when both are set
         // (an upgraded account keeps has_claude_pro true).
         XCTAssertEqual(planLabel(hasClaudePro: true), "Pro")
@@ -473,19 +526,25 @@ final class ClaudeUsageAPIClientTests: XCTestCase {
 
         // No plan signal at all.
         XCTAssertNil(planLabel())
-        XCTAssertNil(planLabel(tier: "mystery_tier"))
+        XCTAssertNil(planLabel(organizationTier: "mystery_tier"))
         XCTAssertNil(planLabel(organizationType: "claude_enterprise"))
     }
 
     private func planLabel(
-        tier: String? = nil,
+        accountTier: String? = nil,
+        organizationTier: String? = nil,
         organizationType: String? = nil,
+        billingType: String? = nil,
+        seatTier: String? = nil,
         hasClaudeMax: Bool = false,
         hasClaudePro: Bool = false
     ) -> String? {
         ClaudeUsageAPIClient.planLabel(
-            rateLimitTier: tier,
+            accountRateLimitTier: accountTier,
+            organizationRateLimitTier: organizationTier,
             organizationType: organizationType,
+            billingType: billingType,
+            seatTier: seatTier,
             hasClaudeMax: hasClaudeMax,
             hasClaudePro: hasClaudePro
         )
