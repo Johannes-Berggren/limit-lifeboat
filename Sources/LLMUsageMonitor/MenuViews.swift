@@ -129,7 +129,7 @@ struct MenuRootView: View {
         // is actually constrained — a permanent highlight would be noise.
         let activeSnapshot = profiles.first(where: \.isActiveCLI).flatMap { state.snapshots[$0.id] }
         let activeAtRisk = activeSnapshot.map { $0.riskLevel == .warning || $0.riskLevel == .depleted } ?? false
-        let advisedID = (provider == .claude && activeAtRisk) ? state.switchAdvice?.bestCandidateID : nil
+        let advisedID = activeAtRisk ? state.switchAdvice[provider]?.bestCandidateID : nil
 
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -155,15 +155,17 @@ struct MenuRootView: View {
                         profile: profile,
                         snapshot: state.snapshots[profile.id],
                         hasStoredSnapshot: state.hasStoredSnapshot(for: profile),
+                        refreshState: state.refreshStates[profile.id] ?? .idle,
                         estimates: state.burnRateEstimates[profile.id] ?? [:],
-                        adviceReason: advisedID == profile.id ? state.switchAdvice?.reason : nil,
+                        adviceReason: advisedID == profile.id ? state.switchAdvice[provider]?.reason : nil,
                         historyRecords: { state.historyRecords(for: profile) },
                         switchCLI: { state.switchCLI(to: profile) },
                         openDashboard: { state.openDashboard(for: profile) },
                         beginCLILogin: { state.beginCLILogin(for: profile) },
                         captureCLI: { state.captureCLISnapshot(for: profile) },
                         rename: { state.renameProfile(profile.id, to: $0) },
-                        remove: { state.removeProfile(profile.id) }
+                        remove: { state.removeProfile(profile.id) },
+                        retry: { state.retryRefresh(for: profile) }
                     )
                 }
             }
@@ -195,6 +197,7 @@ struct AccountRowView: View {
     let profile: AccountProfile
     let snapshot: UsageSnapshot?
     let hasStoredSnapshot: Bool
+    var refreshState: AccountRefreshState = .idle
     let estimates: [String: BurnRateEstimate]
     /// Non-nil exactly when this account is the advised switch target.
     var adviceReason: String? = nil
@@ -205,6 +208,7 @@ struct AccountRowView: View {
     let captureCLI: () -> Void
     let rename: (String) -> Void
     let remove: () -> Void
+    var retry: () -> Void = {}
 
     @State private var showsRenameAlert = false
     @State private var renameText = ""
@@ -357,11 +361,25 @@ struct AccountRowView: View {
 
     @ViewBuilder
     private var footer: some View {
-        let note = footerNote
+        // A failed refresh takes precedence over the quiet note: the account is
+        // showing stale or absent numbers for a reason the user can act on.
+        let problem = refreshProblem
+        let note = problem == nil ? footerNote : nil
         let showsSwitchButton = !profile.isActiveCLI
-        if note != nil || showsSwitchButton {
+        if problem != nil || note != nil || showsSwitchButton {
             HStack(spacing: DS.Spacing.sm) {
-                if let note {
+                if let problem {
+                    Label(problem.text, systemImage: problem.icon)
+                        .font(.caption)
+                        .foregroundStyle(problem.color)
+                        .lineLimit(2)
+                        .help(problem.help)
+                    if problem.showsRetry {
+                        Button("Retry") { retry() }
+                            .buttonStyle(.borderless)
+                            .controlSize(.small)
+                    }
+                } else if let note {
                     Label(note.text, systemImage: note.icon)
                         .font(.caption)
                         .foregroundStyle(note.color)
@@ -374,6 +392,39 @@ struct AccountRowView: View {
                     switchButton
                 }
             }
+        }
+    }
+
+    /// A visible, actionable failure from the last refresh, or nil when the
+    /// account refreshed fine (or hasn't been tried).
+    private var refreshProblem: (text: String, icon: String, color: Color, help: String, showsRetry: Bool)? {
+        switch refreshState {
+        case .idle, .refreshing, .ok:
+            return nil
+        case .readFailed(let reason):
+            return ("Couldn't refresh", "exclamationmark.triangle", .orange, reason, true)
+        case .needsLogin:
+            // Only worth surfacing here for the active account or one that
+            // otherwise looks linked; the empty-state note already covers a
+            // brand-new account with no snapshot.
+            guard snapshot != nil || profile.isActiveCLI else {
+                return nil
+            }
+            return (
+                "Not linked — log in to track usage",
+                "person.crop.circle.badge.questionmark",
+                .secondary,
+                "Use the … menu → Log In via Terminal to link this account.",
+                false
+            )
+        case .keychainLocked:
+            return (
+                "Keychain access needed",
+                "lock",
+                DS.staleAmber,
+                "macOS denied access to this account's saved credentials. Tap Retry to grant access.",
+                true
+            )
         }
     }
 

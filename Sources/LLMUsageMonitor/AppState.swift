@@ -31,9 +31,14 @@ final class AppState: ObservableObject {
     /// Per-account, per-window burn-rate projections; only `.depletesAt`
     /// values render anything in the UI.
     @Published private(set) var burnRateEstimates: [UUID: [String: BurnRateEstimate]] = [:]
-    /// Which Claude account is currently the best switch target (recomputed
-    /// each refresh); drives the Switch-button highlight and auto-switching.
-    @Published private(set) var switchAdvice: SwitchAdvice?
+    /// Per provider, the current best switch target (recomputed each refresh);
+    /// drives the Switch-button highlight and auto-switching for both Claude
+    /// and Codex.
+    @Published private(set) var switchAdvice: [Provider: SwitchAdvice] = [:]
+    /// Per-account outcome of the most recent refresh, so a failed read shows a
+    /// retryable affordance in the row instead of silently aging into
+    /// staleness. Absent = never refreshed / nothing to say.
+    @Published private(set) var refreshStates: [UUID: AccountRefreshState] = [:]
 
     let settings: SettingsStore
 
@@ -61,11 +66,17 @@ final class AppState: ObservableObject {
     /// Popover-open refreshes are throttled on attempts, not outcomes — an
     /// account whose fetch keeps failing must not re-trigger on every open.
     private var lastClaudeRefreshAttempt: Date?
-    /// Auto-switch guards: a failed attempt must not retry every cycle, and a
-    /// deliberate manual switch onto a constrained account must not be
-    /// immediately reverted.
-    private var lastAutoSwitchAttempt: Date?
-    private var lastManualSwitchAt: Date?
+    /// Auto-switch guards, per provider so a Claude switch never blocks a Codex
+    /// one: a failed attempt must not retry every cycle, and a deliberate manual
+    /// switch onto a constrained account must not be immediately reverted.
+    private var lastAutoSwitchAttempt: [Provider: Date] = [:]
+    private var lastManualSwitchAt: [Provider: Date] = [:]
+    /// When each Codex account last became the active CLI login — the freshness
+    /// gate for the account-blind Codex session logs (see refreshCodexUsage).
+    /// In-memory: after a relaunch the worst case is one stale attribution for
+    /// an account switched-to-but-not-yet-used last session (documented
+    /// follow-up: persist this).
+    private var codexActiveSince: [UUID: Date] = [:]
     /// Profiles whose account info was fetched this launch — plan tier and
     /// identity rarely change, and some accounts legitimately map to no plan
     /// label, so one attempt per launch is enough.
@@ -157,7 +168,10 @@ final class AppState: ObservableObject {
     /// with the slow CLI probe only as fallback) when any of them has
     /// outlived the refresh interval.
     func refreshIfStale() {
-        refreshActiveCodexUsage()
+        // Sync the active Codex login before reading so a terminal-side account
+        // change is attributed to the right profile.
+        try? captureActiveCredentials(provider: .codex)
+        refreshCodexUsage()
         if shouldRefreshClaudeNow() {
             Task { await refreshAll() }
         } else {
@@ -212,10 +226,11 @@ final class AppState: ObservableObject {
         }
 
         // Claude usage comes from the account-wide usage API for every
-        // profile with a captured token; Codex stays a local log scan for the
-        // active account only.
+        // profile with a captured token; Codex reads the active account's
+        // local logs (gated to its own reading) and derives plan/identity for
+        // every Codex account from captured credentials.
         await refreshClaudeUsage()
-        refreshActiveCodexUsage()
+        refreshCodexUsage()
         notifyElapsedResets()
         updateSwitchAdvice()
         updateMenuBarSummary()
@@ -226,20 +241,28 @@ final class AppState: ObservableObject {
     /// when the opt-in is enabled, performs the switch: active account
     /// depleted, another account with clearly more headroom.
     private func updateSwitchAdvice() {
-        let candidates = profiles
-            .filter { $0.provider == .claude }
-            .map { profile in
-                SwitchCandidate(
-                    profileID: profile.id,
-                    label: profile.label,
-                    isActiveCLI: profile.isActiveCLI,
-                    hasStoredCredentials: hasStoredSnapshot(for: profile),
-                    snapshot: snapshots[profile.id]
-                )
-            }
-        let advice = switchAdvisor.advise(candidates: candidates)
-        switchAdvice = advice
+        // Candidates never mix providers: credentials and quota are
+        // provider-scoped, so a Claude account can't be a switch target for a
+        // depleted Codex login. The advisor itself is provider-agnostic.
+        for provider in Provider.allCases {
+            let candidates = profiles
+                .filter { $0.provider == provider }
+                .map { profile in
+                    SwitchCandidate(
+                        profileID: profile.id,
+                        label: profile.label,
+                        isActiveCLI: profile.isActiveCLI,
+                        hasStoredCredentials: hasStoredSnapshot(for: profile),
+                        snapshot: snapshots[profile.id]
+                    )
+                }
+            let advice = switchAdvisor.advise(candidates: candidates)
+            switchAdvice[provider] = advice
+            maybeAutoSwitch(provider: provider, advice: advice)
+        }
+    }
 
+    private func maybeAutoSwitch(provider: Provider, advice: SwitchAdvice) {
         guard settings.autoSwitchEnabled,
               advice.shouldAutoSwitch,
               let targetID = advice.bestCandidateID,
@@ -250,22 +273,23 @@ final class AppState: ObservableObject {
 
         // Back off after any attempt (a failing restore must not re-run every
         // cycle), and honor a recent manual switch — deliberately parking the
-        // CLI on a constrained account must not be silently reverted.
+        // CLI on a constrained account must not be silently reverted. Both
+        // guards are per-provider.
         let now = Date()
-        if let lastAttempt = lastAutoSwitchAttempt, now.timeIntervalSince(lastAttempt) < 60 * 60 {
+        if let lastAttempt = lastAutoSwitchAttempt[provider], now.timeIntervalSince(lastAttempt) < 60 * 60 {
             return
         }
-        if let manual = lastManualSwitchAt, now.timeIntervalSince(manual) < 30 * 60 {
+        if let manual = lastManualSwitchAt[provider], now.timeIntervalSince(manual) < 30 * 60 {
             return
         }
-        lastAutoSwitchAttempt = now
+        lastAutoSwitchAttempt[provider] = now
 
-        let previousLabel = activeProfile(for: .claude)?.label
+        let previousLabel = activeProfile(for: provider)?.label
         if switchCLI(to: target, interactive: false) {
             usageAlertController.handleAutoSwitch(
                 fromLabel: previousLabel,
                 toLabel: target.label,
-                provider: .claude,
+                provider: provider,
                 reason: advice.reason
             )
         }
@@ -281,6 +305,7 @@ final class AppState: ObservableObject {
             .sorted { $0.isActiveCLI && !$1.isActiveCLI }
 
         for profile in claudeProfiles {
+            refreshStates[profile.id] = .refreshing
             do {
                 let snapshot = try await claudeUsageService.fetchSnapshot(
                     for: profile,
@@ -289,12 +314,18 @@ final class AppState: ObservableObject {
                 applySnapshot(snapshot, for: profile)
                 await enrichAccountInfoIfMissing(for: profile)
             } catch {
-                if profile.isActiveCLI {
-                    await refreshActiveClaudeCodeUsage()
+                // Map the failure to a visible, retryable state rather than
+                // swallowing it. The active account may still recover via the
+                // local /usage probe; inactive accounts keep their last
+                // snapshot (a missing token is expected until the account has
+                // been the active login once).
+                let fetchError = (error as? ClaudeAccountUsageFetchError) ?? .transport(error)
+                let outcome = RefreshOutcomePolicy.outcome(for: fetchError, isActiveCLI: profile.isActiveCLI)
+                if outcome.attemptTUIFallback {
+                    await refreshActiveClaudeCodeUsage(onFailure: outcome.state, for: profile)
+                } else {
+                    refreshStates[profile.id] = outcome.state
                 }
-                // Inactive profiles keep their last snapshot. A missing token
-                // is expected until the account has been the active login
-                // once — the per-cycle capture stores it automatically.
             }
         }
     }
@@ -410,6 +441,12 @@ final class AppState: ObservableObject {
                     profiles[index].isActiveCLI = shouldBeActive
                     profiles[index].updatedAt = Date()
                     changed = true
+                    // Anchor the Codex freshness gate on the inactive→active
+                    // transition only (never every sync, or the gate would
+                    // always reject the account's own latest event).
+                    if shouldBeActive, provider == .codex {
+                        codexActiveSince[profiles[index].id] = Date()
+                    }
                 }
             }
             if let index = profiles.firstIndex(where: { $0.id == activeID }) {
@@ -437,9 +474,12 @@ final class AppState: ObservableObject {
         return "\(provider.displayName) \(count + 1)"
     }
 
-    private func refreshActiveClaudeCodeUsage() async {
-        guard cliSwitcher.validateActiveLogin(provider: .claude),
-              let profile = activeProfile(for: .claude) else {
+    /// The slow `/usage` CLI probe, used only as the active-account fallback
+    /// when the usage API failed. `failureState` is what the row should show if
+    /// even this local read cannot recover a reading.
+    private func refreshActiveClaudeCodeUsage(onFailure failureState: AccountRefreshState, for profile: AccountProfile) async {
+        guard cliSwitcher.validateActiveLogin(provider: .claude) else {
+            refreshStates[profile.id] = failureState
             return
         }
 
@@ -454,20 +494,77 @@ final class AppState: ObservableObject {
             let snapshot = report.makeSnapshot(for: profile)
             applySnapshot(snapshot, for: profile)
         } catch {
+            refreshStates[profile.id] = failureState
             statusMessage = "Claude Code /usage unavailable: \(error.localizedDescription)"
         }
     }
 
-    private func refreshActiveCodexUsage() {
-        guard let profile = activeProfile(for: .codex),
-              let snapshot = codexLocalUsageReader.readUsage(for: profile) else {
+    /// Reads the active Codex account's usage (gated to its own reading — the
+    /// session logs are account-blind), and derives plan tier + identity for
+    /// every Codex account, active or not, from its captured credentials.
+    private func refreshCodexUsage() {
+        for profile in profiles where profile.provider == .codex {
+            if profile.isActiveCLI,
+               let snapshot = codexLocalUsageReader.readUsage(
+                   for: profile,
+                   producedAfter: codexActiveSince[profile.id]
+               ) {
+                applySnapshot(snapshot, for: profile)
+            }
+            // A gated-out active read (no genuine post-activation event yet) or
+            // an inactive account keeps its captured / last-known snapshot;
+            // there is no per-account Codex usage source to poll.
+            enrichCodexAccountInfo(for: profile)
+        }
+    }
+
+    /// Plan tier + identity for a Codex account, from the live `auth.json` when
+    /// active or the captured snapshot when inactive — no CLI launch, no
+    /// network. One attempt per launch, mirroring the Claude enrichment gate.
+    private func enrichCodexAccountInfo(for profile: AccountProfile) {
+        guard profile.provider == .codex,
+              profile.planLabel == nil || profile.identity?.email == nil,
+              !accountInfoFetched.contains(profile.id) else {
             return
         }
-        applySnapshot(snapshot, for: profile)
+
+        let info: CodexAccountInfo?
+        if profile.isActiveCLI {
+            info = CodexIdentityReader().accountInfo()
+        } else if let data = try? cliSwitcher.storedCodexAuthJSON(for: profile.id) {
+            info = CodexIdentityReader.accountInfo(fromAuthJSON: data)
+        } else {
+            info = nil
+        }
+        guard let info else {
+            return
+        }
+        accountInfoFetched.insert(profile.id)
+
+        guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else {
+            return
+        }
+        var changed = false
+        if let plan = info.planLabel, profiles[index].planLabel != plan {
+            profiles[index].planLabel = plan
+            changed = true
+        }
+        if let identity = info.identity {
+            let merged = mergedIdentity(existing: profiles[index].identity, new: identity)
+            if profiles[index].identity != merged {
+                profiles[index].identity = merged
+                changed = true
+            }
+        }
+        if changed {
+            profiles[index].updatedAt = Date()
+            persistProfiles()
+        }
     }
 
     private func applySnapshot(_ snapshot: UsageSnapshot, for profile: AccountProfile) {
         snapshots[profile.id] = snapshot
+        refreshStates[profile.id] = .ok
         _ = try? historyStore?.append(snapshot)
         recomputeEstimates(for: profile, snapshot: snapshot)
         updateMenuBarSummary()
@@ -599,6 +696,7 @@ final class AppState: ObservableObject {
         }
         profiles.remove(at: index)
         snapshots[profile.id] = nil
+        refreshStates[profile.id] = nil
         try? historyStore?.removeAccount(profile.id)
         burnRateEstimates[profile.id] = nil
         usageAlertController.forgetProfile(profile.id)
@@ -648,11 +746,28 @@ final class AppState: ObservableObject {
             return false
         }
 
+        // Snapshot the outgoing Codex account's usage while auth.json still
+        // belongs to it — Codex has no inactive polling, so this is how it
+        // keeps its own last-known reading once it goes inactive.
+        if profile.provider == .codex,
+           let outgoing = activeProfile(for: .codex),
+           outgoing.id != profile.id,
+           var snapshot = codexLocalUsageReader.readUsage(for: outgoing) {
+            snapshot.source = "local Codex CLI logs (captured at switch)"
+            applySnapshot(snapshot, for: outgoing)
+        }
+
         do {
             let result = try cliSwitcher.restoreSnapshot(for: profile)
             for index in profiles.indices where profiles[index].provider == profile.provider {
                 profiles[index].isActiveCLI = profiles[index].id == profile.id
                 profiles[index].updatedAt = Date()
+            }
+            // The target just became active: anchor the Codex freshness gate so
+            // it is not shown the outgoing account's still-newest log event
+            // until it has actually run `codex` itself.
+            if profile.provider == .codex {
+                codexActiveSince[profile.id] = Date()
             }
             persistProfiles()
             updateMenuBarSummary()
@@ -675,7 +790,7 @@ final class AppState: ObservableObject {
 
             statusMessage = "Switched \(profile.provider.displayName) CLI to \(profile.label)."
             if interactive {
-                lastManualSwitchAt = Date()
+                lastManualSwitchAt[profile.provider] = Date()
                 Task { await refreshAll() }
             }
             return true
@@ -723,8 +838,32 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Whether a saved credential snapshot exists for the account, and if not,
+    /// whether that is a genuine absence or a locked/denied Keychain — the two
+    /// lead to different UI (log in vs. grant access).
+    enum StoredSnapshotStatus {
+        case present
+        case absent
+        case locked
+    }
+
+    func storedSnapshotStatus(for profile: AccountProfile) -> StoredSnapshotStatus {
+        do {
+            return try cliSwitcher.hasStoredSnapshot(for: profile) ? .present : .absent
+        } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
+            return .locked
+        } catch {
+            return .absent
+        }
+    }
+
     func hasStoredSnapshot(for profile: AccountProfile) -> Bool {
-        (try? cliSwitcher.hasStoredSnapshot(for: profile)) ?? false
+        storedSnapshotStatus(for: profile) == .present
+    }
+
+    /// Row-level "try again" for an account whose last refresh failed.
+    func retryRefresh(for profile: AccountProfile) {
+        Task { await refreshAll() }
     }
 
     func validateActiveLogin(provider: Provider) -> Bool {

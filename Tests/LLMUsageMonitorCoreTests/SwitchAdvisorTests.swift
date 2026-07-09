@@ -50,6 +50,26 @@ final class SwitchAdvisorTests: XCTestCase {
         XCTAssertEqual(advice.reason, "Claude B's limit window has reset")
     }
 
+    func testCodexTargetsAreProviderAgnostic() {
+        // SwitchCandidate carries no provider, so a depleted active Codex login
+        // and a Codex target whose window rolled over auto-switch exactly like
+        // Claude — the parity that lets Codex reuse this advisor unchanged.
+        let activeCodex = candidate(
+            label: "Codex A",
+            isActiveCLI: true,
+            snapshot: codexSnapshot(usedPercent: 100, lastRefreshed: now.addingTimeInterval(-600), resetDate: nil)
+        )
+        let targetCodex = candidate(
+            label: "Codex B",
+            snapshot: codexSnapshot(usedPercent: 92, lastRefreshed: now.addingTimeInterval(-4 * 3600), resetDate: now.addingTimeInterval(-600))
+        )
+
+        let advice = advisor.advise(candidates: [activeCodex, targetCodex], now: now)
+
+        XCTAssertEqual(advice.bestCandidateID, targetCodex.profileID)
+        XCTAssertTrue(advice.shouldAutoSwitch)
+    }
+
     func testStaleTargetWithElapsedSessionButPendingWeeklyIsIneligible() {
         // The session reset rolling over restores only the session quota; the
         // stale reading's nearly-depleted weekly window still stands, so the
@@ -248,6 +268,21 @@ final class SwitchAdvisorTests: XCTestCase {
             provider: .claude,
             windows: [
                 window(id: "session", kind: .session, label: "Session", usedPercent: usedPercent, resetDate: resetDate)
+            ],
+            resetDate: resetDate,
+            riskLevel: UsageThresholds.standard.riskLevel(usedPercent: usedPercent),
+            source: "test",
+            lastRefreshed: lastRefreshed,
+            parseConfidence: .high
+        )
+    }
+
+    private func codexSnapshot(usedPercent: Double, lastRefreshed: Date, resetDate: Date?) -> UsageSnapshot {
+        UsageSnapshot(
+            accountID: UUID(),
+            provider: .codex,
+            windows: [
+                window(id: "codex-300", kind: .session, label: "Session", usedPercent: usedPercent, resetDate: resetDate)
             ],
             resetDate: resetDate,
             riskLevel: UsageThresholds.standard.riskLevel(usedPercent: usedPercent),

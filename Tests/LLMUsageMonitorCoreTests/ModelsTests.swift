@@ -319,6 +319,71 @@ final class ModelsTests: XCTestCase {
         XCTAssertNil(makeSnapshot().mostConstrainedWindow)
     }
 
+    // MARK: - billingUsageMode
+
+    /// An explicit `.enabledActive` from the API overrides the used-fraction
+    /// bands: even a low-utilization reading is "over limit, paying" when the
+    /// account has exhausted included usage onto credits.
+    func testBillingModeEnabledActiveOverridesUsedFractionBands() {
+        let snapshot = makeBillingSnapshot(payState: .enabledActive, usedFraction: 0.2)
+        XCTAssertEqual(snapshot.billingUsageMode, .overLimitPayAsYouGo)
+    }
+
+    /// The reachability-regression proof: on the API path `usedFraction` is
+    /// always set, so before the fix `.payAsYouGoVisible` could never be
+    /// returned. `.enabledIdle` must surface it despite a non-nil fraction.
+    func testBillingModeEnabledIdleIsPayAsYouGoVisibleEvenWithUsedFraction() {
+        let snapshot = makeBillingSnapshot(payState: .enabledIdle, usedFraction: 0.3)
+        XCTAssertEqual(snapshot.billingUsageMode, .payAsYouGoVisible)
+    }
+
+    /// `.disabled` (overage explicitly off) falls through to the used-fraction
+    /// bands exactly as before.
+    func testBillingModeDisabledFallsBackToUsedFractionBands() {
+        XCTAssertEqual(makeBillingSnapshot(payState: .disabled, usedFraction: 0.9).billingUsageMode,
+                       .includedSubscriptionNearLimit)
+        XCTAssertEqual(makeBillingSnapshot(payState: .disabled, usedFraction: 0.4).billingUsageMode,
+                       .includedSubscription)
+    }
+
+    /// A nil state (TUI / dashboard / legacy) keeps the pre-existing string-scan
+    /// behavior — nothing regresses for sources that can't report the block.
+    func testBillingModeNilStateUsesStringScanFallback() {
+        let payg = makeBillingSnapshot(payState: nil, usedFraction: nil,
+                                       creditStatus: "You are on pay-as-you-go credits.",
+                                       riskLevel: .depleted)
+        XCTAssertEqual(payg.billingUsageMode, .overLimitPayAsYouGo)
+
+        let included = makeBillingSnapshot(payState: nil, usedFraction: 0.5)
+        XCTAssertEqual(included.billingUsageMode, .includedSubscription)
+    }
+
+    func testBillingModeStaleShortCircuitsToNeedsLogin() {
+        let snapshot = makeBillingSnapshot(payState: .enabledActive, usedFraction: 0.2, riskLevel: .stale)
+        XCTAssertEqual(snapshot.billingUsageMode, .needsLogin)
+    }
+
+    private func makeBillingSnapshot(
+        payState: PayAsYouGoState?,
+        usedFraction: Double?,
+        creditStatus: String? = nil,
+        riskLevel: RiskLevel = .healthy
+    ) -> UsageSnapshot {
+        // usedFraction is derived from includedRemaining/includedLimit, so map
+        // the requested fraction back onto those scalar fields.
+        let includedRemaining = usedFraction.map { (1 - $0) * 100 }
+        return UsageSnapshot(
+            accountID: UUID(),
+            provider: .claude,
+            includedRemaining: includedRemaining,
+            includedLimit: includedRemaining == nil ? nil : 100,
+            creditStatus: creditStatus,
+            riskLevel: riskLevel,
+            source: "test",
+            payAsYouGoState: payState
+        )
+    }
+
     private func makeSnapshot(
         lastRefreshed: Date = Date(),
         resetDate: Date? = nil,

@@ -56,9 +56,12 @@ final class MenuBarController {
             systemSymbolName: imageName(for: summary.riskLevel),
             accessibilityDescription: summary.accessibilityText
         )
-        if summary.riskLevel == .depleted {
+        // Depleted and warning both get color so the two most important states
+        // read at a glance; everything else follows the menu-bar tint. A
+        // monochrome warning glyph (the old behavior) was effectively invisible.
+        if let paletteColor = paletteColor(for: summary.riskLevel) {
             image = image?.withSymbolConfiguration(
-                NSImage.SymbolConfiguration(paletteColors: [.systemRed])
+                NSImage.SymbolConfiguration(paletteColors: [paletteColor])
             )
             image?.isTemplate = false
         } else {
@@ -86,6 +89,19 @@ final class MenuBarController {
         title.append(NSAttributedString(string: " · Codex ", attributes: labelAttributes))
         title.append(NSAttributedString(string: codex, attributes: valueAttributes))
         return title
+    }
+
+    /// The status-item glyph tint for a risk level, or nil to stay monochrome
+    /// (template) and follow the menu-bar appearance.
+    private func paletteColor(for riskLevel: RiskLevel) -> NSColor? {
+        switch riskLevel {
+        case .depleted:
+            return .systemRed
+        case .warning:
+            return .systemOrange
+        case .healthy, .stale, .unknown:
+            return nil
+        }
     }
 
     private func imageName(for riskLevel: RiskLevel) -> String {

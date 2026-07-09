@@ -15,6 +15,10 @@ public enum ClaudeAccountUsageFetchError: Error, LocalizedError {
     /// The profile has no captured OAuth token yet (it becomes pollable
     /// after being the active CLI login once).
     case noCredentials
+    /// The Keychain is locked or read access was denied — distinct from
+    /// `noCredentials` so the UI can prompt to grant access instead of
+    /// treating the account as unlinked.
+    case keychainLocked
     case refreshFailed(Error)
     case unauthorized
     case transport(Error)
@@ -23,6 +27,8 @@ public enum ClaudeAccountUsageFetchError: Error, LocalizedError {
         switch self {
         case .noCredentials:
             return "No captured OAuth token for this account yet."
+        case .keychainLocked:
+            return "The macOS Keychain denied access to this account's saved credentials."
         case .refreshFailed(let underlying):
             return "Could not refresh the access token (\(underlying.localizedDescription))."
         case .unauthorized:
@@ -110,7 +116,17 @@ public struct ClaudeAccountUsageService {
             current = live
             cameFromLiveItem = true
         } else {
-            current = try? credentials.storedClaudeOAuthCredentials(for: profile.id)
+            do {
+                current = try credentials.storedClaudeOAuthCredentials(for: profile.id)
+            } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
+                // A locked/denied Keychain is not the same as "no credentials":
+                // surface it so the UI can prompt to grant access.
+                throw ClaudeAccountUsageFetchError.keychainLocked
+            } catch {
+                // A decode failure or other read error leaves the account with
+                // no usable token this cycle; it keeps its last snapshot.
+                current = nil
+            }
         }
 
         guard var active = current else {

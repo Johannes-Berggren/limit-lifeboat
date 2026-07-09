@@ -123,6 +123,19 @@ public enum BillingUsageMode: String, Sendable {
     case unknown
 }
 
+/// A first-class pay-as-you-go / usage-credit signal, set by sources that can
+/// report it exactly (the Anthropic usage API's `extra_usage` block). nil for
+/// the local TUI and web-dashboard sources, which can only be scanned for
+/// keywords — those leave `billingUsageMode` on its string heuristics.
+public enum PayAsYouGoState: String, Codable, Sendable {
+    /// Overage / usage-credit billing is turned off for the account.
+    case disabled
+    /// Overage is enabled but included usage is not yet exhausted (a backstop).
+    case enabledIdle
+    /// Overage is enabled and included usage is exhausted — actively billing.
+    case enabledActive
+}
+
 public enum WebDataStoreKind: String, Codable, Sendable {
     case appDefault
     case isolated
@@ -403,6 +416,10 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
     public var lastRefreshed: Date
     public var parseConfidence: ParseConfidence
     public var message: String
+    /// The exact overage state when the source can report it (the usage API);
+    /// nil for TUI/dashboard snapshots and legacy files, which fall back to the
+    /// keyword scan in `billingUsageMode`.
+    public var payAsYouGoState: PayAsYouGoState?
 
     public init(
         accountID: UUID,
@@ -417,7 +434,8 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         source: String,
         lastRefreshed: Date = Date(),
         parseConfidence: ParseConfidence = .none,
-        message: String = ""
+        message: String = "",
+        payAsYouGoState: PayAsYouGoState? = nil
     ) {
         self.accountID = accountID
         self.provider = provider
@@ -432,6 +450,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         self.lastRefreshed = lastRefreshed
         self.parseConfidence = parseConfidence
         self.message = message
+        self.payAsYouGoState = payAsYouGoState
     }
 
     public var remainingFraction: Double? {
@@ -529,6 +548,19 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
             return .needsLogin
         }
 
+        // A first-class overage signal (from the usage API's `extra_usage`
+        // block) is exact, so it wins over the string heuristics below. It is
+        // also checked before the used-fraction bands so `.payAsYouGoVisible`
+        // stays reachable on the API path, where `usedFraction` is always set.
+        switch payAsYouGoState {
+        case .enabledActive:
+            return .overLimitPayAsYouGo
+        case .enabledIdle:
+            return .payAsYouGoVisible
+        case .disabled, .none:
+            break
+        }
+
         if payAsYouGoLooksActive {
             return .overLimitPayAsYouGo
         }
@@ -592,11 +624,14 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         case lastRefreshed
         case parseConfidence
         case message
+        case payAsYouGoState
     }
 
     // Manual conformance so snapshots persisted before `windows` existed still
     // decode: the key is absent in legacy usage-snapshots.json, so it defaults
     // to [] and repopulates on the next refresh rather than throwing.
+    // `payAsYouGoState` is likewise absent in files written before it existed
+    // and decodes to nil, repopulating on the next API refresh.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.accountID = try container.decode(UUID.self, forKey: .accountID)
@@ -612,6 +647,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         self.lastRefreshed = try container.decode(Date.self, forKey: .lastRefreshed)
         self.parseConfidence = try container.decode(ParseConfidence.self, forKey: .parseConfidence)
         self.message = try container.decode(String.self, forKey: .message)
+        self.payAsYouGoState = try container.decodeIfPresent(PayAsYouGoState.self, forKey: .payAsYouGoState)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -629,6 +665,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         try container.encode(lastRefreshed, forKey: .lastRefreshed)
         try container.encode(parseConfidence, forKey: .parseConfidence)
         try container.encode(message, forKey: .message)
+        try container.encodeIfPresent(payAsYouGoState, forKey: .payAsYouGoState)
     }
 }
 

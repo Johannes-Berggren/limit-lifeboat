@@ -314,6 +314,92 @@ final class ClaudeUsageAPIClientTests: XCTestCase {
         XCTAssertEqual(snapshot.message, "Anthropic usage API did not include a recognizable limit.")
     }
 
+    // MARK: - extra_usage / pay-as-you-go
+
+    func testParsesExtraUsageBlockAndPerLimitSeverity() async throws {
+        let httpClient = MockHTTPClient()
+        httpClient.stub(status: 200, bodyText: liveResponseJSON)
+        let client = ClaudeUsageAPIClient(httpClient: httpClient)
+
+        let usage = try await client.fetchUsage(accessToken: "token")
+
+        let extra = try XCTUnwrap(usage.extraUsage)
+        XCTAssertFalse(extra.isEnabled)
+        XCTAssertNil(extra.monthlyLimit)
+        XCTAssertNil(extra.usedCredits)
+
+        XCTAssertEqual(usage.windows[0].severityRaw, "normal")
+        XCTAssertEqual(usage.windows[0].isActive, true)
+        XCTAssertEqual(usage.windows[1].isActive, false)
+    }
+
+    func testMissingExtraUsageBlockLeavesItNil() async throws {
+        let httpClient = MockHTTPClient()
+        httpClient.stub(status: 200, bodyText: #"{"limits": [{"kind": "session", "percent": 12}]}"#)
+        let usage = try await ClaudeUsageAPIClient(httpClient: httpClient).fetchUsage(accessToken: "token")
+        XCTAssertNil(usage.extraUsage)
+    }
+
+    func testMakeSnapshotDisabledOverageKeepsOriginalCreditStatus() {
+        let usage = ClaudeAPIUsage(
+            windows: [ClaudeAPIUsageWindow(kindRaw: "session", usedPercent: 53)],
+            extraUsage: ClaudeAPIExtraUsage(isEnabled: false)
+        )
+        let snapshot = ClaudeUsageAPIClient().makeSnapshot(for: claudeProfile, usage: usage)
+
+        XCTAssertEqual(snapshot.payAsYouGoState, .disabled)
+        XCTAssertEqual(snapshot.creditStatus, "Live Anthropic account view across devices.")
+        XCTAssertEqual(snapshot.billingUsageMode, .includedSubscription)
+    }
+
+    /// End-to-end regression proof: overage enabled but included usage not yet
+    /// exhausted must surface the "credits enabled" (PAYG-visible) state, which
+    /// was previously unreachable on the API path.
+    func testMakeSnapshotEnabledIdleBecomesPayAsYouGoVisible() {
+        let usage = ClaudeAPIUsage(
+            windows: [ClaudeAPIUsageWindow(kindRaw: "session", usedPercent: 40)],
+            extraUsage: ClaudeAPIExtraUsage(isEnabled: true, monthlyLimit: 50, usedCredits: 0)
+        )
+        let snapshot = ClaudeUsageAPIClient().makeSnapshot(for: claudeProfile, usage: usage)
+
+        XCTAssertEqual(snapshot.payAsYouGoState, .enabledIdle)
+        XCTAssertEqual(snapshot.billingUsageMode, .payAsYouGoVisible)
+        XCTAssertTrue(snapshot.creditStatus?.lowercased().contains("pay-as-you-go") ?? false)
+    }
+
+    func testMakeSnapshotEnabledActiveWhenIncludedExhausted() {
+        let usage = ClaudeAPIUsage(
+            windows: [ClaudeAPIUsageWindow(kindRaw: "session", usedPercent: 100)],
+            extraUsage: ClaudeAPIExtraUsage(isEnabled: true)
+        )
+        let snapshot = ClaudeUsageAPIClient().makeSnapshot(for: claudeProfile, usage: usage)
+
+        XCTAssertEqual(snapshot.payAsYouGoState, .enabledActive)
+        XCTAssertEqual(snapshot.billingUsageMode, .overLimitPayAsYouGo)
+        // The string scanner (used by notifications + the TUI fallback) agrees.
+        XCTAssertTrue(snapshot.hasPayAsYouGoSignal)
+        XCTAssertTrue(snapshot.payAsYouGoLooksActive)
+    }
+
+    func testMakeSnapshotEnabledActiveWhenCreditsAlreadyConsumed() {
+        let usage = ClaudeAPIUsage(
+            windows: [ClaudeAPIUsageWindow(kindRaw: "session", usedPercent: 60)],
+            extraUsage: ClaudeAPIExtraUsage(isEnabled: true, monthlyLimit: 100, usedCredits: 5)
+        )
+        let snapshot = ClaudeUsageAPIClient().makeSnapshot(for: claudeProfile, usage: usage)
+        XCTAssertEqual(snapshot.payAsYouGoState, .enabledActive)
+    }
+
+    func testMakeSnapshotWithoutExtraUsageLeavesPayStateNil() {
+        let usage = ClaudeAPIUsage(windows: [ClaudeAPIUsageWindow(kindRaw: "session", usedPercent: 10)])
+        let snapshot = ClaudeUsageAPIClient().makeSnapshot(for: claudeProfile, usage: usage)
+        XCTAssertNil(snapshot.payAsYouGoState)
+    }
+
+    private var claudeProfile: AccountProfile {
+        AccountProfile(provider: .claude, label: "Claude")
+    }
+
     // MARK: - Account info (api/oauth/profile)
 
     /// Copied from a live api/oauth/profile response, trimmed to the keys the

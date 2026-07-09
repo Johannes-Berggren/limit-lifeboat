@@ -104,6 +104,20 @@ public struct AccountIdentityExtractor: Sendable {
     }
 }
 
+/// Who a Codex login belongs to plus its plan tier, decoded from
+/// `~/.codex/auth.json` — mirrors `ClaudeAPIAccountInfo` so the app treats
+/// both providers' account info the same way.
+public struct CodexAccountInfo: Equatable, Sendable {
+    public var identity: AccountIdentity?
+    /// Short human tier ("Pro", "Plus", "Team"…); nil when no plan signal.
+    public var planLabel: String?
+
+    public init(identity: AccountIdentity? = nil, planLabel: String? = nil) {
+        self.identity = identity
+        self.planLabel = planLabel
+    }
+}
+
 public struct CodexIdentityReader {
     private let fileManager: FileManager
     private let homeDirectory: URL
@@ -117,40 +131,88 @@ public struct CodexIdentityReader {
     }
 
     public func readIdentity(now: Date = Date()) -> AccountIdentity? {
+        accountInfo(now: now)?.identity
+    }
+
+    /// The live account info from the CLI's current `~/.codex/auth.json`.
+    public func accountInfo(now: Date = Date()) -> CodexAccountInfo? {
         let authURL = homeDirectory
             .appendingPathComponent(".codex", isDirectory: true)
             .appendingPathComponent("auth.json")
         guard fileManager.fileExists(atPath: authURL.path),
-              let data = try? Data(contentsOf: authURL),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let data = try? Data(contentsOf: authURL) else {
+            return nil
+        }
+        return Self.accountInfo(fromAuthJSON: data, now: now)
+    }
+
+    /// Decodes identity + plan tier from an `auth.json` blob. Static and pure so
+    /// it works equally on the live file and on the copy captured into an
+    /// inactive account's stored snapshot (no CLI launch, no network).
+    public static func accountInfo(fromAuthJSON data: Data, now: Date = Date()) -> CodexAccountInfo? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let tokens = object["tokens"] as? [String: Any] else {
             return nil
         }
 
         let accountID = tokens["account_id"] as? String
         let payload = (tokens["id_token"] as? String).flatMap(decodeJWTPayload)
+        let auth = payload?["https://api.openai.com/auth"] as? [String: Any]
         let email = payload?["email"] as? String
         let name = payload?["name"] as? String
         let organization = (payload?["organization"] as? String)
             ?? (payload?["org"] as? String)
             ?? (payload?["workspace"] as? String)
-            ?? defaultOrganizationTitle(from: payload)
+            ?? defaultOrganizationTitle(from: auth)
+        let planLabel = planLabel(
+            forPlanType: (auth?["chatgpt_plan_type"] as? String) ?? (tokens["plan_type"] as? String)
+        )
 
-        guard email != nil || name != nil || organization != nil || accountID != nil else {
-            return nil
+        var identity: AccountIdentity?
+        if email != nil || name != nil || organization != nil || accountID != nil {
+            identity = AccountIdentity(
+                email: email,
+                displayName: name,
+                organization: organization,
+                accountID: accountID,
+                source: .codexIDToken,
+                updatedAt: now
+            )
         }
 
-        return AccountIdentity(
-            email: email,
-            displayName: name,
-            organization: organization,
-            accountID: accountID,
-            source: .codexIDToken,
-            updatedAt: now
-        )
+        guard identity != nil || planLabel != nil else {
+            return nil
+        }
+        return CodexAccountInfo(identity: identity, planLabel: planLabel)
     }
 
-    private func decodeJWTPayload(_ token: String) -> [String: Any]? {
+    /// Normalizes ChatGPT's `chatgpt_plan_type` onto a short human tier label,
+    /// mirroring `ClaudeUsageAPIClient.planLabel`. Pure and directly testable.
+    public static func planLabel(forPlanType raw: String?) -> String? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+        switch raw.lowercased() {
+        case "free":
+            return "Free"
+        case "plus":
+            return "Plus"
+        case "pro":
+            return "Pro"
+        case "team":
+            return "Team"
+        case "business":
+            return "Business"
+        case "enterprise":
+            return "Enterprise"
+        case "edu":
+            return "Edu"
+        default:
+            return raw.capitalized
+        }
+    }
+
+    private static func decodeJWTPayload(_ token: String) -> [String: Any]? {
         let parts = token.split(separator: ".")
         guard parts.count >= 2 else {
             return nil
@@ -171,9 +233,8 @@ public struct CodexIdentityReader {
         return payload
     }
 
-    private func defaultOrganizationTitle(from payload: [String: Any]?) -> String? {
-        guard let auth = payload?["https://api.openai.com/auth"] as? [String: Any],
-              let organizations = auth["organizations"] as? [[String: Any]] else {
+    private static func defaultOrganizationTitle(from auth: [String: Any]?) -> String? {
+        guard let organizations = auth?["organizations"] as? [[String: Any]] else {
             return nil
         }
 

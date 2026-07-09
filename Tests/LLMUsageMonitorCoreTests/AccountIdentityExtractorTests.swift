@@ -35,6 +35,42 @@ final class AccountIdentityExtractorTests: XCTestCase {
         XCTAssertEqual(identity.source, .codexIDToken)
     }
 
+    func testDecodesCodexPlanTierFromIDToken() throws {
+        let payload = #"{"email":"codex@example.com","name":"Codex User","https://api.openai.com/auth":{"chatgpt_plan_type":"pro","organizations":[{"id":"org_2","title":"Findable","is_default":true}]}}"#
+        let token = "header.\(Data(payload.utf8).base64EncodedString().replacingOccurrences(of: "=", with: "")).signature"
+        let auth = #"{"tokens":{"id_token":"\#(token)","account_id":"acct_123"}}"#
+
+        let info = try XCTUnwrap(CodexIdentityReader.accountInfo(fromAuthJSON: Data(auth.utf8)))
+        XCTAssertEqual(info.planLabel, "Pro")
+        XCTAssertEqual(info.identity?.email, "codex@example.com")
+        XCTAssertEqual(info.identity?.accountID, "acct_123")
+        XCTAssertEqual(info.identity?.organization, "Findable")
+    }
+
+    /// The inactive-account path: identity + plan derived from a captured
+    /// auth.json blob, no live file needed.
+    func testAccountInfoFromCapturedAuthJSONData() throws {
+        let payload = #"{"email":"a@b.co","https://api.openai.com/auth":{"chatgpt_plan_type":"team"}}"#
+        let token = "h.\(Data(payload.utf8).base64EncodedString().replacingOccurrences(of: "=", with: "")).s"
+        let auth = #"{"tokens":{"id_token":"\#(token)","account_id":"acct_9"}}"#
+
+        let info = try XCTUnwrap(CodexIdentityReader.accountInfo(fromAuthJSON: Data(auth.utf8)))
+        XCTAssertEqual(info.planLabel, "Team")
+        XCTAssertEqual(info.identity?.email, "a@b.co")
+    }
+
+    func testCodexPlanLabelNormalizer() {
+        XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "free"), "Free")
+        XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "plus"), "Plus")
+        XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "pro"), "Pro")
+        XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "team"), "Team")
+        XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "enterprise"), "Enterprise")
+        // Unknown values pass through title-cased rather than being dropped.
+        XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "founders"), "Founders")
+        XCTAssertNil(CodexIdentityReader.planLabel(forPlanType: nil))
+        XCTAssertNil(CodexIdentityReader.planLabel(forPlanType: ""))
+    }
+
     func testReadsClaudeIdentityFromLocalAccountMetadata() throws {
         let fixture = try TemporaryIdentityFixture()
         defer { fixture.cleanup() }
