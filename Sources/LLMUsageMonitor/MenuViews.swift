@@ -11,12 +11,14 @@ struct MenuRootView: View {
             Divider()
 
             ScrollView {
-                VStack(alignment: .leading, spacing: DS.Spacing.md) {
+                VStack(alignment: .leading, spacing: 10) {
                     providerSection(.claude)
                     providerSection(.codex)
                 }
-                .padding(DS.Spacing.md)
+                .padding(.horizontal, 10)
+                .padding(.vertical, DS.Spacing.sm)
             }
+            .background(AmbientUsageBackground())
 
             Divider()
 
@@ -26,20 +28,14 @@ struct MenuRootView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: DS.Spacing.sm) {
             HStack(spacing: DS.Spacing.sm) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("LLM Usage")
-                        .font(.headline)
-                    Text(lastRefreshText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    if let stage = state.refreshStage {
-                        Text(stage)
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
+                Text("LLM Usage")
+                    .font(.headline)
+
+                Text(lastRefreshText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 Spacer()
 
@@ -64,6 +60,12 @@ struct MenuRootView: View {
                 .disabled(state.isRefreshing)
             }
 
+            if let stage = state.refreshStage {
+                Text(stage)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+
             TopUsageSummaryView(
                 profiles: state.profiles,
                 snapshots: state.snapshots,
@@ -80,7 +82,7 @@ struct MenuRootView: View {
                 .buttonStyle(.link)
             }
         }
-        .padding(DS.Spacing.md)
+        .padding(10)
     }
 
     private var footer: some View {
@@ -111,7 +113,7 @@ struct MenuRootView: View {
             .buttonStyle(.borderless)
             .keyboardShortcut("q")
         }
-        .padding(DS.Spacing.md)
+        .padding(10)
         .background(.bar)
     }
 
@@ -131,10 +133,10 @@ struct MenuRootView: View {
         let activeAtRisk = activeSnapshot.map { $0.riskLevel == .warning || $0.riskLevel == .depleted } ?? false
         let advisedID = activeAtRisk ? state.switchAdvice[provider]?.bestCandidateID : nil
 
-        return VStack(alignment: .leading, spacing: 8) {
+        return VStack(alignment: .leading, spacing: DS.Spacing.tight) {
             HStack {
                 ProviderLabel(text: provider.displayName, provider: provider)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.caption.weight(.semibold))
 
                 Spacer()
 
@@ -189,7 +191,31 @@ struct MenuRootView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(DS.Spacing.md)
-        .cardSurface()
+        .cardSurface(tint: DS.providerAccent(provider))
+    }
+}
+
+private struct AmbientUsageBackground: View {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    var body: some View {
+        if !reduceTransparency {
+            ZStack {
+                RadialGradient(
+                    colors: [.purple.opacity(0.12), .clear],
+                    center: .topLeading,
+                    startRadius: 10,
+                    endRadius: 260
+                )
+                RadialGradient(
+                    colors: [.blue.opacity(0.10), .clear],
+                    center: .bottomTrailing,
+                    startRadius: 20,
+                    endRadius: 280
+                )
+            }
+            .allowsHitTesting(false)
+        }
     }
 }
 
@@ -217,13 +243,14 @@ struct AccountRowView: View {
     @State private var showsHistory = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: DS.Spacing.sm) {
+        VStack(alignment: .leading, spacing: DS.Spacing.tight) {
             header
             gauges
-            footer
+            statusStrip
         }
-        .padding(DS.Spacing.cardPadding)
-        .cardSurface()
+        .padding(.horizontal, DS.Spacing.cardPadding)
+        .padding(.vertical, DS.Spacing.tight)
+        .cardSurface(tint: DS.providerAccent(profile.provider))
         .alert("Rename \(profile.label)", isPresented: $showsRenameAlert) {
             TextField("Account name", text: $renameText)
             Button("Rename") { rename(renameText) }
@@ -246,24 +273,23 @@ struct AccountRowView: View {
                 .fill(riskColor)
                 .frame(width: 8, height: 8)
 
-            VStack(alignment: .leading, spacing: 1) {
-                Text(profile.label)
-                    .font(.system(size: 13, weight: .semibold))
-                    .lineLimit(1)
+            Text(profile.label)
+                .font(.system(size: 13, weight: .semibold))
+                .lineLimit(1)
+                .layoutPriority(1)
 
-                Text(identityText)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            .help(identityText)
+            Text(identityText)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .help(identityText)
 
             if profile.isActiveCLI {
                 Badge(text: "Active", systemImage: "terminal.fill", color: .green)
                     .help("This account is the current terminal login")
             }
 
-            Spacer(minLength: DS.Spacing.xs)
+            Spacer(minLength: 0)
 
             if let billingBadge {
                 Button {
@@ -273,6 +299,10 @@ struct AccountRowView: View {
                 }
                 .buttonStyle(.plain)
                 .help(billingBadge.help)
+            }
+
+            if !profile.isActiveCLI {
+                switchButton
             }
 
             Menu {
@@ -304,7 +334,7 @@ struct AccountRowView: View {
         }
     }
 
-    // MARK: Rows 2–3 — window gauges
+    // MARK: Row 2 — compact window gauges
 
     @ViewBuilder
     private var gauges: some View {
@@ -314,59 +344,71 @@ struct AccountRowView: View {
         let atRiskScoped = scoped.filter { $0.riskLevel == .warning || $0.riskLevel == .depleted }
         let collapsibleScoped = scoped.filter { $0.riskLevel != .warning && $0.riskLevel != .depleted }
 
-        ForEach(primary) { window in
-            UsageGauge(window: window, estimate: estimates[window.id])
-        }
+        let visible = primary + atRiskScoped + (showsScopedWindows ? collapsibleScoped : [])
 
-        if profile.isActiveCLI,
-           profile.provider == .claude,
-           !ordered.isEmpty,
-           !ordered.contains(where: { $0.kind == .session }) {
-            Text("Session — not captured on last refresh")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .help("The last reading predates session-limit support; the next refresh adds it.")
-        }
-
-        // A per-model weekly limit that is actually at risk must not hide.
-        ForEach(atRiskScoped) { window in
-            UsageGauge(window: window, micro: true, estimate: estimates[window.id])
-        }
-
-        if !collapsibleScoped.isEmpty {
-            if showsScopedWindows {
-                ForEach(collapsibleScoped) { window in
-                    UsageGauge(window: window, micro: true, estimate: estimates[window.id])
+        if !visible.isEmpty {
+            LazyVGrid(columns: gaugeColumns, alignment: .leading, spacing: DS.Spacing.tight) {
+                ForEach(visible) { window in
+                    UsageGauge(window: window, estimate: estimates[window.id])
                 }
             }
-            Button {
-                withAnimation(.easeInOut(duration: 0.15)) {
-                    showsScopedWindows.toggle()
+        }
+
+        if needsSessionCaptureNote || !collapsibleScoped.isEmpty {
+            HStack(spacing: DS.Spacing.sm) {
+                if needsSessionCaptureNote {
+                    Label("Session not captured", systemImage: "clock.badge.questionmark")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .help("The last reading predates session-limit support; the next refresh adds it.")
                 }
-            } label: {
-                Label(
-                    showsScopedWindows
-                        ? "Show less"
-                        : "\(collapsibleScoped.count) more weekly \(collapsibleScoped.count == 1 ? "limit" : "limits")",
-                    systemImage: showsScopedWindows ? "chevron.up" : "chevron.down"
-                )
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+
+                Spacer(minLength: 0)
+
+                if !collapsibleScoped.isEmpty {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            showsScopedWindows.toggle()
+                        }
+                    } label: {
+                        Label(
+                            showsScopedWindows ? "Show less" : "+\(collapsibleScoped.count) limits",
+                            systemImage: showsScopedWindows ? "chevron.up" : "chevron.down"
+                        )
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help(showsScopedWindows ? "Hide healthy model-specific weekly limits" : "Show healthy model-specific weekly limits")
+                }
             }
-            .buttonStyle(.plain)
         }
     }
 
-    // MARK: Row 4 — quiet footer (omitted when empty)
+    private var gaugeColumns: [GridItem] {
+        Array(
+            repeating: GridItem(.flexible(minimum: 0), spacing: DS.Spacing.sm, alignment: .top),
+            count: 3
+        )
+    }
+
+    private var needsSessionCaptureNote: Bool {
+        let ordered = snapshot?.orderedDisplayWindows ?? []
+        return profile.isActiveCLI
+            && profile.provider == .claude
+            && !ordered.isEmpty
+            && !ordered.contains(where: { $0.kind == .session })
+    }
+
+    // MARK: Actionable status strip (omitted for ordinary accounts)
 
     @ViewBuilder
-    private var footer: some View {
+    private var statusStrip: some View {
         // A failed refresh takes precedence over the quiet note: the account is
         // showing stale or absent numbers for a reason the user can act on.
         let problem = refreshProblem
         let note = problem == nil ? footerNote : nil
-        let showsSwitchButton = !profile.isActiveCLI
-        if problem != nil || note != nil || showsSwitchButton {
+        if problem != nil || note != nil {
             HStack(spacing: DS.Spacing.sm) {
                 if let problem {
                     Label(problem.text, systemImage: problem.icon)
@@ -375,6 +417,7 @@ struct AccountRowView: View {
                         .lineLimit(2)
                         .help(problem.help)
                     if problem.showsRetry {
+                        Spacer(minLength: 0)
                         Button("Retry") { retry() }
                             .buttonStyle(.borderless)
                             .controlSize(.small)
@@ -384,14 +427,11 @@ struct AccountRowView: View {
                         .font(.caption)
                         .foregroundStyle(note.color)
                         .lineLimit(2)
+                        .help(note.text)
                 }
 
-                Spacer(minLength: 0)
-
-                if showsSwitchButton {
-                    switchButton
-                }
             }
+            .lineLimit(1)
         }
     }
 
@@ -436,11 +476,10 @@ struct AccountRowView: View {
         Button {
             switchCLI()
         } label: {
-            Label(isAdvised ? "Best switch" : "Switch", systemImage: "arrow.triangle.2.circlepath")
+            Label(isAdvised ? "Best" : "Switch", systemImage: "arrow.triangle.2.circlepath")
+                .font(.caption.weight(.medium))
         }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-        .tint(highlighted ? .green : nil)
+        .compactGlassButton(tint: highlighted ? .green : nil)
         .disabled(!hasStoredSnapshot)
         .help(switchHelp(resetElapsed: resetElapsed))
     }
@@ -552,44 +591,49 @@ struct TopUsageSummaryView: View {
         let active = profiles.first { $0.provider == provider && $0.isActiveCLI }
         let snapshot = active.flatMap { snapshots[$0.id] }
 
-        return VStack(alignment: .leading, spacing: 6) {
-            ProviderLabel(text: provider.displayName, provider: provider)
-                .font(.caption.weight(.semibold))
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: DS.Spacing.tight) {
+                ProviderLabel(text: provider.displayName, provider: provider)
+                    .font(.caption.weight(.semibold))
 
-            if let snapshot {
-                Text(summaryValue(for: snapshot))
-                    .font(.title3.monospacedDigit().weight(.semibold))
-                    .foregroundStyle(DS.billingColor(snapshot.billingUsageMode))
+                Spacer(minLength: 0)
+
+                Text(snapshot.map(summaryValue) ?? "–")
+                    .font(.headline.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(snapshot.map { DS.billingColor($0.billingUsageMode) } ?? .secondary)
                     .contentTransition(.numericText())
-                    .animation(.default, value: summaryValue(for: snapshot))
-                if let caption = windowsCaption(for: snapshot) {
-                    Text(caption.text)
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .help(caption.help)
-                } else if let billing = noteworthyBillingBadge(for: snapshot.billingUsageMode) {
-                    Badge(text: billing.text, color: billing.color)
-                }
-            } else {
-                Text("–")
-                    .font(.title3.monospacedDigit().weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Badge(text: "No snapshot", color: .gray)
+                    .animation(.default, value: snapshot.map(summaryValue) ?? "–")
             }
 
             HStack(spacing: DS.Spacing.xs) {
                 Image(systemName: "terminal.fill")
                 Text(active?.label ?? "No active CLI account")
                     .lineLimit(1)
+
+                Spacer(minLength: DS.Spacing.xs)
+
+                if let snapshot, let caption = windowsCaption(for: snapshot) {
+                    Text(caption.text)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .help(caption.help)
+                } else if let snapshot, let billing = noteworthyBillingBadge(for: snapshot.billingUsageMode) {
+                    Text(billing.text)
+                        .foregroundStyle(billing.color)
+                        .lineLimit(1)
+                } else if snapshot == nil {
+                    Text("No snapshot")
+                        .lineLimit(1)
+                }
             }
             .font(.caption2)
             .foregroundStyle(.secondary)
             .help(active.map { "Active terminal account: \($0.label)" } ?? "No active CLI account detected")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(DS.Spacing.cardPadding)
-        .cardSurface()
+        .padding(.horizontal, DS.Spacing.cardPadding)
+        .padding(.vertical, DS.Spacing.tight)
+        .cardSurface(tint: DS.providerAccent(provider))
     }
 
     private func summaryValue(for snapshot: UsageSnapshot) -> String {
@@ -759,38 +803,30 @@ struct BillingStatusView: View {
     }
 }
 
-/// Renders one quota window as a labelled progress bar. An account shows one
-/// of these per window (Session, Weekly, …); `micro` is the slimmer variant
-/// for secondary per-model windows.
+/// A compact quota column. Reset and burn-rate details stay available in the
+/// tooltip so three independent windows can remain legible on one card row.
 struct UsageGauge: View {
     let window: UsageWindow
-    var micro: Bool = false
     var estimate: BurnRateEstimate? = nil
 
     var body: some View {
-        VStack(alignment: .leading, spacing: micro ? 2 : 4) {
-            HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: DS.Spacing.xs) {
                 Text(window.label)
-                    .font(micro ? .caption2 : .caption.weight(.medium))
-                    .foregroundStyle(micro ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+                    .font(.caption2.weight(.medium))
                     .lineLimit(1)
-                Spacer()
-                if case .depletesAt(let date) = estimate {
-                    Text("~empty \(Self.shortClock(date))")
-                        .font(.caption2.weight(.medium))
-                        .foregroundStyle(DS.riskColor(.warning))
-                        .lineLimit(1)
-                        .help("At the current pace this window runs out around \(Self.longClock(date)), before it resets.")
-                }
-                if let reset = resetText {
-                    Text(reset)
+                    .help(window.label)
+
+                Spacer(minLength: 0)
+
+                if case .depletesAt = estimate {
+                    Image(systemName: "clock.badge.exclamationmark")
                         .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .help(resetHelp ?? reset)
+                        .foregroundStyle(DS.riskColor(.warning))
                 }
+
                 Text(usageValue)
-                    .font(micro ? .caption2.weight(.semibold) : .caption.weight(.semibold))
+                    .font(.caption2.weight(.bold))
                     .monospacedDigit()
                     .contentTransition(.numericText())
                     .animation(.default, value: usageValue)
@@ -799,29 +835,19 @@ struct UsageGauge: View {
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
                     Capsule()
-                        .fill(.quaternary)
+                        .fill(Color.primary.opacity(0.09))
                     Capsule()
                         .fill(riskColor.gradient)
                         .frame(width: fillWidth(in: proxy.size.width))
                 }
                 .animation(.spring(duration: 0.5, bounce: 0.15), value: window.usedFraction)
             }
-            .frame(height: micro ? 3 : 6)
+            .frame(height: 4)
         }
-    }
-
-    /// Short relative reset ("resets in 3h") from the parsed date; the raw
-    /// provider phrasing ("2:50am (Europe/Oslo)") is too long for the row and
-    /// moves to the tooltip.
-    private var resetText: String? {
-        if let date = window.resetDate {
-            let remaining = date.timeIntervalSinceNow
-            if remaining > 0 {
-                return "resets in \(DurationPhrase.short(remaining))"
-            }
-            return "reset elapsed"
-        }
-        return window.resetDescription.map { "Resets \($0)" }
+        .help(gaugeHelp)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(window.label)
+        .accessibilityValue("\(usageValue) used")
     }
 
     private var resetHelp: String? {
@@ -840,21 +866,185 @@ struct UsageGauge: View {
     }
 
     private var usageValue: String {
-        "\(Int(window.usedPercent.rounded()))%\(micro ? "" : " used")"
+        "\(Int(window.usedPercent.rounded()))%"
+    }
+
+    private var gaugeHelp: String {
+        var lines = [window.label, "\(usageValue) used"]
+        if let resetHelp {
+            lines.append(resetHelp)
+        }
+        if case .depletesAt(let date) = estimate {
+            lines.append("At the current pace, this limit runs out around \(Self.longClock(date)) before it resets.")
+        }
+        return lines.joined(separator: "\n")
     }
 
     private var riskColor: Color {
         DS.riskColor(window.riskLevel)
     }
 
-    static func shortClock(_ date: Date) -> String {
-        if Calendar.current.isDateInToday(date) {
-            return date.formatted(date: .omitted, time: .shortened)
-        }
-        return date.formatted(.dateTime.weekday(.abbreviated).hour().minute())
-    }
-
     static func longClock(_ date: Date) -> String {
         date.formatted(date: .abbreviated, time: .shortened)
     }
 }
+
+#if DEBUG
+struct AccountCardPreviewGallery: View {
+    private let now = Date()
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: DS.Spacing.tight) {
+                previewRow(
+                    id: 1,
+                    label: "Work",
+                    provider: .claude,
+                    active: true,
+                    windows: [
+                        window("session", .session, "Session", 32, .healthy),
+                        window("weekly", .weekly, "Weekly", 57, .healthy)
+                    ]
+                )
+
+                previewRow(
+                    id: 2,
+                    label: "Personal Max",
+                    provider: .claude,
+                    windows: [
+                        window("session", .session, "Session", 82, .warning),
+                        window("weekly", .weekly, "Weekly", 74, .healthy),
+                        window("opus", .weeklyScoped, "Opus", 94, .warning)
+                    ],
+                    risk: .warning,
+                    estimates: ["opus": .depletesAt(now.addingTimeInterval(2 * 3600))]
+                )
+
+                previewRow(
+                    id: 3,
+                    label: "Codex Team",
+                    provider: .codex,
+                    windows: [
+                        window("codex-session", .session, "5 hour", 100, .depleted),
+                        window("codex-weekly", .weekly, "Weekly", 91, .warning)
+                    ],
+                    risk: .depleted,
+                    payAsYouGoState: .enabledActive
+                )
+
+                previewRow(
+                    id: 4,
+                    label: "Travel account with a long name",
+                    provider: .codex,
+                    windows: [window("weekly", .weekly, "Weekly", 41, .stale)],
+                    risk: .stale,
+                    lastRefreshed: now.addingTimeInterval(-2 * 3600)
+                )
+
+                previewRow(
+                    id: 5,
+                    label: "New account",
+                    provider: .claude,
+                    hasSnapshot: false,
+                    hasStoredSnapshot: false
+                )
+
+                previewRow(
+                    id: 6,
+                    label: "Research",
+                    provider: .claude,
+                    windows: [
+                        window("session", .session, "Session", 28, .healthy),
+                        window("weekly", .weekly, "All models", 62, .healthy),
+                        window("opus", .weeklyScoped, "Opus", 88, .warning),
+                        window("sonnet", .weeklyScoped, "Sonnet", 34, .healthy),
+                        window("haiku", .weeklyScoped, "Haiku", 11, .healthy)
+                    ],
+                    risk: .warning
+                )
+            }
+            .padding(10)
+        }
+        .background(AmbientUsageBackground())
+        .frame(width: 460, height: 560)
+    }
+
+    @ViewBuilder
+    private func previewRow(
+        id: Int,
+        label: String,
+        provider: Provider,
+        active: Bool = false,
+        windows: [UsageWindow] = [],
+        risk: RiskLevel = .healthy,
+        estimates: [String: BurnRateEstimate] = [:],
+        payAsYouGoState: PayAsYouGoState? = nil,
+        lastRefreshed: Date? = nil,
+        hasSnapshot: Bool = true,
+        hasStoredSnapshot: Bool = true
+    ) -> some View {
+        let accountID = UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", id))!
+        let profile = AccountProfile(
+            id: accountID,
+            provider: provider,
+            label: label,
+            planLabel: provider == .claude ? "Max" : "Team",
+            identity: AccountIdentity(
+                email: "account\(id)@example.com",
+                organization: id.isMultiple(of: 2) ? "Acme" : nil,
+                source: .manual
+            ),
+            isActiveCLI: active
+        )
+        let snapshot = hasSnapshot ?
+            UsageSnapshot(
+                accountID: accountID,
+                provider: provider,
+                windows: windows,
+                includedRemaining: max(0, 100 - (windows.map(\.usedPercent).max() ?? 0)),
+                includedLimit: 100,
+                riskLevel: risk,
+                source: "Preview",
+                lastRefreshed: lastRefreshed ?? now,
+                parseConfidence: .high,
+                payAsYouGoState: payAsYouGoState
+            )
+            : nil
+
+        AccountRowView(
+            profile: profile,
+            snapshot: snapshot,
+            hasStoredSnapshot: hasStoredSnapshot,
+            estimates: estimates,
+            historyRecords: { [] },
+            switchCLI: {},
+            openDashboard: {},
+            beginCLILogin: {},
+            captureCLI: {},
+            rename: { _ in },
+            remove: {}
+        )
+    }
+
+    private func window(
+        _ id: String,
+        _ kind: UsageWindowKind,
+        _ label: String,
+        _ usedPercent: Double,
+        _ risk: RiskLevel
+    ) -> UsageWindow {
+        UsageWindow(
+            id: id,
+            kind: kind,
+            label: label,
+            usedPercent: usedPercent,
+            resetDate: now.addingTimeInterval(4 * 3600),
+            riskLevel: risk
+        )
+    }
+}
+
+#Preview("Compact account card states") {
+    AccountCardPreviewGallery()
+}
+#endif

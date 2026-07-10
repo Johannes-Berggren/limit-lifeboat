@@ -5,14 +5,15 @@ import SwiftUI
 enum DS {
     enum Spacing {
         static let xs: CGFloat = 4
+        static let tight: CGFloat = 6
         static let sm: CGFloat = 8
         static let md: CGFloat = 12
-        static let cardPadding: CGFloat = 10
+        static let cardPadding: CGFloat = 8
     }
 
     enum Radius {
         static let small: CGFloat = 6
-        static let card: CGFloat = 10
+        static let card: CGFloat = 14
     }
 
     /// systemYellow is near-invisible on light backgrounds, so light mode gets a darker amber.
@@ -102,10 +103,60 @@ struct Badge: View {
 }
 
 extension View {
-    func cardSurface() -> some View {
-        background(
-            Color(nsColor: .quaternarySystemFill),
-            in: RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous)
+    func cardSurface(tint: Color? = nil) -> some View {
+        modifier(CardSurfaceModifier(tint: tint))
+    }
+
+    @ViewBuilder
+    func compactGlassButton(tint: Color? = nil) -> some View {
+        if #available(macOS 26.0, *) {
+            self
+                .buttonStyle(.glass)
+                .controlSize(.small)
+                .tint(tint)
+        } else {
+            self
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(tint)
+        }
+    }
+}
+
+private struct CardSurfaceModifier: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    let tint: Color?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous)
+
+        if reduceTransparency {
+            content
+                .background(Color(nsColor: .controlBackgroundColor), in: shape)
+                .overlay(shape.strokeBorder(borderGradient, lineWidth: 0.75))
+                .shadow(color: .black.opacity(0.08), radius: 5, y: 2)
+        } else if #available(macOS 26.0, *) {
+            content
+                .glassEffect(.regular.tint(tint?.opacity(0.10)), in: shape)
+        } else {
+            content
+                .background(.regularMaterial, in: shape)
+                .overlay(shape.strokeBorder(borderGradient, lineWidth: 0.75))
+                .shadow(color: .black.opacity(0.10), radius: 7, y: 3)
+        }
+    }
+
+    private var borderGradient: LinearGradient {
+        LinearGradient(
+            colors: [
+                .white.opacity(0.34),
+                (tint ?? .white).opacity(0.13),
+                .black.opacity(0.08)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
         )
     }
 }
