@@ -7,6 +7,19 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(Provider.codex.loginCommand, "codex login")
     }
 
+    func testCodexTerminalLoginLogsOutFirstWhenSessionExists() {
+        XCTAssertEqual(Provider.codex.terminalLoginCommand(hasExistingSession: false), "codex login")
+        XCTAssertEqual(
+            Provider.codex.terminalLoginCommand(hasExistingSession: true),
+            "codex logout && codex login"
+        )
+    }
+
+    func testClaudeTerminalLoginIsUnaffectedByExistingSession() {
+        XCTAssertEqual(Provider.claude.terminalLoginCommand(hasExistingSession: false), "claude auth login")
+        XCTAssertEqual(Provider.claude.terminalLoginCommand(hasExistingSession: true), "claude auth login")
+    }
+
     func testIdentitiesMatchOnAccountID() {
         let left = AccountIdentity(email: "left@example.com", accountID: "acct-1", source: .codexIDToken)
         let right = AccountIdentity(email: "right@example.com", accountID: "acct-1", source: .dashboard)

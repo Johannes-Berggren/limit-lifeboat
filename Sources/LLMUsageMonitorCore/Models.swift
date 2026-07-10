@@ -50,6 +50,19 @@ public enum Provider: String, Codable, CaseIterable, Identifiable, Sendable {
             return "\(commandName) login"
         }
     }
+
+    /// The command to run in the terminal to start a fresh CLI login.
+    /// Codex multiplexes a single `~/.codex/auth.json`, so when a session
+    /// already exists it must be logged out first or `codex login` runs
+    /// against the existing session instead of starting a new one.
+    public func terminalLoginCommand(hasExistingSession: Bool) -> String {
+        switch self {
+        case .claude:
+            return loginCommand
+        case .codex:
+            return hasExistingSession ? "\(commandName) logout && \(commandName) login" : loginCommand
+        }
+    }
 }
 
 public enum RiskLevel: String, Codable, Comparable, Sendable {

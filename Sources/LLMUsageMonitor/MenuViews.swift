@@ -460,13 +460,21 @@ struct AccountRowView: View {
 
     private var footerNote: (text: String, icon: String, color: Color)? {
         guard let snapshot else {
-            return (
-                hasStoredSnapshot
-                    ? "Credentials saved — usage appears after switching to it"
-                    : "Log in via the terminal to link this account",
-                "person.crop.circle.badge.questionmark",
-                .secondary
-            )
+            let text: String
+            if !hasStoredSnapshot {
+                text = "Log in via the terminal to link this account"
+            } else if profile.isActiveCLI {
+                // Already the active login, so "switch to it" would be wrong.
+                // Codex has no inactive usage source — its numbers come from
+                // the CLI's own session logs, so the row stays blank until
+                // this account actually runs a turn.
+                text = profile.provider == .codex
+                    ? "Active — usage appears after you run codex"
+                    : "Active — usage appears on the next refresh"
+            } else {
+                text = "Credentials saved — usage appears after switching to it"
+            }
+            return (text, "person.crop.circle.badge.questionmark", .secondary)
         }
 
         // The opportunity label stays inactive-only: for the active account a
