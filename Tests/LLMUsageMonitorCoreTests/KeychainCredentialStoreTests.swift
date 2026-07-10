@@ -57,4 +57,23 @@ final class KeychainCredentialStoreTests: XCTestCase {
             XCTAssertNotNil(underlying, "Decode failure should carry the underlying decoding error")
         }
     }
+
+    func testCodeSigningStatusYieldsActionableRelaunchMessage() {
+        // -67068 = errSecCSStaticCodeNotFound: the running copy was deleted or
+        // rebuilt out from under the process, so the Keychain can't authorize
+        // the item. The message must name the cause and the fix, not a bare code.
+        let error = CredentialStoreError.keychainError(-67068)
+        let description = error.errorDescription ?? ""
+        XCTAssertTrue(description.contains("-67068"), "Keeps the raw status for support")
+        XCTAssertTrue(description.localizedCaseInsensitiveContains("relaunch"),
+                      "Tells the user to relaunch; was: \(description)")
+        XCTAssertTrue(error.isKeychainAccessDenied,
+                      "Code-signing failures are recoverable access errors, not a missing item")
+    }
+
+    func testOrdinaryKeychainStatusKeepsGenericMessageAndIsNotAccessDenied() {
+        let error = CredentialStoreError.keychainError(errSecItemNotFound)
+        XCTAssertEqual(error.errorDescription, "Keychain operation failed with status \(errSecItemNotFound).")
+        XCTAssertFalse(error.isKeychainAccessDenied)
+    }
 }
