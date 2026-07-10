@@ -191,11 +191,14 @@ public struct ClaudeUsageAPIClient: Sendable {
     /// response carried no `extra_usage` (older shape / directly-constructed
     /// usage) so `billingUsageMode` falls back to its string heuristics.
     ///
-    /// `.enabledActive` gates on the robust, already-observed combination —
-    /// overage enabled AND included usage exhausted (most-constrained window at
-    /// or over its limit) or credits already consumed. The `severity`/
-    /// `utilization` fields are intentionally not trusted for this until a real
-    /// over-limit response confirms their shape.
+    /// `.enabledActive` (the only state that raises a PAYG warning) requires
+    /// included usage to actually be exhausted — the most-constrained window at
+    /// or over its limit. Merely having overage *enabled* is a common backstop
+    /// and is `.enabledIdle`, which does not alarm. `used_credits` is
+    /// deliberately NOT used as the trigger: it is a cumulative figure that
+    /// stays non-zero after a window resets, so it would flag a healthy account
+    /// as "paying" when it is not. `severity`/`utilization` are likewise not
+    /// trusted until a real over-limit response confirms their shape.
     private func payAsYouGoState(
         for usage: ClaudeAPIUsage,
         mostConstrainedUsedPercent: Double
@@ -206,8 +209,7 @@ public struct ClaudeUsageAPIClient: Sendable {
         guard extra.isEnabled else {
             return .disabled
         }
-        let exhausted = mostConstrainedUsedPercent >= 100 || (extra.usedCredits ?? 0) > 0
-        return exhausted ? .enabledActive : .enabledIdle
+        return mostConstrainedUsedPercent >= 100 ? .enabledActive : .enabledIdle
     }
 
     /// The human credit line. When overage is active/enabled it embeds keywords

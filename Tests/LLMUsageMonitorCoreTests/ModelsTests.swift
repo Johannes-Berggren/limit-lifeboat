@@ -329,12 +329,15 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(snapshot.billingUsageMode, .overLimitPayAsYouGo)
     }
 
-    /// The reachability-regression proof: on the API path `usedFraction` is
-    /// always set, so before the fix `.payAsYouGoVisible` could never be
-    /// returned. `.enabledIdle` must surface it despite a non-nil fraction.
-    func testBillingModeEnabledIdleIsPayAsYouGoVisibleEvenWithUsedFraction() {
-        let snapshot = makeBillingSnapshot(payState: .enabledIdle, usedFraction: 0.3)
-        XCTAssertEqual(snapshot.billingUsageMode, .payAsYouGoVisible)
+    /// Overage merely *enabled* as a backstop (`.enabledIdle`) while included
+    /// usage is fine must NOT alarm — it reads as a normal included
+    /// subscription, not pay-as-you-go. (Regression guard for the false
+    /// "Pay as you go" badge on healthy accounts.)
+    func testBillingModeEnabledIdleReadsAsIncludedSubscription() {
+        XCTAssertEqual(makeBillingSnapshot(payState: .enabledIdle, usedFraction: 0.3).billingUsageMode,
+                       .includedSubscription)
+        XCTAssertEqual(makeBillingSnapshot(payState: .enabledIdle, usedFraction: 0.9).billingUsageMode,
+                       .includedSubscriptionNearLimit)
     }
 
     /// `.disabled` (overage explicitly off) falls through to the used-fraction

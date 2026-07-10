@@ -549,15 +549,16 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         }
 
         // A first-class overage signal (from the usage API's `extra_usage`
-        // block) is exact, so it wins over the string heuristics below. It is
-        // also checked before the used-fraction bands so `.payAsYouGoVisible`
-        // stays reachable on the API path, where `usedFraction` is always set.
+        // block) is exact, so it wins over the string heuristics below. Only
+        // `.enabledActive` — overage on AND included usage exhausted — raises
+        // the PAYG warning. `.enabledIdle` means overage is merely enabled as a
+        // backstop while included usage is fine, which is not noteworthy: it
+        // falls through to the normal used-fraction bands so a healthy account
+        // is not mislabelled as paying.
         switch payAsYouGoState {
         case .enabledActive:
             return .overLimitPayAsYouGo
-        case .enabledIdle:
-            return .payAsYouGoVisible
-        case .disabled, .none:
+        case .enabledIdle, .disabled, .none:
             break
         }
 

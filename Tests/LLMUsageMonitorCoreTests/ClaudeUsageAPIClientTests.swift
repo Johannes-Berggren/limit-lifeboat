@@ -352,10 +352,11 @@ final class ClaudeUsageAPIClientTests: XCTestCase {
         XCTAssertEqual(snapshot.billingUsageMode, .includedSubscription)
     }
 
-    /// End-to-end regression proof: overage enabled but included usage not yet
-    /// exhausted must surface the "credits enabled" (PAYG-visible) state, which
-    /// was previously unreachable on the API path.
-    func testMakeSnapshotEnabledIdleBecomesPayAsYouGoVisible() {
+    /// Overage enabled but included usage not yet exhausted is a backstop, not
+    /// active billing: `.enabledIdle`, and the account still reads as a normal
+    /// included subscription (no PAYG badge). This is the exact case that was
+    /// wrongly showing "Pay as you go" on a healthy account.
+    func testMakeSnapshotEnabledIdleDoesNotAlarm() {
         let usage = ClaudeAPIUsage(
             windows: [ClaudeAPIUsageWindow(kindRaw: "session", usedPercent: 40)],
             extraUsage: ClaudeAPIExtraUsage(isEnabled: true, monthlyLimit: 50, usedCredits: 0)
@@ -363,8 +364,21 @@ final class ClaudeUsageAPIClientTests: XCTestCase {
         let snapshot = ClaudeUsageAPIClient().makeSnapshot(for: claudeProfile, usage: usage)
 
         XCTAssertEqual(snapshot.payAsYouGoState, .enabledIdle)
-        XCTAssertEqual(snapshot.billingUsageMode, .payAsYouGoVisible)
-        XCTAssertTrue(snapshot.creditStatus?.lowercased().contains("pay-as-you-go") ?? false)
+        XCTAssertEqual(snapshot.billingUsageMode, .includedSubscription)
+    }
+
+    /// The reported false positive: overage enabled and credits consumed in the
+    /// past, but the current window is at 0% — must NOT read as actively paying.
+    /// `used_credits` is cumulative and is deliberately ignored as a trigger.
+    func testMakeSnapshotOverageEnabledWithPastCreditsButIdleWindowIsNotActive() {
+        let usage = ClaudeAPIUsage(
+            windows: [ClaudeAPIUsageWindow(kindRaw: "session", usedPercent: 0)],
+            extraUsage: ClaudeAPIExtraUsage(isEnabled: true, monthlyLimit: 100, usedCredits: 42)
+        )
+        let snapshot = ClaudeUsageAPIClient().makeSnapshot(for: claudeProfile, usage: usage)
+
+        XCTAssertEqual(snapshot.payAsYouGoState, .enabledIdle)
+        XCTAssertEqual(snapshot.billingUsageMode, .includedSubscription)
     }
 
     func testMakeSnapshotEnabledActiveWhenIncludedExhausted() {
@@ -379,15 +393,6 @@ final class ClaudeUsageAPIClientTests: XCTestCase {
         // The string scanner (used by notifications + the TUI fallback) agrees.
         XCTAssertTrue(snapshot.hasPayAsYouGoSignal)
         XCTAssertTrue(snapshot.payAsYouGoLooksActive)
-    }
-
-    func testMakeSnapshotEnabledActiveWhenCreditsAlreadyConsumed() {
-        let usage = ClaudeAPIUsage(
-            windows: [ClaudeAPIUsageWindow(kindRaw: "session", usedPercent: 60)],
-            extraUsage: ClaudeAPIExtraUsage(isEnabled: true, monthlyLimit: 100, usedCredits: 5)
-        )
-        let snapshot = ClaudeUsageAPIClient().makeSnapshot(for: claudeProfile, usage: usage)
-        XCTAssertEqual(snapshot.payAsYouGoState, .enabledActive)
     }
 
     func testMakeSnapshotWithoutExtraUsageLeavesPayStateNil() {
