@@ -1,3 +1,5 @@
+import Foundation
+import Security
 import XCTest
 @testable import LLMUsageMonitorCore
 
@@ -131,64 +133,76 @@ final class ClaudeOAuthCredentialsTests: XCTestCase {
     }
 }
 
-/// The keychain type shells out to /usr/bin/security, so these exercise the
-/// pure output-normalization and command-building helpers directly.
 final class ClaudeCodeCredentialsKeychainTests: XCTestCase {
-    func testDecodePasswordOutputPassesASCIIJSONThrough() {
-        let json = #"{"claudeAiOauth":{"accessToken":"tok"}}"#
+    func testCreateReadUpdateAndSecurityToolInteroperability() throws {
+        let service = "com.johannesberggren.LLMUsageMonitor.claude-tests.\(UUID().uuidString)"
+        let account = "test-\(UUID().uuidString)"
+        let keychain = ClaudeCodeCredentialsKeychain(serviceName: service, accountName: account)
+        defer { deleteItem(service: service, account: account) }
+
+        XCTAssertNil(try keychain.readLiveItemJSON())
+
+        let first = Data(#"{"claudeAiOauth":{"accessToken":"one"},"mcpOAuth":{"server":"keep"}}"#.utf8)
+        try keychain.writeLiveItemJSON(first)
+        XCTAssertEqual(try keychain.readLiveItemJSON(), first)
+        XCTAssertEqual(try readWithSecurityTool(service: service, account: account), first)
+
+        let second = Data(#"{"claudeAiOauth":{"accessToken":"two"},"mcpOAuth":{"server":"keep"}}"#.utf8)
+        try keychain.writeLiveItemJSON(second)
+        XCTAssertEqual(try keychain.readLiveItemJSON(), second)
+        XCTAssertEqual(try readWithSecurityTool(service: service, account: account), second)
+    }
+
+    func testIntegrityFailureStopsBeforeKeychainAccess() {
+        let expected = RunningExecutableIntegrityError.replaced(path: "/tmp/deleted/LLMUsageMonitor")
+        let keychain = ClaudeCodeCredentialsKeychain(
+            serviceName: "unused",
+            accountName: "unused",
+            validateAccess: { throw expected }
+        )
+
+        XCTAssertThrowsError(try keychain.readLiveItemJSON()) { error in
+            guard case ClaudeCodeCredentialsKeychainError.credentialAccessUnavailable(let underlying) = error else {
+                return XCTFail("Expected credentialAccessUnavailable, got \(error)")
+            }
+            XCTAssertEqual(underlying as? RunningExecutableIntegrityError, expected)
+        }
+    }
+
+    func testCodeSigningFailureExplainsRelaunch() {
+        let error = ClaudeCodeCredentialsKeychainError.keychainError(-67068)
+
+        XCTAssertTrue(error.localizedDescription.contains("-67068"))
+        XCTAssertTrue(error.localizedDescription.localizedCaseInsensitiveContains("relaunch"))
+    }
+
+    private func deleteItem(service: String, account: String) {
+        SecItemDelete([
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ] as CFDictionary)
+    }
+
+    private func readWithSecurityTool(service: String, account: String) throws -> Data {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = ["find-generic-password", "-s", service, "-a", account, "-w"]
+        let output = Pipe()
+        let errors = Pipe()
+        process.standardOutput = output
+        process.standardError = errors
+
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        let errorData = errors.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
         XCTAssertEqual(
-            ClaudeCodeCredentialsKeychain.decodePasswordOutput(json + "\n"),
-            Data(json.utf8)
+            process.terminationStatus,
+            0,
+            String(decoding: errorData, as: UTF8.self)
         )
-    }
-
-    func testDecodePasswordOutputDecodesBareHex() {
-        // security prints a password containing any non-ASCII byte as bare
-        // lowercase hex with no 0x prefix: {"k":"café"}.
-        let decoded = ClaudeCodeCredentialsKeychain.decodePasswordOutput("7b226b223a22636166c3a9227d\n")
-        XCTAssertEqual(decoded, Data(#"{"k":"café"}"#.utf8))
-    }
-
-    func testDecodePasswordOutputDecodes0xPrefixedHex() {
-        let decoded = ClaudeCodeCredentialsKeychain.decodePasswordOutput("0x7b226b223a22636166c3a9227d")
-        XCTAssertEqual(decoded, Data(#"{"k":"café"}"#.utf8))
-    }
-
-    func testDecodePasswordOutputFallsBackToUTF8ForNonHexText() {
-        XCTAssertEqual(
-            ClaudeCodeCredentialsKeychain.decodePasswordOutput("not-hex-at-all"),
-            Data("not-hex-at-all".utf8)
-        )
-        // Odd-length hex-looking text is not valid hex output either.
-        XCTAssertEqual(
-            ClaudeCodeCredentialsKeychain.decodePasswordOutput("abc"),
-            Data("abc".utf8)
-        )
-    }
-
-    func testDecodePasswordOutputReturnsNilForEmptyOutput() {
-        XCTAssertNil(ClaudeCodeCredentialsKeychain.decodePasswordOutput(""))
-        XCTAssertNil(ClaudeCodeCredentialsKeychain.decodePasswordOutput(" \n"))
-    }
-
-    func testAddCommandEscapesQuotesAndBackslashes() {
-        let command = ClaudeCodeCredentialsKeychain.makeAddGenericPasswordCommand(
-            account: "user",
-            service: "Claude Code-credentials",
-            value: #"{"k":"a\"b","p":"x\y"}"#
-        )
-        XCTAssertEqual(
-            command,
-            #"add-generic-password -U -a "user" -s "Claude Code-credentials" -w "{\"k\":\"a\\\"b\",\"p\":\"x\\y\"}""#
-        )
-    }
-
-    func testAddCommandPassesNonASCIIValueThrough() {
-        let command = ClaudeCodeCredentialsKeychain.makeAddGenericPasswordCommand(
-            account: "user",
-            service: "svc",
-            value: #"{"k":"café"}"#
-        )
-        XCTAssertEqual(command, #"add-generic-password -U -a "user" -s "svc" -w "{\"k\":\"café\"}""#)
+        return Data(data.dropLast(data.last == 0x0A ? 1 : 0))
     }
 }

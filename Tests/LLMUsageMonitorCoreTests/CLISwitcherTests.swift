@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import XCTest
 @testable import LLMUsageMonitorCore
 
@@ -293,7 +294,7 @@ final class CLISwitcherTests: XCTestCase {
         try #"{"oauth:tokenCache":{"accessToken":"one"}}"#.data(using: .utf8)!.write(to: configURL)
 
         let source = FakeClaudeCLICredentialSource()
-        source.readError = ClaudeCodeCredentialsKeychainError.securityToolFailed(status: 51, message: "busy")
+        source.readError = ClaudeCodeCredentialsKeychainError.keychainError(errSecNotAvailable)
 
         let store = MemoryCredentialStore()
         let switcher = CLISwitcher(
@@ -346,7 +347,7 @@ final class CLISwitcherTests: XCTestCase {
         defer { fixture.cleanup() }
 
         let source = FakeClaudeCLICredentialSource()
-        source.readError = ClaudeCodeCredentialsKeychainError.securityToolFailed(status: 51, message: "busy")
+        source.readError = ClaudeCodeCredentialsKeychainError.keychainError(errSecNotAvailable)
 
         let switcher = CLISwitcher(
             homeDirectory: fixture.home,
@@ -386,7 +387,7 @@ final class CLISwitcherTests: XCTestCase {
         _ = try switcher.captureAndStoreSnapshot(for: profile)
 
         try #"{"oauth:tokenCache":{"accessToken":"two"}}"#.data(using: .utf8)!.write(to: configURL)
-        source.readError = ClaudeCodeCredentialsKeychainError.securityToolFailed(status: 51, message: "busy")
+        source.readError = ClaudeCodeCredentialsKeychainError.keychainError(errSecNotAvailable)
 
         XCTAssertThrowsError(try switcher.restoreSnapshot(for: profile)) { error in
             guard case CLISwitcherError.backupFailed = error else {
