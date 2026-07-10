@@ -502,4 +502,53 @@ public final class CLISwitcher {
             return false
         }
     }
+
+    /// Resolves an absolute path to a CLI executable so it can be launched from
+    /// a Terminal window whose PATH may not include it. The login command
+    /// otherwise assumes `codex` is on Terminal's default PATH — but here codex
+    /// is provided by Conductor's bundle and may not be resolvable in a plain
+    /// login shell. Tries the user's login shell (`command -v`) first so we
+    /// match whatever the user gets when they type the command themselves, then
+    /// falls back to well-known install locations. Returns `nil` when nothing
+    /// resolves, so callers can fall back to the bare command name.
+    public func resolveExecutablePath(command: String) -> String? {
+        if let fromShell = loginShellResolvedPath(command: command) {
+            return fromShell
+        }
+
+        let candidates = [
+            homeDirectory.appendingPathComponent(".npm-global/bin/\(command)").path,
+            "/opt/homebrew/bin/\(command)",
+            "/usr/local/bin/\(command)"
+        ]
+        return candidates.first { fileManager.isExecutableFile(atPath: $0) }
+    }
+
+    private func loginShellResolvedPath(command: String) -> String? {
+        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: shell)
+        // Interactive login shell so ~/.zprofile / ~/.zshrc (which set PATH) load.
+        process.arguments = ["-lic", "command -v \(command)"]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return nil }
+        } catch {
+            return nil
+        }
+
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        let path = String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty, path.hasPrefix("/"),
+              fileManager.isExecutableFile(atPath: path) else {
+            return nil
+        }
+        return path
+    }
 }

@@ -921,19 +921,53 @@ final class AppState: ObservableObject {
         if hasExistingSession {
             try? captureActiveCredentials(provider: .codex)
         }
-        let command = profile.provider.terminalLoginCommand(hasExistingSession: hasExistingSession)
+        let command = terminalLoginCommand(for: profile.provider, hasExistingSession: hasExistingSession)
 
-        if runTerminalCommand(command) {
-            statusMessage = "Started \(command) for \(profile.label). The account links automatically after login."
+        // Preferred path: drive Terminal via AppleScript (reuses a window when
+        // the user has granted Automation permission).
+        let appleScriptError = runTerminalCommand(command)
+        if appleScriptError == nil {
+            statusMessage = "Started login for \(profile.label). The account links automatically after login."
             watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialIdentity: initialIdentity)
             return
         }
 
+        // AppleScript failed — most commonly because Terminal Automation
+        // permission is off (AppleEvent error -1743), which used to silently
+        // fall back to a bare Terminal that ran nothing. Instead run the
+        // command by opening an executable `.command` file, which needs no
+        // Apple Events permission.
+        if runCommandViaScriptFile(command) {
+            statusMessage = "Opened Terminal to log in \(profile.label). The account links automatically after login."
+            watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialIdentity: initialIdentity)
+            return
+        }
+
+        // Last resort: copy the command and open a bare Terminal for the user
+        // to paste it into.
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(command, forType: .string)
-        statusMessage = "Copied \(command). Run it in the terminal; the account links automatically after login."
+        statusMessage = appleScriptError
+            ?? "Copied the login command. Paste it into Terminal; the account links automatically after login."
         openTerminal()
         watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialIdentity: initialIdentity)
+    }
+
+    /// Builds the CLI login command, prefixed with a PATH export so the
+    /// executable resolves even when Terminal's default PATH does not include
+    /// it (e.g. codex provided by Conductor's bundle). Falls back to the bare
+    /// command name when the executable cannot be resolved.
+    private func terminalLoginCommand(for provider: Provider, hasExistingSession: Bool) -> String {
+        let base = provider.terminalLoginCommand(hasExistingSession: hasExistingSession)
+        var pathDirs = ["$HOME/.npm-global/bin", "/opt/homebrew/bin", "/usr/local/bin"]
+        if let resolved = cliSwitcher.resolveExecutablePath(command: provider.commandName) {
+            let dir = (resolved as NSString).deletingLastPathComponent
+            if !dir.isEmpty {
+                pathDirs.insert(dir, at: 0)
+            }
+        }
+        let pathExport = "export PATH=\"\(pathDirs.joined(separator: ":")):$PATH\""
+        return "\(pathExport); \(base)"
     }
 
     private func watchForCompletedLogin(
@@ -1044,7 +1078,11 @@ final class AppState: ObservableObject {
         NSWorkspace.shared.openApplication(at: terminalURL, configuration: NSWorkspace.OpenConfiguration())
     }
 
-    private func runTerminalCommand(_ command: String) -> Bool {
+    /// Runs `command` in Terminal.app via AppleScript. Returns `nil` on
+    /// success, or a human-readable error message on failure (previously this
+    /// swallowed `errorInfo`, so a denied Automation permission failed
+    /// silently and login appeared to do nothing).
+    private func runTerminalCommand(_ command: String) -> String? {
         let escaped = command
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
@@ -1056,8 +1094,49 @@ final class AppState: ObservableObject {
         """
 
         var errorInfo: NSDictionary?
-        let result = NSAppleScript(source: scriptSource)?.executeAndReturnError(&errorInfo)
-        return result != nil
+        if NSAppleScript(source: scriptSource)?.executeAndReturnError(&errorInfo) != nil {
+            return nil
+        }
+
+        let code = errorInfo?[NSAppleScript.errorNumber] as? Int
+        if code == -1743 {
+            return "Terminal automation is turned off for LLMUsageMonitor. Enable it in System Settings → Privacy & Security → Automation to log in with one click."
+        }
+        if let message = errorInfo?[NSAppleScript.errorMessage] as? String, !message.isEmpty {
+            return "Could not drive Terminal: \(message)"
+        }
+        return "Could not drive Terminal to run the login command."
+    }
+
+    /// Runs `command` by writing it to a temporary executable `.command` file
+    /// and opening it with Terminal.app. Unlike AppleScript, this needs no
+    /// Apple Events (Automation) permission, so it works even when the user has
+    /// denied Terminal automation. The `.command` file runs in a non-login
+    /// shell, which is why `command` carries its own PATH export.
+    private func runCommandViaScriptFile(_ command: String) -> Bool {
+        let terminalURL = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
+        let scriptURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("llm-usage-monitor-login-\(UUID().uuidString).command")
+        let contents = "#!/bin/zsh\n\(command)\n"
+        do {
+            try contents.write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: scriptURL.path
+            )
+        } catch {
+            return false
+        }
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.open(
+            [scriptURL],
+            withApplicationAt: terminalURL,
+            configuration: configuration,
+            completionHandler: nil
+        )
+        return true
     }
 
     private func persistProfiles() {
