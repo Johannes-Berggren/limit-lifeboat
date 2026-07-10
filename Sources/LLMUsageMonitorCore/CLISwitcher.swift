@@ -279,6 +279,20 @@ public final class CLISwitcher {
         try credentialStore.save(snapshot: snapshot, for: profileID)
     }
 
+    /// The raw `~/.codex/auth.json` captured into a profile's stored snapshot,
+    /// if any — lets identity and plan tier be derived for an inactive Codex
+    /// account without launching the CLI. Mirrors
+    /// `storedClaudeOAuthCredentials` for the Claude side.
+    public func storedCodexAuthJSON(for profileID: UUID) throws -> Data? {
+        guard let snapshot = try credentialStore.loadSnapshot(for: profileID),
+              let item = snapshot.items.first(where: {
+                  $0.kind == .fullFile && $0.relativePath == ".codex/auth.json"
+              }) else {
+            return nil
+        }
+        return item.contents
+    }
+
     public func hasActiveProcesses(provider: Provider) -> Bool {
         switch provider {
         case .codex:

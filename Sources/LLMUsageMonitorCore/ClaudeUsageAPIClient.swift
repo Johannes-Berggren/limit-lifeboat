@@ -30,20 +30,60 @@ public struct ClaudeAPIUsageWindow: Equatable, Sendable {
     public var scopeName: String?
     public var usedPercent: Double
     public var resetsAt: Date?
+    /// The API's per-window severity ("normal", and — unconfirmed — an
+    /// escalated value at limit); nil for the legacy objects that omit it.
+    public var severityRaw: String?
+    /// Whether this is the currently-binding window; nil for legacy objects.
+    public var isActive: Bool?
 
-    public init(kindRaw: String, scopeName: String? = nil, usedPercent: Double, resetsAt: Date? = nil) {
+    public init(
+        kindRaw: String,
+        scopeName: String? = nil,
+        usedPercent: Double,
+        resetsAt: Date? = nil,
+        severityRaw: String? = nil,
+        isActive: Bool? = nil
+    ) {
         self.kindRaw = kindRaw
         self.scopeName = scopeName
         self.usedPercent = usedPercent
         self.resetsAt = resetsAt
+        self.severityRaw = severityRaw
+        self.isActive = isActive
+    }
+}
+
+/// The account's `extra_usage` block — the pay-as-you-go / usage-credit billing
+/// state the usage API reports alongside the rate-limit windows.
+public struct ClaudeAPIExtraUsage: Equatable, Sendable {
+    /// Whether overage / usage-credit billing is turned on for the account.
+    public var isEnabled: Bool
+    public var monthlyLimit: Double?
+    public var usedCredits: Double?
+    public var utilization: Double?
+
+    public init(
+        isEnabled: Bool,
+        monthlyLimit: Double? = nil,
+        usedCredits: Double? = nil,
+        utilization: Double? = nil
+    ) {
+        self.isEnabled = isEnabled
+        self.monthlyLimit = monthlyLimit
+        self.usedCredits = usedCredits
+        self.utilization = utilization
     }
 }
 
 public struct ClaudeAPIUsage: Equatable, Sendable {
     public var windows: [ClaudeAPIUsageWindow]
+    /// The overage/credit block, when the response included it; nil for the
+    /// older response shape and for directly-constructed usage.
+    public var extraUsage: ClaudeAPIExtraUsage?
 
-    public init(windows: [ClaudeAPIUsageWindow]) {
+    public init(windows: [ClaudeAPIUsageWindow], extraUsage: ClaudeAPIExtraUsage? = nil) {
         self.windows = windows
+        self.extraUsage = extraUsage
     }
 }
 
@@ -128,6 +168,7 @@ public struct ClaudeUsageAPIClient: Sendable {
 
         let windows = usage.windows.map(makeWindow(from:))
         let usedPercent = min(100, max(0, selectedWindow.usedPercent))
+        let payAsYouGoState = payAsYouGoState(for: usage, mostConstrainedUsedPercent: selectedWindow.usedPercent)
         return UsageSnapshot(
             accountID: profile.id,
             provider: .claude,
@@ -136,28 +177,70 @@ public struct ClaudeUsageAPIClient: Sendable {
             includedLimit: 100,
             resetDate: selectedWindow.resetsAt,
             resetDescription: resetDescription(for: selectedWindow.resetsAt),
-            creditStatus: "Live Anthropic account view across devices.",
+            creditStatus: creditStatus(for: payAsYouGoState),
             riskLevel: UsageThresholds.standard.riskLevel(usedPercent: usedPercent),
             source: Self.source,
             lastRefreshed: now,
             parseConfidence: .high,
-            message: message(for: usage.windows)
+            message: message(for: usage.windows),
+            payAsYouGoState: payAsYouGoState
         )
+    }
+
+    /// Maps the `extra_usage` block onto the app's overage state. nil when the
+    /// response carried no `extra_usage` (older shape / directly-constructed
+    /// usage) so `billingUsageMode` falls back to its string heuristics.
+    ///
+    /// `.enabledActive` (the only state that raises a PAYG warning) requires
+    /// included usage to actually be exhausted — the most-constrained window at
+    /// or over its limit. Merely having overage *enabled* is a common backstop
+    /// and is `.enabledIdle`, which does not alarm. `used_credits` is
+    /// deliberately NOT used as the trigger: it is a cumulative figure that
+    /// stays non-zero after a window resets, so it would flag a healthy account
+    /// as "paying" when it is not. `severity`/`utilization` are likewise not
+    /// trusted until a real over-limit response confirms their shape.
+    private func payAsYouGoState(
+        for usage: ClaudeAPIUsage,
+        mostConstrainedUsedPercent: Double
+    ) -> PayAsYouGoState? {
+        guard let extra = usage.extraUsage else {
+            return nil
+        }
+        guard extra.isEnabled else {
+            return .disabled
+        }
+        return mostConstrainedUsedPercent >= 100 ? .enabledActive : .enabledIdle
+    }
+
+    /// The human credit line. When overage is active/enabled it embeds keywords
+    /// `UsageSnapshot`'s string scan recognizes, so notification text and the
+    /// TUI/dashboard fallback stay consistent with the structured state. The
+    /// disabled/unknown case keeps the original cross-device phrasing.
+    private func creditStatus(for state: PayAsYouGoState?) -> String {
+        switch state {
+        case .enabledActive:
+            return "Included usage exhausted — now on pay-as-you-go credits."
+        case .enabledIdle:
+            return "Pay-as-you-go credits are enabled as a backstop."
+        case .disabled, .none:
+            return "Live Anthropic account view across devices."
+        }
     }
 
     // MARK: - Response parsing
 
     /// The response carries both a "limits" array (preferred; one entry per
     /// window, scoped entries included) and legacy "five_hour"/"seven_day_*"
-    /// objects. All other keys are ignored.
+    /// objects, plus an `extra_usage` overage block. All other keys are ignored.
     private func parseUsage(from object: [String: Any]) -> ClaudeAPIUsage {
+        let extraUsage = parseExtraUsage(from: object)
         if let limits = object["limits"] as? [[String: Any]] {
             let windows = limits.compactMap(parseLimitEntry(_:))
             if !windows.isEmpty {
-                return ClaudeAPIUsage(windows: windows)
+                return ClaudeAPIUsage(windows: windows, extraUsage: extraUsage)
             }
         }
-        return ClaudeAPIUsage(windows: parseLegacyWindows(from: object))
+        return ClaudeAPIUsage(windows: parseLegacyWindows(from: object), extraUsage: extraUsage)
     }
 
     private func parseLimitEntry(_ entry: [String: Any]) -> ClaudeAPIUsageWindow? {
@@ -176,7 +259,23 @@ public struct ClaudeUsageAPIClient: Sendable {
             kindRaw: kindRaw,
             scopeName: scopeName,
             usedPercent: percent,
-            resetsAt: parseResetDate(entry["resets_at"] as? String)
+            resetsAt: parseResetDate(entry["resets_at"] as? String),
+            severityRaw: entry["severity"] as? String,
+            isActive: entry["is_active"] as? Bool
+        )
+    }
+
+    /// The `extra_usage` block; nil when the key is absent (older shape).
+    /// Tolerant like the rest of parsing: a missing `is_enabled` reads as off.
+    private func parseExtraUsage(from object: [String: Any]) -> ClaudeAPIExtraUsage? {
+        guard let extra = object["extra_usage"] as? [String: Any] else {
+            return nil
+        }
+        return ClaudeAPIExtraUsage(
+            isEnabled: (extra["is_enabled"] as? Bool) ?? false,
+            monthlyLimit: number(extra["monthly_limit"]),
+            usedCredits: number(extra["used_credits"]),
+            utilization: number(extra["utilization"])
         )
     }
 

@@ -17,6 +17,19 @@ public enum CredentialStoreError: Error, LocalizedError {
             return "Keychain operation failed with status \(status)."
         }
     }
+
+    /// True when the failure is a locked or access-denied Keychain rather than a
+    /// genuine absence, so the app can prompt the user to grant access instead
+    /// of treating the account as having no saved credentials.
+    public var isKeychainAccessDenied: Bool {
+        guard case .keychainError(let status) = self else {
+            return false
+        }
+        return status == errSecInteractionNotAllowed
+            || status == errSecInteractionRequired
+            || status == errSecAuthFailed
+            || status == errSecUserCanceled
+    }
 }
 
 public protocol CredentialStoreProtocol {

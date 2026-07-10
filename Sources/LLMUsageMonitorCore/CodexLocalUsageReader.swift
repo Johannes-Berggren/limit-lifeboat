@@ -15,9 +15,19 @@ public struct CodexLocalUsageReader {
         self.maxFiles = maxFiles
     }
 
-    public func readUsage(for profile: AccountProfile, now: Date = Date()) -> UsageSnapshot? {
+    /// Reads the latest local rate-limit event for the active Codex account.
+    ///
+    /// `producedAfter` is a freshness gate: the session logs carry no account
+    /// identity, so the newest event belongs to whoever last ran `codex`.
+    /// Passing the time the current account became active discards any event
+    /// older than that, so a just-switched-to account is never shown the
+    /// previous account's numbers. `nil` (the default, e.g. first launch where
+    /// the active account has been active since before the app started) accepts
+    /// the newest event.
+    public func readUsage(for profile: AccountProfile, producedAfter: Date? = nil, now: Date = Date()) -> UsageSnapshot? {
         guard profile.provider == .codex,
               let event = latestRateLimitEvent(),
+              producedAfter.map({ event.timestamp > $0 }) ?? true,
               let selectedLimit = event.limits.max(by: { $0.usedPercent < $1.usedPercent }) else {
             return nil
         }

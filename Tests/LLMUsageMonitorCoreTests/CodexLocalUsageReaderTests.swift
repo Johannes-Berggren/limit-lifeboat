@@ -76,6 +76,48 @@ final class CodexLocalUsageReaderTests: XCTestCase {
         XCTAssertEqual(snapshot.usedFraction ?? 0, 0.23, accuracy: 0.0001)
     }
 
+    /// The freshness gate: an event older than the account's activation time
+    /// belongs to whoever ran `codex` before the switch, so it is suppressed —
+    /// a just-switched-to account is never shown the previous account's numbers.
+    func testReadingSuppressedWhenLatestEventPredatesActivation() throws {
+        let fixture = try TemporaryCodexUsageFixture()
+        defer { fixture.cleanup() }
+        try fixture.writeSession(
+            name: "recent.jsonl",
+            lines: [
+                #"{"timestamp":"2026-07-03T12:00:00.000Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":23.0,"window_minutes":300,"resets_at":1783093420},"plan_type":"pro"}}}"#
+            ]
+        )
+
+        let profile = AccountProfile(provider: .codex, label: "Codex")
+        XCTAssertNil(
+            CodexLocalUsageReader(homeDirectory: fixture.home).readUsage(
+                for: profile,
+                producedAfter: Date(timeIntervalSince1970: 1_783_200_000)
+            )
+        )
+    }
+
+    func testReadingAppliedWhenEventPostdatesActivation() throws {
+        let fixture = try TemporaryCodexUsageFixture()
+        defer { fixture.cleanup() }
+        try fixture.writeSession(
+            name: "recent.jsonl",
+            lines: [
+                #"{"timestamp":"2026-07-03T12:00:00.000Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":23.0,"window_minutes":300,"resets_at":1783093420},"plan_type":"pro"}}}"#
+            ]
+        )
+
+        let profile = AccountProfile(provider: .codex, label: "Codex")
+        let snapshot = CodexLocalUsageReader(homeDirectory: fixture.home).readUsage(
+            for: profile,
+            producedAfter: Date(timeIntervalSince1970: 1_783_000_000),
+            now: Date(timeIntervalSince1970: 1_783_200_000)
+        )
+        XCTAssertNotNil(snapshot)
+        XCTAssertEqual(snapshot?.windows.first?.usedPercent, 23)
+    }
+
     func testReturnsNilWhenNoCodexRateLimitExists() throws {
         let fixture = try TemporaryCodexUsageFixture()
         defer { fixture.cleanup() }

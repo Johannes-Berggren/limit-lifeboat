@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import XCTest
 @testable import LLMUsageMonitorCore
 
@@ -209,6 +210,40 @@ final class ClaudeAccountUsageServiceTests: XCTestCase {
         }
     }
 
+    func testKeychainDeniedSurfacesAsKeychainLocked() async {
+        let store = FakeCredentialProvider()
+        store.storedError = CredentialStoreError.keychainError(errSecInteractionNotAllowed)
+        let service = makeService(http: ScriptedHTTPClient(responses: []), credentials: store)
+        do {
+            _ = try await service.fetchSnapshot(for: profile, isActiveCLI: false, now: now)
+            XCTFail("Expected keychainLocked")
+        } catch let error as ClaudeAccountUsageFetchError {
+            guard case .keychainLocked = error else {
+                return XCTFail("Expected keychainLocked, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error \(error)")
+        }
+    }
+
+    /// A decode failure (not a denial) is not a locked keychain — it leaves the
+    /// account with no usable token this cycle, surfacing as noCredentials.
+    func testKeychainDecodeErrorFallsBackToNoCredentials() async {
+        let store = FakeCredentialProvider()
+        store.storedError = CredentialStoreError.decodeFailed(underlying: nil)
+        let service = makeService(http: ScriptedHTTPClient(responses: []), credentials: store)
+        do {
+            _ = try await service.fetchSnapshot(for: profile, isActiveCLI: false, now: now)
+            XCTFail("Expected noCredentials")
+        } catch let error as ClaudeAccountUsageFetchError {
+            guard case .noCredentials = error else {
+                return XCTFail("Expected noCredentials, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error \(error)")
+        }
+    }
+
     // MARK: - Fixtures
 
     private let profile = AccountProfile(provider: .claude, label: "Claude")
@@ -251,6 +286,9 @@ final class ClaudeAccountUsageServiceTests: XCTestCase {
 private final class FakeCredentialProvider: ClaudeOAuthCredentialProviding, @unchecked Sendable {
     var live: ClaudeOAuthCredentials?
     var stored: [UUID: ClaudeOAuthCredentials] = [:]
+    /// When set, `storedClaudeOAuthCredentials` throws it — used to simulate a
+    /// locked/denied Keychain or an unreadable snapshot.
+    var storedError: Error?
 
     func liveClaudeOAuthCredentials() -> ClaudeOAuthCredentials? {
         live
@@ -261,7 +299,10 @@ private final class FakeCredentialProvider: ClaudeOAuthCredentialProviding, @unc
     }
 
     func storedClaudeOAuthCredentials(for profileID: UUID) throws -> ClaudeOAuthCredentials? {
-        stored[profileID]
+        if let storedError {
+            throw storedError
+        }
+        return stored[profileID]
     }
 
     func updateStoredClaudeOAuthCredentials(_ credentials: ClaudeOAuthCredentials, for profileID: UUID) throws {
