@@ -466,6 +466,34 @@ final class CLISwitcherTests: XCTestCase {
             }
         }
     }
+
+    func testResolveExecutablePathFindsCommonCommand() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: MemoryCredentialStore(),
+            claudeCLICredentialSource: FakeClaudeCLICredentialSource()
+        )
+
+        let resolved = try XCTUnwrap(switcher.resolveExecutablePath(command: "ls"))
+        XCTAssertTrue(resolved.hasPrefix("/"), "Expected an absolute path, got \(resolved)")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: resolved))
+    }
+
+    func testResolveExecutablePathReturnsNilForUnknownCommand() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: MemoryCredentialStore(),
+            claudeCLICredentialSource: FakeClaudeCLICredentialSource()
+        )
+
+        XCTAssertNil(switcher.resolveExecutablePath(command: "definitely-not-a-real-cli-xyzzy"))
+    }
 }
 
 /// In-memory stand-in for the login-keychain item so tests never touch the

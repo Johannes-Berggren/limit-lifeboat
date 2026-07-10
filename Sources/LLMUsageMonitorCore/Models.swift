@@ -55,12 +55,17 @@ public enum Provider: String, Codable, CaseIterable, Identifiable, Sendable {
     /// Codex multiplexes a single `~/.codex/auth.json`, so when a session
     /// already exists it must be logged out first or `codex login` runs
     /// against the existing session instead of starting a new one.
+    ///
+    /// The two commands are joined with `;`, not `&&`: `codex logout` can
+    /// exit non-zero (e.g. no session it recognizes, or a changed CLI exit
+    /// code), and with `&&` that would short-circuit and never run
+    /// `codex login` — leaving the terminal looking like it did nothing.
     public func terminalLoginCommand(hasExistingSession: Bool) -> String {
         switch self {
         case .claude:
             return loginCommand
         case .codex:
-            return hasExistingSession ? "\(commandName) logout && \(commandName) login" : loginCommand
+            return hasExistingSession ? "\(commandName) logout; \(commandName) login" : loginCommand
         }
     }
 }

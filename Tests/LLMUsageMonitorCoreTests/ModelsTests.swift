@@ -11,7 +11,7 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(Provider.codex.terminalLoginCommand(hasExistingSession: false), "codex login")
         XCTAssertEqual(
             Provider.codex.terminalLoginCommand(hasExistingSession: true),
-            "codex logout && codex login"
+            "codex logout; codex login"
         )
     }
 
