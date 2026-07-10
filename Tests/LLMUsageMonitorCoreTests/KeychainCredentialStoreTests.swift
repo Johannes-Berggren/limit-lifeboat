@@ -3,6 +3,16 @@ import XCTest
 @testable import LLMUsageMonitorCore
 
 final class KeychainCredentialStoreTests: XCTestCase {
+    func testStaleCodeIdentityErrorsTellUserToRelaunch() {
+        for status in [errSecCSStaticCodeNotFound, errSecCSStaticCodeChanged] {
+            let error = CredentialStoreError.keychainError(status)
+            let description = error.localizedDescription
+            XCTAssertTrue(description.contains("\(status)"), "Keeps the raw status for support")
+            XCTAssertTrue(description.localizedCaseInsensitiveContains("relaunch"))
+            XCTAssertTrue(error.isKeychainAccessDenied)
+        }
+    }
+
     func testSaveLoadUpdateAndDeleteSnapshot() throws {
         let store = KeychainCredentialStore(service: "com.johannesberggren.LLMUsageMonitor.tests.\(UUID().uuidString)")
         let accountID = UUID()
