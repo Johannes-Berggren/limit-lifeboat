@@ -3,6 +3,24 @@ import XCTest
 @testable import LLMUsageMonitorCore
 
 final class KeychainCredentialStoreTests: XCTestCase {
+    func testStaleCodeIdentityErrorsTellUserToRelaunch() {
+        let expected = "The running copy of LLM Usage Monitor was moved, replaced, or deleted after launch, so macOS can no longer authorize Keychain access. Quit and reopen the app, then try again."
+
+        for status in [errSecCSStaticCodeNotFound, errSecCSStaticCodeChanged] {
+            let error = CredentialStoreError.keychainError(status)
+            XCTAssertEqual(error.localizedDescription, expected)
+        }
+    }
+
+    func testOtherKeychainErrorsKeepNumericFallback() {
+        let error = CredentialStoreError.keychainError(errSecAuthFailed)
+
+        XCTAssertEqual(
+            error.localizedDescription,
+            "Keychain operation failed with status \(errSecAuthFailed)."
+        )
+    }
+
     func testSaveLoadUpdateAndDeleteSnapshot() throws {
         let store = KeychainCredentialStore(service: "com.johannesberggren.LLMUsageMonitor.tests.\(UUID().uuidString)")
         let accountID = UUID()

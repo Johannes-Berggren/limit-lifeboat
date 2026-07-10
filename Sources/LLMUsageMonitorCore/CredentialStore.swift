@@ -14,6 +14,9 @@ public enum CredentialStoreError: Error, LocalizedError {
             let reason = underlying?.localizedDescription ?? "the data is not in the expected format"
             return "Could not decode the saved credentials (\(reason))."
         case .keychainError(let status):
+            if status == errSecCSStaticCodeNotFound || status == errSecCSStaticCodeChanged {
+                return "The running copy of LLM Usage Monitor was moved, replaced, or deleted after launch, so macOS can no longer authorize Keychain access. Quit and reopen the app, then try again."
+            }
             return "Keychain operation failed with status \(status)."
         }
     }
