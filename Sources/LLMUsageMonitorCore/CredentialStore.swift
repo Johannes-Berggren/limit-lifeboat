@@ -14,8 +14,15 @@ public enum CredentialStoreError: Error, LocalizedError {
             let reason = underlying?.localizedDescription ?? "the data is not in the expected format"
             return "Could not decode the saved credentials (\(reason))."
         case .keychainError(let status):
-            if status == errSecCSStaticCodeNotFound || status == errSecCSStaticCodeChanged {
-                return "The running copy of LLM Usage Monitor was moved, replaced, or deleted after launch, so macOS can no longer authorize Keychain access. Quit and reopen the app, then try again."
+            if Self.isCodeSigningStatus(status) {
+                // The Keychain couldn't resolve this app's on-disk code to
+                // authorize the item — almost always because the running copy
+                // was rebuilt, moved, or deleted while open (e.g. -67068,
+                // errSecCSStaticCodeNotFound). A bare status code is useless
+                // here, so name the cause and the fix.
+                return "macOS can't verify this app's code signature (Keychain status \(status)). "
+                    + "The running copy was likely rebuilt, moved, or deleted while open. "
+                    + "Quit and relaunch LLM Usage Monitor, then try again."
             }
             return "Keychain operation failed with status \(status)."
         }
@@ -32,6 +39,17 @@ public enum CredentialStoreError: Error, LocalizedError {
             || status == errSecInteractionRequired
             || status == errSecAuthFailed
             || status == errSecUserCanceled
+            || Self.isCodeSigningStatus(status)
+    }
+
+    /// Code-signing / static-code errors (the `errSecCS*` family, e.g.
+    /// -67068 errSecCSStaticCodeNotFound) that surface from Keychain calls when
+    /// macOS can't resolve the caller's on-disk code to evaluate an item ACL.
+    /// These are recoverable by relaunching, so they count as access-denied
+    /// rather than a missing item.
+    static func isCodeSigningStatus(_ status: OSStatus) -> Bool {
+        // errSecCSUnimplemented (-67072) … errSecCSInternalError (-67008).
+        (-67072 ... -67008).contains(status)
     }
 }
 
