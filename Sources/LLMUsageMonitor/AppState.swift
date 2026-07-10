@@ -503,19 +503,51 @@ final class AppState: ObservableObject {
     /// session logs are account-blind), and derives plan tier + identity for
     /// every Codex account, active or not, from its captured credentials.
     private func refreshCodexUsage() {
+        // The `~/.codex/sessions` logs carry no account identity, so the newest
+        // rate-limit event can only be safely attributed to the active account
+        // when it is the sole Codex account. With two or more, the newest event
+        // may belong to whichever account last ran `codex`, so it is trusted
+        // only when produced after this account became the live login — and if
+        // there is no such event yet, the row is cleared rather than showing
+        // another account's numbers. (A lone Codex account keeps the simpler
+        // "the newest event is mine" behavior, unchanged.)
+        let now = Date()
+        let hasMultipleCodex = profiles.filter { $0.provider == .codex }.count > 1
+
         for profile in profiles where profile.provider == .codex {
-            if profile.isActiveCLI,
-               let snapshot = codexLocalUsageReader.readUsage(
-                   for: profile,
-                   producedAfter: codexActiveSince[profile.id]
-               ) {
-                applySnapshot(snapshot, for: profile)
+            if profile.isActiveCLI {
+                // The in-memory activation time does not survive an app
+                // restart; when it is missing for a multi-account setup, anchor
+                // it now so a pre-launch event is never mistaken for this
+                // account's — a single fresh `codex` run then populates it.
+                if hasMultipleCodex, codexActiveSince[profile.id] == nil {
+                    codexActiveSince[profile.id] = now
+                }
+                let gate = hasMultipleCodex ? codexActiveSince[profile.id] : nil
+                if let snapshot = codexLocalUsageReader.readUsage(for: profile, producedAfter: gate, now: now) {
+                    applySnapshot(snapshot, for: profile)
+                } else if hasMultipleCodex {
+                    clearCodexSnapshot(for: profile.id)
+                }
             }
             // A gated-out active read (no genuine post-activation event yet) or
             // an inactive account keeps its captured / last-known snapshot;
             // there is no per-account Codex usage source to poll.
             enrichCodexAccountInfo(for: profile)
         }
+    }
+
+    /// Drops an active Codex account's reading when it can't be attributed to
+    /// that account (multi-account setup with no post-activation event), so the
+    /// row shows its "run codex" placeholder instead of another account's data.
+    private func clearCodexSnapshot(for profileID: UUID) {
+        guard snapshots[profileID] != nil else {
+            return
+        }
+        snapshots[profileID] = nil
+        burnRateEstimates[profileID] = nil
+        saveSnapshots()
+        updateMenuBarSummary()
     }
 
     /// Plan tier + identity for a Codex account, from the live `auth.json` when
@@ -879,15 +911,27 @@ final class AppState: ObservableObject {
 
     func beginCLILogin(for profile: AccountProfile) {
         let initialIdentity = cliSwitcher.currentIdentity(provider: profile.provider)
-        if runTerminalCommand(profile.provider.loginCommand) {
-            statusMessage = "Started \(profile.provider.loginCommand) for \(profile.label). The account links automatically after login."
+
+        // Codex accounts share the single `~/.codex/auth.json`, so a bare
+        // `codex login` launched while another account is signed in runs
+        // against that existing session instead of starting a new login.
+        // Capture the active account first (so its credentials survive as a
+        // restorable snapshot), then log the terminal out before logging in.
+        let hasExistingSession = profile.provider == .codex && cliSwitcher.validateActiveLogin(provider: .codex)
+        if hasExistingSession {
+            try? captureActiveCredentials(provider: .codex)
+        }
+        let command = profile.provider.terminalLoginCommand(hasExistingSession: hasExistingSession)
+
+        if runTerminalCommand(command) {
+            statusMessage = "Started \(command) for \(profile.label). The account links automatically after login."
             watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialIdentity: initialIdentity)
             return
         }
 
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(profile.provider.loginCommand, forType: .string)
-        statusMessage = "Copied \(profile.provider.loginCommand). Run it in the terminal; the account links automatically after login."
+        NSPasteboard.general.setString(command, forType: .string)
+        statusMessage = "Copied \(command). Run it in the terminal; the account links automatically after login."
         openTerminal()
         watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialIdentity: initialIdentity)
     }
