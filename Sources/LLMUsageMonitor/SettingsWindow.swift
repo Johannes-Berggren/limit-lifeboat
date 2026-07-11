@@ -1,4 +1,5 @@
 import AppKit
+import LLMUsageMonitorCore
 import ServiceManagement
 import SwiftUI
 

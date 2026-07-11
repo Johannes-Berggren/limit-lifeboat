@@ -55,6 +55,21 @@ enum DS {
         }
     }
 
+    static func presentationColor(_ tone: PresentationTone) -> Color {
+        switch tone {
+        case .secondary:
+            return .secondary
+        case .warning:
+            return .orange
+        case .stale:
+            return staleAmber
+        case .success:
+            return .green
+        case .danger:
+            return .red
+        }
+    }
+
     static func providerAccent(_ provider: Provider) -> Color {
         provider == .claude ? .purple : .blue
     }
