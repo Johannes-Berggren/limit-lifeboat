@@ -68,4 +68,91 @@ final class AccountRowPresentationTests: XCTestCase {
         XCTAssertEqual(presentation.switchHelp, "More quota available")
         XCTAssertTrue(presentation.highlightsSwitch)
     }
+
+    func testElapsedResetHighlightsSwitchAndExplainsFreshQuota() {
+        let now = Date()
+        let profile = AccountProfile(provider: .claude, label: "Recovered")
+        let snapshot = UsageSnapshot(
+            accountID: profile.id,
+            provider: .claude,
+            includedRemaining: 5,
+            includedLimit: 100,
+            resetDate: now.addingTimeInterval(-60),
+            riskLevel: .warning,
+            source: "test",
+            lastRefreshed: now.addingTimeInterval(-3600)
+        )
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: snapshot,
+            hasStoredSnapshot: true,
+            refreshState: .ok,
+            adviceReason: nil,
+            now: now
+        )
+
+        XCTAssertTrue(presentation.highlightsSwitch)
+        XCTAssertTrue(presentation.switchHelp.contains("fresh quota"))
+        XCTAssertEqual(presentation.footerNote?.tone, .success)
+    }
+
+    func testMissingCredentialsKeepsSwitchUnavailableAndExplainsLogin() {
+        let profile = AccountProfile(provider: .codex, label: "New")
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: nil,
+            hasStoredSnapshot: false,
+            refreshState: .idle,
+            adviceReason: nil
+        )
+
+        XCTAssertFalse(presentation.highlightsSwitch)
+        XCTAssertTrue(presentation.switchHelp.contains("Log into this account"))
+        XCTAssertTrue(presentation.footerNote?.text.contains("terminal") == true)
+    }
+
+    func testActiveStaleAccountSurfacesStaleness() {
+        let now = Date()
+        let profile = AccountProfile(provider: .claude, label: "Active", isActiveCLI: true)
+        let snapshot = UsageSnapshot(
+            accountID: profile.id,
+            provider: .claude,
+            riskLevel: .stale,
+            source: "test",
+            lastRefreshed: now.addingTimeInterval(-3600)
+        )
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: snapshot,
+            hasStoredSnapshot: true,
+            refreshState: .ok,
+            adviceReason: nil,
+            now: now
+        )
+
+        XCTAssertEqual(presentation.riskLevel, .stale)
+        XCTAssertEqual(presentation.billingBadge?.text, "Sign in")
+        XCTAssertTrue(presentation.footerNote?.text.hasPrefix("Last checked") == true)
+    }
+
+    func testPayAsYouGoSnapshotGetsDangerBadge() {
+        let profile = AccountProfile(provider: .codex, label: "Overage")
+        let snapshot = UsageSnapshot(
+            accountID: profile.id,
+            provider: .codex,
+            riskLevel: .depleted,
+            source: "test",
+            payAsYouGoState: .enabledActive
+        )
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: snapshot,
+            hasStoredSnapshot: true,
+            refreshState: .ok,
+            adviceReason: nil
+        )
+
+        XCTAssertEqual(presentation.billingBadge?.text, "PAYG")
+        XCTAssertEqual(presentation.billingBadge?.tone, .danger)
+    }
 }

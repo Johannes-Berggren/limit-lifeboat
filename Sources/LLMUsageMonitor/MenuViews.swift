@@ -11,12 +11,12 @@ struct MenuRootView: View {
             Divider()
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: DS.Spacing.lg) {
                     providerSection(.claude)
                     providerSection(.codex)
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, DS.Spacing.sm)
+                .padding(.horizontal, DS.Spacing.md)
+                .padding(.vertical, DS.Spacing.md)
             }
             .background(AmbientUsageBackground())
 
@@ -24,18 +24,19 @@ struct MenuRootView: View {
 
             footer
         }
-        .frame(minWidth: 430, minHeight: 480)
+        .frame(minWidth: 460, minHeight: 560)
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: DS.Spacing.sm) {
+        VStack(alignment: .leading, spacing: DS.Spacing.md) {
             HStack(spacing: DS.Spacing.sm) {
-                Text("LLM Usage")
-                    .font(.headline)
-
-                Text(lastRefreshText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("LLM Usage")
+                        .font(.headline)
+                    Text(lastRefreshText)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
 
                 Spacer()
 
@@ -60,12 +61,6 @@ struct MenuRootView: View {
                 .disabled(state.isRefreshing)
             }
 
-            if let stage = state.refreshStage {
-                Text(stage)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-
             TopUsageSummaryView(
                 profiles: state.profiles,
                 snapshots: state.snapshots,
@@ -80,17 +75,23 @@ struct MenuRootView: View {
                         .font(.caption.weight(.semibold))
                 }
                 .buttonStyle(.link)
+            } else if let stage = state.refreshStage {
+                Label(stage, systemImage: "arrow.triangle.2.circlepath")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
-        .padding(10)
+        .padding(DS.Spacing.md)
     }
 
     private var footer: some View {
         HStack(spacing: DS.Spacing.sm) {
-            Text(state.statusMessage.isEmpty ? "Ready" : state.statusMessage)
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .lineLimit(2)
+            if !state.statusMessage.isEmpty {
+                Label(state.statusMessage, systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
 
             Spacer()
 
@@ -113,7 +114,8 @@ struct MenuRootView: View {
             .buttonStyle(.borderless)
             .keyboardShortcut("q")
         }
-        .padding(10)
+        .padding(.horizontal, DS.Spacing.md)
+        .padding(.vertical, DS.Spacing.sm)
         .background(.bar)
     }
 
@@ -133,17 +135,22 @@ struct MenuRootView: View {
         let activeAtRisk = activeSnapshot.map { $0.riskLevel == .warning || $0.riskLevel == .depleted } ?? false
         let advisedID = activeAtRisk ? state.switchAdvice[provider]?.bestCandidateID : nil
 
-        return VStack(alignment: .leading, spacing: DS.Spacing.tight) {
+        return VStack(alignment: .leading, spacing: DS.Spacing.sm) {
             HStack {
                 ProviderLabel(text: provider.displayName, provider: provider)
-                    .font(.caption.weight(.semibold))
+                    .font(.subheadline.weight(.semibold))
+
+                Text("\(profiles.count) \(profiles.count == 1 ? "account" : "accounts")")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
 
                 Spacer()
 
                 Button {
                     state.addProfile(provider: provider)
                 } label: {
-                    Image(systemName: "plus")
+                    Label("Add", systemImage: "plus")
+                        .labelStyle(.iconOnly)
                 }
                 .buttonStyle(.borderless)
                 .help("Add a \(provider.displayName) account")
@@ -178,7 +185,7 @@ struct MenuRootView: View {
     }
 
     private func emptyProviderCard(_ provider: Provider) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: DS.Spacing.sm) {
             Text("No accounts yet")
                 .font(.system(size: 13, weight: .semibold))
             Text("Run \(provider.loginCommand) in your terminal — the account is registered here automatically on the next refresh.")
@@ -190,7 +197,7 @@ struct MenuRootView: View {
             } label: {
                 Label("Copy login command & open Terminal", systemImage: "terminal")
             }
-            .buttonStyle(.bordered)
+            .compactGlassButton(tint: DS.providerAccent(provider))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(DS.Spacing.md)
@@ -205,13 +212,13 @@ private struct AmbientUsageBackground: View {
         if !reduceTransparency {
             ZStack {
                 RadialGradient(
-                    colors: [.purple.opacity(0.12), .clear],
+                    colors: [.purple.opacity(0.055), .clear],
                     center: .topLeading,
                     startRadius: 10,
                     endRadius: 260
                 )
                 RadialGradient(
-                    colors: [.blue.opacity(0.10), .clear],
+                    colors: [.blue.opacity(0.045), .clear],
                     center: .bottomTrailing,
                     startRadius: 20,
                     endRadius: 280
@@ -255,13 +262,12 @@ struct AccountRowView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: DS.Spacing.tight) {
+        VStack(alignment: .leading, spacing: DS.Spacing.sm) {
             header
             gauges
             statusStrip
         }
-        .padding(.horizontal, DS.Spacing.cardPadding)
-        .padding(.vertical, DS.Spacing.tight)
+        .padding(DS.Spacing.cardPadding)
         .cardSurface(tint: DS.providerAccent(profile.provider))
         .alert("Rename \(profile.label)", isPresented: $showsRenameAlert) {
             TextField("Account name", text: $renameText)
@@ -280,71 +286,86 @@ struct AccountRowView: View {
     // MARK: Row 1 — header
 
     private var header: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(DS.riskColor(presentation.riskLevel))
-                .frame(width: 8, height: 8)
+        VStack(alignment: .leading, spacing: DS.Spacing.xs) {
+            HStack(spacing: DS.Spacing.tight) {
+                Circle()
+                    .fill(DS.riskColor(presentation.riskLevel))
+                    .frame(width: 9, height: 9)
+                    .accessibilityHidden(true)
 
-            Text(profile.label)
-                .font(.system(size: 13, weight: .semibold))
-                .lineLimit(1)
-                .layoutPriority(1)
+                Text(profile.label)
+                    .font(.system(size: 14, weight: .semibold))
+                    .lineLimit(1)
+                    .layoutPriority(1)
+
+                if profile.isActiveCLI {
+                    Badge(text: "Active", systemImage: "terminal.fill", color: .green)
+                        .help("This account is the current terminal login")
+                }
+
+                if let billingBadge = presentation.billingBadge {
+                    Button {
+                        showsBillingDetails = true
+                    } label: {
+                        Badge(text: billingBadge.text, color: DS.presentationColor(billingBadge.tone))
+                    }
+                    .buttonStyle(.plain)
+                    .help(billingBadge.help)
+                }
+
+                Spacer(minLength: 0)
+
+                if !profile.isActiveCLI && presentation.highlightsSwitch && hasStoredSnapshot {
+                    switchButton
+                }
+
+                actionsMenu
+            }
 
             Text(presentation.identityText)
-                .font(.caption2)
+                .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .help(presentation.identityText)
+                .padding(.leading, 15)
+        }
+    }
 
+    private var actionsMenu: some View {
+        Menu {
+            if !profile.isActiveCLI && (!presentation.highlightsSwitch || !hasStoredSnapshot) {
+                Button("Switch CLI to This Account", systemImage: "arrow.triangle.2.circlepath") {
+                    switchCLI()
+                }
+                .disabled(!hasStoredSnapshot)
+                Divider()
+            }
+            Button("Open Dashboard…") { openDashboard() }
+            Button("Log In via Terminal") { beginCLILogin() }
             if profile.isActiveCLI {
-                Badge(text: "Active", systemImage: "terminal.fill", color: .green)
-                    .help("This account is the current terminal login")
+                Button("Save CLI Snapshot Now") { captureCLI() }
             }
-
-            Spacer(minLength: 0)
-
-            if let billingBadge = presentation.billingBadge {
-                Button {
-                    showsBillingDetails = true
-                } label: {
-                    Badge(text: billingBadge.text, color: DS.presentationColor(billingBadge.tone))
-                }
-                .buttonStyle(.plain)
-                .help(billingBadge.help)
+            Divider()
+            Button("Usage History…") { showsHistory = true }
+            Button("Billing Details…") { showsBillingDetails = true }
+            Divider()
+            Button("Rename…") {
+                renameText = profile.label
+                showsRenameAlert = true
             }
-
-            if !profile.isActiveCLI {
-                switchButton
-            }
-
-            Menu {
-                Button("Open Dashboard…") { openDashboard() }
-                Button("Log In via Terminal") { beginCLILogin() }
-                if profile.isActiveCLI {
-                    Button("Save CLI Snapshot Now") { captureCLI() }
-                }
-                Divider()
-                Button("Usage History…") { showsHistory = true }
-                Button("Billing Details…") { showsBillingDetails = true }
-                Divider()
-                Button("Rename…") {
-                    renameText = profile.label
-                    showsRenameAlert = true
-                }
-                Button("Remove…", role: .destructive) { remove() }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .help("More actions")
-            // Anchored here (not on the conditional badge) so the menu's
-            // "Billing Details…" works for healthy accounts with no badge.
-            .popover(isPresented: $showsBillingDetails, arrowEdge: .bottom) {
-                BillingStatusView(snapshot: snapshot, planLabel: profile.planLabel)
-                    .padding(DS.Spacing.md)
-                    .frame(width: 300)
-            }
+            Button("Remove…", role: .destructive) { remove() }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("More actions")
+        // Anchored here (not on the conditional badge) so the menu's
+        // "Billing Details…" works for healthy accounts with no badge.
+        .popover(isPresented: $showsBillingDetails, arrowEdge: .bottom) {
+            BillingStatusView(snapshot: snapshot, planLabel: profile.planLabel)
+                .padding(DS.Spacing.md)
+                .frame(width: 300)
         }
     }
 
@@ -355,7 +376,7 @@ struct AccountRowView: View {
         let groups = presentation.gauges
 
         if !groups.visible.isEmpty {
-            LazyVGrid(columns: gaugeColumns, alignment: .leading, spacing: DS.Spacing.tight) {
+            LazyVGrid(columns: gaugeColumns, alignment: .leading, spacing: DS.Spacing.sm) {
                 ForEach(groups.visible) { window in
                     UsageGauge(window: window, estimate: estimates[window.id])
                 }
@@ -373,10 +394,7 @@ struct AccountRowView: View {
     }
 
     private var gaugeColumns: [GridItem] {
-        Array(
-            repeating: GridItem(.flexible(minimum: 0), spacing: DS.Spacing.sm, alignment: .top),
-            count: 3
-        )
+        [GridItem(.adaptive(minimum: 118), spacing: DS.Spacing.md, alignment: .top)]
     }
 
     // MARK: Actionable status strip (omitted for ordinary accounts)
@@ -410,7 +428,15 @@ struct AccountRowView: View {
                 }
 
             }
-            .lineLimit(1)
+            .lineLimit(2)
+            .padding(.horizontal, DS.Spacing.sm)
+            .padding(.vertical, DS.Spacing.tight)
+            .background(
+                (problem.map { DS.presentationColor($0.tone) }
+                    ?? note.map { DS.presentationColor($0.tone) }
+                    ?? Color.secondary).opacity(0.08),
+                in: RoundedRectangle(cornerRadius: DS.Radius.small, style: .continuous)
+            )
         }
     }
 
@@ -419,7 +445,8 @@ struct AccountRowView: View {
         Button {
             switchCLI()
         } label: {
-            Label(presentation.switchTitle, systemImage: "arrow.triangle.2.circlepath")
+            Label(presentation.switchTitle == "Best" ? "Best switch" : presentation.switchTitle,
+                  systemImage: "arrow.triangle.2.circlepath")
                 .font(.caption.weight(.medium))
         }
         .compactGlassButton(tint: presentation.highlightsSwitch ? .green : nil)
@@ -435,59 +462,77 @@ struct TopUsageSummaryView: View {
     let preferredFraction: (UsageSnapshot) -> Double?
 
     var body: some View {
-        HStack(spacing: DS.Spacing.sm) {
-            summaryTile(provider: .claude)
-            summaryTile(provider: .codex)
+        HStack(spacing: 0) {
+            summarySegment(provider: .claude)
+
+            Divider()
+                .padding(.vertical, DS.Spacing.tight)
+
+            summarySegment(provider: .codex)
+        }
+        .padding(.vertical, DS.Spacing.xs)
+        .background(
+            Color.primary.opacity(0.035),
+            in: RoundedRectangle(cornerRadius: DS.Radius.medium, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: DS.Radius.medium, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.07), lineWidth: 0.5)
         }
     }
 
-    private func summaryTile(provider: Provider) -> some View {
+    private func summarySegment(provider: Provider) -> some View {
         let active = profiles.first { $0.provider == provider && $0.isActiveCLI }
         let snapshot = active.flatMap { snapshots[$0.id] }
 
-        return VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: DS.Spacing.tight) {
-                ProviderLabel(text: provider.displayName, provider: provider)
-                    .font(.caption.weight(.semibold))
+        return HStack(spacing: DS.Spacing.sm) {
+            Image(systemName: DS.providerSymbol(provider))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(DS.providerAccent(provider))
+                .frame(width: 18, height: 18)
 
-                Spacer(minLength: 0)
-
-                Text(snapshot.map(summaryValue) ?? "–")
-                    .font(.headline.monospacedDigit().weight(.semibold))
-                    .foregroundStyle(snapshot.map { DS.billingColor($0.billingUsageMode) } ?? .secondary)
-                    .contentTransition(.numericText())
-                    .animation(.default, value: snapshot.map(summaryValue) ?? "–")
-            }
-
-            HStack(spacing: DS.Spacing.xs) {
-                Image(systemName: "terminal.fill")
-                Text(active?.label ?? "No active CLI account")
-                    .lineLimit(1)
-
-                Spacer(minLength: DS.Spacing.xs)
-
-                if let snapshot, let caption = windowsCaption(for: snapshot) {
-                    Text(caption.text)
-                        .monospacedDigit()
-                        .lineLimit(1)
-                        .help(caption.help)
-                } else if let snapshot, let billing = noteworthyBillingBadge(for: snapshot.billingUsageMode) {
-                    Text(billing.text)
-                        .foregroundStyle(billing.color)
-                        .lineLimit(1)
-                } else if snapshot == nil {
-                    Text("No snapshot")
-                        .lineLimit(1)
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: DS.Spacing.xs) {
+                    Text(provider.displayName)
+                        .font(.caption.weight(.semibold))
+                    Text(snapshot.map(summaryValue) ?? "–")
+                        .font(.caption.monospacedDigit().weight(.bold))
+                        .foregroundStyle(snapshot.map { DS.billingColor($0.billingUsageMode) } ?? .secondary)
+                        .contentTransition(.numericText())
+                        .animation(.default, value: snapshot.map(summaryValue) ?? "–")
                 }
+
+                Text(summaryDetail(active: active, snapshot: snapshot))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .help(summaryHelp(active: active, snapshot: snapshot))
             }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-            .help(active.map { "Active terminal account: \($0.label)" } ?? "No active CLI account detected")
+
+            Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, DS.Spacing.cardPadding)
-        .padding(.vertical, DS.Spacing.tight)
-        .cardSurface(tint: DS.providerAccent(provider))
+        .padding(.horizontal, DS.Spacing.sm)
+    }
+
+    private func summaryDetail(active: AccountProfile?, snapshot: UsageSnapshot?) -> String {
+        guard let active else { return "No active CLI account" }
+        if let snapshot, let caption = windowsCaption(for: snapshot) {
+            return "\(active.label)  ·  \(caption.text)"
+        }
+        if let snapshot, let billing = noteworthyBillingBadge(for: snapshot.billingUsageMode) {
+            return "\(active.label)  ·  \(billing.text)"
+        }
+        return "\(active.label)  ·  No snapshot"
+    }
+
+    private func summaryHelp(active: AccountProfile?, snapshot: UsageSnapshot?) -> String {
+        guard let active else { return "No active CLI account detected" }
+        var lines = ["Active terminal account: \(active.label)"]
+        if let snapshot, let caption = windowsCaption(for: snapshot) {
+            lines.append(caption.help)
+        }
+        return lines.joined(separator: "\n")
     }
 
     private func summaryValue(for snapshot: UsageSnapshot) -> String {
@@ -696,7 +741,7 @@ struct UsageGauge: View {
                 }
                 .animation(.spring(duration: 0.5, bounce: 0.15), value: window.usedFraction)
             }
-            .frame(height: 4)
+            .frame(height: 6)
         }
         .help(gaugeHelp)
         .accessibilityElement(children: .ignore)
@@ -820,7 +865,7 @@ struct AccountCardPreviewGallery: View {
             .padding(10)
         }
         .background(AmbientUsageBackground())
-        .frame(width: 460, height: 560)
+        .frame(width: 480, height: 620)
     }
 
     @ViewBuilder

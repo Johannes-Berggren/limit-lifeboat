@@ -17,7 +17,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         super.init()
         popover.behavior = .transient
         popover.delegate = self
-        popover.contentSize = NSSize(width: 460, height: 560)
+        popover.contentSize = NSSize(width: 480, height: 620)
         popover.contentViewController = NSHostingController(rootView: MenuRootView(state: state))
 
         if let button = statusItem.button {
