@@ -11,7 +11,9 @@ usage-based overage.
 - **Accounts register themselves.** Log into Claude Code (`claude`) or
   Codex (`codex login`) in your terminal; on the next refresh the app
   detects the login, creates (or links) the account, and saves an encrypted
-  credential snapshot in your macOS Keychain. No manual setup steps.
+  credential snapshot in your macOS Keychain. Changes made by Conductor,
+  Claude, Codex, or another terminal are reconciled automatically; opening
+  the popover always triggers an immediate check. No manual setup steps.
 - **Usage is read locally.** For the active account per provider, the app
   briefly launches Claude Code in screen-reader mode and parses `/usage`,
   and reads recent local Codex session logs for rate-limit status. Claude
@@ -30,7 +32,9 @@ usage-based overage.
   "Switch CLI to this account" button. The app captures the current login
   first (nothing is lost), backs up the files it touches, restores the
   target account's credentials, and verifies the CLI now reports the right
-  account. Backups live in
+  account. If another app changes the credentials during the switch, its
+  change wins and this app asks you to retry. Unrelated Claude/Codex and MCP
+  settings are preserved. Backups live in
   `~/Library/Application Support/LLMUsageMonitor/Backups/`.
 - The menu bar shows the active accounts at a glance
   (`Claude 42%  Codex 87%`), turning orange near 80% used and red when

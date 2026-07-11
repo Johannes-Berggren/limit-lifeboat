@@ -19,6 +19,7 @@ public protocol ClaudeCLICredentialSource: Sendable {
     /// The full keychain item JSON, or nil when no item exists (logged out).
     func readLiveItemJSON() throws -> Data?
     func writeLiveItemJSON(_ data: Data) throws
+    func deleteLiveItem() throws
 }
 
 /// Reads and writes the "Claude Code-credentials" generic password via
@@ -66,6 +67,20 @@ public struct ClaudeCodeCredentialsKeychain: ClaudeCLICredentialSource {
         let result = try runSecurity(arguments: ["-i"], input: Data((command + "\n").utf8))
 
         guard result.status == 0 else {
+            throw ClaudeCodeCredentialsKeychainError.securityToolFailed(
+                status: result.status,
+                message: result.errorOutput
+            )
+        }
+    }
+
+    public func deleteLiveItem() throws {
+        let result = try runSecurity(arguments: [
+            "delete-generic-password",
+            "-a", NSUserName(),
+            "-s", Self.serviceName
+        ])
+        guard result.status == 0 || result.status == Self.itemNotFoundStatus else {
             throw ClaudeCodeCredentialsKeychainError.securityToolFailed(
                 status: result.status,
                 message: result.errorOutput

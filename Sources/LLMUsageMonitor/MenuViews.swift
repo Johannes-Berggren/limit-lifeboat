@@ -153,11 +153,14 @@ struct MenuRootView: View {
                 emptyProviderCard(provider)
             } else {
                 ForEach(profiles) { profile in
+                    let storedStatus = state.storedSnapshotStatus(for: profile)
                     AccountRowView(
                         profile: profile,
                         snapshot: state.snapshots[profile.id],
-                        hasStoredSnapshot: state.hasStoredSnapshot(for: profile),
-                        refreshState: state.refreshStates[profile.id] ?? .idle,
+                        hasStoredSnapshot: storedStatus == .present,
+                        refreshState: storedStatus == .locked
+                            ? .keychainLocked
+                            : (state.refreshStates[profile.id] ?? .idle),
                         estimates: state.burnRateEstimates[profile.id] ?? [:],
                         adviceReason: advisedID == profile.id ? state.switchAdvice[provider]?.reason : nil,
                         historyRecords: { state.historyRecords(for: profile) },
@@ -238,7 +241,6 @@ struct AccountRowView: View {
 
     @State private var showsRenameAlert = false
     @State private var renameText = ""
-    @State private var showsScopedWindows = false
     @State private var showsBillingDetails = false
     @State private var showsHistory = false
 
@@ -318,7 +320,9 @@ struct AccountRowView: View {
             Menu {
                 Button("Open Dashboard…") { openDashboard() }
                 Button("Log In via Terminal") { beginCLILogin() }
-                Button("Save CLI Snapshot Now") { captureCLI() }
+                if profile.isActiveCLI {
+                    Button("Save CLI Snapshot Now") { captureCLI() }
+                }
                 Divider()
                 Button("Usage History…") { showsHistory = true }
                 Button("Billing Details…") { showsBillingDetails = true }
@@ -349,43 +353,21 @@ struct AccountRowView: View {
     @ViewBuilder
     private var gauges: some View {
         let groups = presentation.gauges
-        let visible = groups.alwaysVisible + (showsScopedWindows ? groups.collapsible : [])
 
-        if !visible.isEmpty {
+        if !groups.visible.isEmpty {
             LazyVGrid(columns: gaugeColumns, alignment: .leading, spacing: DS.Spacing.tight) {
-                ForEach(visible) { window in
+                ForEach(groups.visible) { window in
                     UsageGauge(window: window, estimate: estimates[window.id])
                 }
             }
         }
 
-        if groups.needsSessionCaptureNote || !groups.collapsible.isEmpty {
+        if groups.needsSessionCaptureNote {
             HStack(spacing: DS.Spacing.sm) {
-                if groups.needsSessionCaptureNote {
-                    Label("Session not captured", systemImage: "clock.badge.questionmark")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .help("The last reading predates session-limit support; the next refresh adds it.")
-                }
-
-                Spacer(minLength: 0)
-
-                if !groups.collapsible.isEmpty {
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.15)) {
-                            showsScopedWindows.toggle()
-                        }
-                    } label: {
-                        Label(
-                            showsScopedWindows ? "Show less" : "+\(groups.collapsible.count) limits",
-                            systemImage: showsScopedWindows ? "chevron.up" : "chevron.down"
-                        )
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help(showsScopedWindows ? "Hide healthy model-specific weekly limits" : "Show healthy model-specific weekly limits")
-                }
+                Label("Session not captured", systemImage: "clock.badge.questionmark")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .help("The last reading predates session-limit support; the next refresh adds it.")
             }
         }
     }

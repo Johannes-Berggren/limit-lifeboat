@@ -1,5 +1,11 @@
 import Foundation
 
+struct CredentialRestoreHooks {
+    var beforeDestinationCheck: ((URL) throws -> Void)?
+
+    static let none = CredentialRestoreHooks()
+}
+
 /// Executes the backup/write/rollback transaction independently of provider
 /// capture and account selection. Every destination is backed up before the
 /// first write; failures restore files and the live Claude keychain item.
@@ -8,22 +14,42 @@ final class CredentialRestoreTransaction {
     private let backupDirectory: URL
     private let fileManager: FileManager
     private let claudeCredentialSource: ClaudeCLICredentialSource
+    private let hooks: CredentialRestoreHooks
 
     init(
         homeDirectory: URL,
         backupDirectory: URL,
         fileManager: FileManager,
-        claudeCredentialSource: ClaudeCLICredentialSource
+        claudeCredentialSource: ClaudeCLICredentialSource,
+        hooks: CredentialRestoreHooks = .none
     ) {
         self.homeDirectory = homeDirectory
         self.backupDirectory = backupDirectory
         self.fileManager = fileManager
         self.claudeCredentialSource = claudeCredentialSource
+        self.hooks = hooks
     }
 
-    func restore(_ snapshot: CredentialSnapshot) throws -> RestoreResult {
-        let fileItems = snapshot.items.filter { $0.kind != .keychainJSONFields }
-        let keychainItems = snapshot.items.filter { $0.kind == .keychainJSONFields }
+    func restore(
+        _ snapshot: CredentialSnapshot,
+        expectedLiveFingerprint: String?? = nil
+    ) throws -> RestoreResult {
+        try validateExpectedLiveFingerprint(expectedLiveFingerprint, provider: snapshot.provider)
+        var normalizedItems = try snapshot.items.map { try normalized($0, provider: snapshot.provider) }
+        if snapshot.provider == .claude {
+            appendMissingClaudeRemovalPatch(
+                relativePath: "Library/Application Support/Claude/config.json",
+                ownedKeys: ClaudeCredentialAdapter.configOwnedKeys,
+                to: &normalizedItems
+            )
+            appendMissingClaudeRemovalPatch(
+                relativePath: ".claude.json",
+                ownedKeys: ClaudeCredentialAdapter.accountOwnedKeys,
+                to: &normalizedItems
+            )
+        }
+        let fileItems = normalizedItems.filter { $0.kind != .keychainJSONFields }
+        let keychainItems = normalizedItems.filter { $0.kind == .keychainJSONFields }
 
         // Phase 1: back up every existing destination into one directory per
         // restore call before writing a single byte, so a failure here leaves
@@ -31,10 +57,20 @@ final class CredentialRestoreTransaction {
         // JSON file alongside the file backups.
         let restoreBackupDirectory = backupDirectory.appendingPathComponent(uniqueBackupDirectoryName(), isDirectory: true)
         var backups: [URL] = []
-        var backedUp: [(destination: URL, backup: URL)] = []
+        var baselines: [String: Data] = [:]
+        var baselinePermissions: [String: Int] = [:]
+        var missingBaselines: Set<String> = []
 
         for item in fileItems {
             let destination = resolve(relativePath: item.relativePath)
+            let baseline = fileManager.fileExists(atPath: destination.path) ? try Data(contentsOf: destination) : nil
+            if let baseline {
+                baselines[destination.path] = baseline
+                baselinePermissions[destination.path] =
+                    (try? fileManager.attributesOfItem(atPath: destination.path)[.posixPermissions]) as? Int
+            } else {
+                missingBaselines.insert(destination.path)
+            }
             guard fileManager.fileExists(atPath: destination.path) else {
                 continue
             }
@@ -46,7 +82,6 @@ final class CredentialRestoreTransaction {
                 }
                 try fileManager.copyItem(at: destination, to: backup)
                 backups.append(backup)
-                backedUp.append((destination, backup))
             } catch {
                 throw CLISwitcherError.backupFailed(path: destination.path, underlying: error)
             }
@@ -76,20 +111,38 @@ final class CredentialRestoreTransaction {
             }
         }
 
+        // Backups can take long enough for Conductor or a CLI to switch the
+        // account. Recheck the provider-owned fingerprint after all backups and
+        // immediately before the first mutation; per-destination byte checks
+        // cover changes from this point onward.
+        try validateExpectedLiveFingerprint(expectedLiveFingerprint, provider: snapshot.provider)
+
         // Phase 2: write all items; on failure roll back from the backups.
         // The keychain merge goes last so a file failure never leaves the CLI
         // logged into a half-switched account.
         var touched: [URL] = []
-        var wroteKeychain = false
+        var writtenFiles: [String: Data] = [:]
+        var writtenKeychain: Data?
         do {
             for item in fileItems {
                 let destination = resolve(relativePath: item.relativePath)
+                if item.onlyIfDestinationExists == true,
+                   !fileManager.fileExists(atPath: destination.path) {
+                    continue
+                }
+                try hooks.beforeDestinationCheck?(destination)
+                let current = fileManager.fileExists(atPath: destination.path) ? try Data(contentsOf: destination) : nil
+                let matchesBaseline = baselines[destination.path].map { current == $0 }
+                    ?? (missingBaselines.contains(destination.path) && current == nil)
+                guard matchesBaseline else {
+                    throw CLISwitcherError.credentialConflict(destination.path)
+                }
                 try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
                 switch item.kind {
                 case .fullFile:
                     try item.contents.write(to: destination, options: [.atomic])
                 case .jsonFields:
-                    try mergeJSONFields(item.contents, into: destination)
+                    try mergeJSONFields(item.contents, ownedKeys: item.ownedJSONKeys, into: destination)
                 case .keychainJSONFields:
                     break
                 }
@@ -98,11 +151,16 @@ final class CredentialRestoreTransaction {
                     ofItemAtPath: destination.path
                 )
                 touched.append(destination)
+                writtenFiles[destination.path] = try Data(contentsOf: destination)
             }
             for item in keychainItems {
+                let current = try claudeCredentialSource.readLiveItemJSON()
+                guard current == liveKeychainBackup else {
+                    throw CLISwitcherError.credentialConflict(CLISwitcher.claudeKeychainItemPath)
+                }
                 let merged = mergeClaudeAiOauth(item.contents, intoItemJSON: liveKeychainBackup)
                 try claudeCredentialSource.writeLiveItemJSON(merged)
-                wroteKeychain = true
+                writtenKeychain = merged
             }
             if snapshot.provider == .claude, keychainItems.isEmpty,
                let liveKeychainBackup,
@@ -114,21 +172,75 @@ final class CredentialRestoreTransaction {
                 // Every sibling key (especially mcpOAuth) stays in place.
                 liveObject.removeValue(forKey: "claudeAiOauth")
                 let loggedOut = try JSONSerialization.data(withJSONObject: liveObject, options: [.sortedKeys])
+                let current = try claudeCredentialSource.readLiveItemJSON()
+                guard current == liveKeychainBackup else {
+                    throw CLISwitcherError.credentialConflict(CLISwitcher.claudeKeychainItemPath)
+                }
                 try claudeCredentialSource.writeLiveItemJSON(loggedOut)
-                wroteKeychain = true
+                writtenKeychain = loggedOut
             }
         } catch {
-            for (destination, backup) in backedUp {
-                try? fileManager.removeItem(at: destination)
-                try? fileManager.copyItem(at: backup, to: destination)
+            var rollbackConflicts: [String] = []
+            for destination in touched.reversed() {
+                guard let written = writtenFiles[destination.path] else { continue }
+                let current = try? Data(contentsOf: destination)
+                guard current == written else {
+                    rollbackConflicts.append(destination.path)
+                    continue
+                }
+                do {
+                    if let baseline = baselines[destination.path] {
+                        try baseline.write(to: destination, options: [.atomic])
+                        if let permissions = baselinePermissions[destination.path] {
+                            try fileManager.setAttributes([.posixPermissions: permissions], ofItemAtPath: destination.path)
+                        }
+                    } else if fileManager.fileExists(atPath: destination.path) {
+                        try fileManager.removeItem(at: destination)
+                    }
+                } catch {
+                    rollbackConflicts.append(destination.path)
+                }
             }
-            if wroteKeychain, let liveKeychainBackup {
-                try? claudeCredentialSource.writeLiveItemJSON(liveKeychainBackup)
+            if let writtenKeychain {
+                do {
+                    if try claudeCredentialSource.readLiveItemJSON() == writtenKeychain {
+                        if let liveKeychainBackup {
+                            try claudeCredentialSource.writeLiveItemJSON(liveKeychainBackup)
+                        } else {
+                            try claudeCredentialSource.deleteLiveItem()
+                        }
+                    } else {
+                        rollbackConflicts.append(CLISwitcher.claudeKeychainItemPath)
+                    }
+                } catch {
+                    rollbackConflicts.append(CLISwitcher.claudeKeychainItemPath)
+                }
+            }
+            if !rollbackConflicts.isEmpty {
+                throw CLISwitcherError.rollbackConflict(paths: rollbackConflicts, underlying: error)
             }
             throw error
         }
 
         return RestoreResult(touchedPaths: touched, backupURLs: backups)
+    }
+
+    private func validateExpectedLiveFingerprint(_ expected: String??, provider: Provider) throws {
+        guard let expected else { return }
+        let observation: LiveCredentialObservation
+        switch provider {
+        case .codex:
+            observation = try CodexCredentialAdapter(homeDirectory: homeDirectory, fileManager: fileManager).observe()
+        case .claude:
+            observation = try ClaudeCredentialAdapter(
+                homeDirectory: homeDirectory,
+                fileManager: fileManager,
+                credentialSource: claudeCredentialSource
+            ).observe()
+        }
+        guard observation.credentialFingerprint == expected else {
+            throw CLISwitcherError.credentialConflict("live \(provider.displayName) credentials")
+        }
     }
 
     private func resolve(relativePath: String) -> URL {
@@ -137,7 +249,7 @@ final class CredentialRestoreTransaction {
         }
     }
 
-    private func mergeJSONFields(_ fieldsData: Data, into url: URL) throws {
+    private func mergeJSONFields(_ fieldsData: Data, ownedKeys: [String]?, into url: URL) throws {
         guard let fields = try JSONSerialization.jsonObject(with: fieldsData) as? [String: Any] else {
             throw CLISwitcherError.invalidJSON(url.path)
         }
@@ -149,11 +261,62 @@ final class CredentialRestoreTransaction {
             }
             destinationObject = parsed
         }
+        for key in ownedKeys ?? [] {
+            destinationObject.removeValue(forKey: key)
+        }
         for (key, value) in fields {
             destinationObject[key] = value
         }
         let data = try JSONSerialization.data(withJSONObject: destinationObject, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: url, options: [.atomic])
+    }
+
+    /// Converts snapshots from older builds that captured whole auth files into
+    /// provider-owned field patches before a byte is written.
+    private func normalized(_ item: CredentialSnapshotItem, provider: Provider) throws -> CredentialSnapshotItem {
+        let ownedKeys: [String]?
+        switch (provider, item.relativePath) {
+        case (.codex, ".codex/auth.json"):
+            ownedKeys = CodexCredentialAdapter.ownedKeys
+        case (.claude, ".claude.json"):
+            ownedKeys = ClaudeCredentialAdapter.accountOwnedKeys
+        case (.claude, "Library/Application Support/Claude/config.json"):
+            ownedKeys = ClaudeCredentialAdapter.configOwnedKeys
+        default:
+            ownedKeys = item.ownedJSONKeys
+        }
+        guard let ownedKeys, item.kind != .keychainJSONFields else { return item }
+        guard let object = try JSONSerialization.jsonObject(with: item.contents) as? [String: Any] else {
+            throw CLISwitcherError.invalidJSON(item.relativePath)
+        }
+        let fields = ownedKeys.reduce(into: [String: Any]()) { result, key in result[key] = object[key] }
+        let data = try JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys])
+        return CredentialSnapshotItem(
+            relativePath: item.relativePath,
+            kind: .jsonFields,
+            contents: data,
+            posixPermissions: item.posixPermissions,
+            ownedJSONKeys: ownedKeys,
+            onlyIfDestinationExists: item.onlyIfDestinationExists ?? false
+        )
+    }
+
+    private func appendMissingClaudeRemovalPatch(
+        relativePath: String,
+        ownedKeys: [String],
+        to items: inout [CredentialSnapshotItem]
+    ) {
+        guard !items.contains(where: { $0.relativePath == relativePath }) else { return }
+        items.append(
+            CredentialSnapshotItem(
+                relativePath: relativePath,
+                kind: .jsonFields,
+                contents: Data("{}".utf8),
+                posixPermissions: nil,
+                ownedJSONKeys: ownedKeys,
+                onlyIfDestinationExists: true
+            )
+        )
     }
 
     private func uniqueBackupDirectoryName() -> String {

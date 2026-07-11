@@ -5,8 +5,19 @@ import Foundation
 public protocol ClaudeOAuthCredentialProviding: AnyObject {
     func liveClaudeOAuthCredentials() -> ClaudeOAuthCredentials?
     func writeLiveClaudeOAuthCredentials(_ credentials: ClaudeOAuthCredentials) throws
+    @discardableResult
+    func replaceLiveClaudeOAuthCredentials(
+        _ credentials: ClaudeOAuthCredentials,
+        ifAccessTokenMatches expectedAccessToken: String
+    ) throws -> Bool
     func storedClaudeOAuthCredentials(for profileID: UUID) throws -> ClaudeOAuthCredentials?
     func updateStoredClaudeOAuthCredentials(_ credentials: ClaudeOAuthCredentials, for profileID: UUID) throws
+    @discardableResult
+    func replaceStoredClaudeOAuthCredentials(
+        _ credentials: ClaudeOAuthCredentials,
+        for profileID: UUID,
+        ifAccessTokenMatches expectedAccessToken: String
+    ) throws -> Bool
 }
 
 extension CLISwitcher: ClaudeOAuthCredentialProviding {}
@@ -180,10 +191,16 @@ public struct ClaudeAccountUsageService {
         // means the item changed owner mid-flight (the user switched
         // accounts during the await), and the old profile's tokens must not
         // overwrite the new live item.
-        try? credentials.updateStoredClaudeOAuthCredentials(refreshed, for: profile.id)
-        if updateLiveItem,
-           credentials.liveClaudeOAuthCredentials()?.accessToken == stale.accessToken {
-            try? credentials.writeLiveClaudeOAuthCredentials(refreshed)
+        _ = try? credentials.replaceStoredClaudeOAuthCredentials(
+            refreshed,
+            for: profile.id,
+            ifAccessTokenMatches: stale.accessToken
+        )
+        if updateLiveItem {
+            _ = try? credentials.replaceLiveClaudeOAuthCredentials(
+                refreshed,
+                ifAccessTokenMatches: stale.accessToken
+            )
         }
         return refreshed
     }

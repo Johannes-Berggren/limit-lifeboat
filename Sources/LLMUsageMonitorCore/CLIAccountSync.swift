@@ -23,19 +23,32 @@ public struct CLIAccountSyncPlanner: Sendable {
     public func plan(
         provider: Provider,
         currentIdentity: AccountIdentity?,
-        profiles: [AccountProfile]
+        profiles: [AccountProfile],
+        liveCredentialFingerprint: String? = nil,
+        storedCredentialFingerprints: [UUID: String] = [:],
+        profilesWithStoredCredentials: Set<UUID> = []
     ) -> CLIAccountSyncAction {
-        guard let currentIdentity else {
+        guard currentIdentity != nil || liveCredentialFingerprint != nil else {
             return .deactivateAll
         }
 
         let providerProfiles = profiles.filter { $0.provider == provider }
 
-        if let match = providerProfiles.first(where: { $0.identity?.matches(currentIdentity) == true }) {
+        if let liveCredentialFingerprint,
+           let match = providerProfiles.first(where: {
+               storedCredentialFingerprints[$0.id] == liveCredentialFingerprint
+           }) {
             return .activate(match.id)
         }
 
-        if let placeholder = providerProfiles.first(where: { $0.identity == nil }) {
+        if let currentIdentity,
+           let match = providerProfiles.first(where: { $0.identity?.matches(currentIdentity) == true }) {
+            return .activate(match.id)
+        }
+
+        if let placeholder = providerProfiles.first(where: {
+            $0.identity == nil && !profilesWithStoredCredentials.contains($0.id)
+        }) {
             return .adopt(placeholder.id)
         }
 

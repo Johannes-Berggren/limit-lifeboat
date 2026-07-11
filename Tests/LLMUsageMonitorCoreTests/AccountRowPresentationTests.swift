@@ -18,7 +18,7 @@ final class AccountRowPresentationTests: XCTestCase {
         XCTAssertNotNil(presentation.footerNote)
     }
 
-    func testAtRiskScopedWindowsStayVisibleAndHealthyOnesCollapse() {
+    func testEveryScopedWindowIsVisibleInDenseView() {
         let profile = AccountProfile(provider: .claude, label: "Claude", isActiveCLI: true)
         let windows = [
             UsageSnapshotFactory.window(
@@ -51,8 +51,7 @@ final class AccountRowPresentationTests: XCTestCase {
             adviceReason: nil
         )
 
-        XCTAssertEqual(presentation.gauges.alwaysVisible.map(\.id), ["session", "weekly-risk"])
-        XCTAssertEqual(presentation.gauges.collapsible.map(\.id), ["weekly-ok"])
+        XCTAssertEqual(presentation.gauges.visible.map(\.id), ["session", "weekly-risk", "weekly-ok"])
     }
 
     func testAdviceHighlightsAndLabelsSwitch() {

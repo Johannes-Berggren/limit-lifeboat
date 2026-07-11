@@ -6,6 +6,8 @@ public enum CLISwitcherError: Error, LocalizedError {
     case providerMismatch(expected: Provider, actual: Provider)
     case invalidJSON(String)
     case backupFailed(path: String, underlying: Error)
+    case credentialConflict(String)
+    case rollbackConflict(paths: [String], underlying: Error)
 
     public var errorDescription: String? {
         switch self {
@@ -19,6 +21,10 @@ public enum CLISwitcherError: Error, LocalizedError {
             return "Could not parse JSON at \(path)."
         case .backupFailed(let path, let underlying):
             return "Could not back up \(path) before switching; nothing was changed. (\(underlying.localizedDescription))"
+        case .credentialConflict(let path):
+            return "Credentials changed in another app at \(path). The outside change was preserved; refresh and try again."
+        case .rollbackConflict(let paths, let underlying):
+            return "The switch failed and outside changes were preserved at \(paths.joined(separator: ", ")). \(underlying.localizedDescription)"
         }
     }
 }
@@ -57,7 +63,22 @@ public final class CLISwitcher {
     }
 
     public func captureAndStoreSnapshot(for profile: AccountProfile) throws -> CredentialSnapshot {
-        var snapshot = try captureSnapshot(provider: profile.provider)
+        let observation = try liveObservation(provider: profile.provider)
+        return try storeObservation(observation, for: profile)
+    }
+
+    public func storeObservation(_ observation: LiveCredentialObservation, for profile: AccountProfile) throws -> CredentialSnapshot {
+        guard observation.provider == profile.provider else {
+            throw CLISwitcherError.providerMismatch(expected: profile.provider, actual: observation.provider)
+        }
+        guard var snapshot = observation.snapshot else {
+            throw CLISwitcherError.missingCredentials(profile.provider.displayName)
+        }
+        if let liveIdentity = observation.identity,
+           let profileIdentity = profile.identity,
+           !profileIdentity.matches(liveIdentity) {
+            throw CLISwitcherError.credentialConflict("live \(profile.provider.displayName) identity")
+        }
 
         // A logged-out terminal must not erase the profile's captured OAuth
         // token: when the fresh capture has no keychain item but the stored
@@ -74,6 +95,28 @@ public final class CLISwitcher {
         return snapshot
     }
 
+    public func liveObservation(provider: Provider) throws -> LiveCredentialObservation {
+        switch provider {
+        case .codex:
+            return try codexCredentials.observe()
+        case .claude:
+            return try claudeCredentials.observe()
+        }
+    }
+
+    /// A short, synchronous stabilization gate for explicit capture/switch
+    /// actions. File-driven/background paths use the async equivalent in
+    /// AppState so they do not block the main actor.
+    public func stableLiveObservation(provider: Provider, delay: TimeInterval = 0.25) throws -> LiveCredentialObservation {
+        let first = try liveObservation(provider: provider)
+        Thread.sleep(forTimeInterval: delay)
+        let second = try liveObservation(provider: provider)
+        guard first.stabilityKey == second.stabilityKey else {
+            throw CLISwitcherError.credentialConflict("live \(provider.displayName) credentials")
+        }
+        return second
+    }
+
     public func captureSnapshot(provider: Provider) throws -> CredentialSnapshot {
         switch provider {
         case .codex:
@@ -83,19 +126,33 @@ public final class CLISwitcher {
         }
     }
 
-    public func restoreSnapshot(for profile: AccountProfile) throws -> RestoreResult {
+    public func restoreSnapshot(
+        for profile: AccountProfile,
+        expectedLiveFingerprint: String? = nil,
+        enforceExpectedLiveState: Bool = false
+    ) throws -> RestoreResult {
         guard let snapshot = try credentialStore.loadSnapshot(for: profile.id) else {
             throw CLISwitcherError.missingStoredSnapshot(profile.id)
         }
         guard snapshot.provider == profile.provider else {
             throw CLISwitcherError.providerMismatch(expected: profile.provider, actual: snapshot.provider)
         }
+        let shouldEnforceLiveState = enforceExpectedLiveState || expectedLiveFingerprint != nil
+        if shouldEnforceLiveState {
+            let actual = try liveObservation(provider: profile.provider).credentialFingerprint
+            guard actual == expectedLiveFingerprint else {
+                throw CLISwitcherError.credentialConflict("live \(profile.provider.displayName) credentials")
+            }
+        }
         return try CredentialRestoreTransaction(
             homeDirectory: homeDirectory,
             backupDirectory: backupDirectory,
             fileManager: fileManager,
             claudeCredentialSource: claudeCLICredentialSource
-        ).restore(snapshot)
+        ).restore(
+            snapshot,
+            expectedLiveFingerprint: shouldEnforceLiveState ? .some(expectedLiveFingerprint) : nil
+        )
     }
 
     public func deleteStoredSnapshot(for profileID: UUID) throws {
@@ -103,16 +160,15 @@ public final class CLISwitcher {
     }
 
     public func currentIdentity(provider: Provider) -> AccountIdentity? {
-        switch provider {
-        case .claude:
-            return claudeCredentials.currentIdentity()
-        case .codex:
-            return codexCredentials.currentIdentity()
-        }
+        (try? liveObservation(provider: provider))?.identity
     }
 
     public func hasStoredSnapshot(for profile: AccountProfile) throws -> Bool {
         try credentialStore.hasSnapshot(for: profile.id)
+    }
+
+    public func storedCredentialFingerprint(for profileID: UUID) throws -> String? {
+        try credentialStore.loadSnapshot(for: profileID).map(CredentialFingerprint.make(for:))
     }
 
     public func validateActiveLogin(provider: Provider) -> Bool {
@@ -146,6 +202,25 @@ public final class CLISwitcher {
         try claudeCLICredentialSource.writeLiveItemJSON(merged)
     }
 
+    @discardableResult
+    public func replaceLiveClaudeOAuthCredentials(
+        _ credentials: ClaudeOAuthCredentials,
+        ifAccessTokenMatches expectedAccessToken: String
+    ) throws -> Bool {
+        let live = try claudeCLICredentialSource.readLiveItemJSON()
+        guard live.flatMap({ ClaudeOAuthCredentials.extract(fromKeychainItemJSON: $0) })?.accessToken == expectedAccessToken else {
+            return false
+        }
+        let merged = mergeClaudeAiOauth(credentials.rawClaudeAiOauth, intoItemJSON: live)
+        // Re-read at the last mutation boundary. Keychain has no cross-process
+        // compare-and-swap, but this prevents every detectable outside change.
+        guard try claudeCLICredentialSource.readLiveItemJSON() == live else {
+            return false
+        }
+        try claudeCLICredentialSource.writeLiveItemJSON(merged)
+        return true
+    }
+
     /// The OAuth tokens captured into a profile's stored snapshot, if any.
     public func storedClaudeOAuthCredentials(for profileID: UUID) throws -> ClaudeOAuthCredentials? {
         guard let snapshot = try credentialStore.loadSnapshot(for: profileID),
@@ -174,6 +249,19 @@ public final class CLISwitcher {
             )
         }
         try credentialStore.save(snapshot: snapshot, for: profileID)
+    }
+
+    @discardableResult
+    public func replaceStoredClaudeOAuthCredentials(
+        _ credentials: ClaudeOAuthCredentials,
+        for profileID: UUID,
+        ifAccessTokenMatches expectedAccessToken: String
+    ) throws -> Bool {
+        guard try storedClaudeOAuthCredentials(for: profileID)?.accessToken == expectedAccessToken else {
+            return false
+        }
+        try updateStoredClaudeOAuthCredentials(credentials, for: profileID)
+        return true
     }
 
     /// The raw `~/.codex/auth.json` captured into a profile's stored snapshot,
