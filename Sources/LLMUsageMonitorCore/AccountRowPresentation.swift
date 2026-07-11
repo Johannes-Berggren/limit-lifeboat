@@ -37,13 +37,14 @@ public struct BillingBadgePresentation: Equatable, Sendable {
 }
 
 public struct AccountGaugeGroups: Equatable, Sendable {
-    public var alwaysVisible: [UsageWindow]
-    public var collapsible: [UsageWindow]
+    /// Every limit is visible in the dense card. Keeping this in the pure
+    /// presentation model makes it impossible for the SwiftUI layer to
+    /// accidentally reintroduce a second collapsed state.
+    public var visible: [UsageWindow]
     public var needsSessionCaptureNote: Bool
 
-    public init(alwaysVisible: [UsageWindow], collapsible: [UsageWindow], needsSessionCaptureNote: Bool) {
-        self.alwaysVisible = alwaysVisible
-        self.collapsible = collapsible
+    public init(visible: [UsageWindow], needsSessionCaptureNote: Bool) {
+        self.visible = visible
         self.needsSessionCaptureNote = needsSessionCaptureNote
     }
 }
@@ -219,17 +220,12 @@ public struct AccountRowPresentation: Equatable, Sendable {
 
     private static func gaugeGroups(profile: AccountProfile, snapshot: UsageSnapshot?) -> AccountGaugeGroups {
         let ordered = snapshot?.orderedDisplayWindows ?? []
-        let primary = ordered.filter { $0.kind != .weeklyScoped }
-        let scoped = ordered.filter { $0.kind == .weeklyScoped }
-        let atRisk = scoped.filter { $0.riskLevel == .warning || $0.riskLevel == .depleted }
-        let collapsible = scoped.filter { $0.riskLevel != .warning && $0.riskLevel != .depleted }
         let needsSession = profile.isActiveCLI
             && profile.provider == .claude
             && !ordered.isEmpty
             && !ordered.contains(where: { $0.kind == .session })
         return AccountGaugeGroups(
-            alwaysVisible: primary + atRisk,
-            collapsible: collapsible,
+            visible: ordered,
             needsSessionCaptureNote: needsSession
         )
     }

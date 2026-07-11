@@ -74,6 +74,39 @@ final class CLIAccountSyncPlannerTests: XCTestCase {
         XCTAssertEqual(planner.plan(provider: .claude, currentIdentity: identity, profiles: profiles), .create)
     }
 
+    func testCredentialFingerprintWinsBeforeStaleIdentity() {
+        let first = profile(.codex, email: "first@example.com")
+        let second = profile(.codex, email: "second@example.com")
+        let staleIdentity = AccountIdentity(email: "first@example.com", source: .codexIDToken)
+
+        XCTAssertEqual(
+            planner.plan(
+                provider: .codex,
+                currentIdentity: staleIdentity,
+                profiles: [first, second],
+                liveCredentialFingerprint: "second-fingerprint",
+                storedCredentialFingerprints: [second.id: "second-fingerprint"],
+                profilesWithStoredCredentials: [first.id, second.id]
+            ),
+            .activate(second.id)
+        )
+    }
+
+    func testPopulatedPlaceholderIsNeverAdopted() {
+        let populated = placeholder(.claude)
+        let identity = AccountIdentity(email: "new@example.com", source: .claudeCodeUsage)
+
+        XCTAssertEqual(
+            planner.plan(
+                provider: .claude,
+                currentIdentity: identity,
+                profiles: [populated],
+                profilesWithStoredCredentials: [populated.id]
+            ),
+            .create
+        )
+    }
+
     func testNeverMatchesAcrossProviders() {
         let profiles = [profile(.codex, email: "same@example.com"), placeholder(.codex)]
         let identity = AccountIdentity(email: "same@example.com", source: .claudeCodeUsage)

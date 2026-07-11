@@ -298,6 +298,15 @@ private final class FakeCredentialProvider: ClaudeOAuthCredentialProviding, @unc
         live = credentials
     }
 
+    func replaceLiveClaudeOAuthCredentials(
+        _ credentials: ClaudeOAuthCredentials,
+        ifAccessTokenMatches expectedAccessToken: String
+    ) throws -> Bool {
+        guard live?.accessToken == expectedAccessToken else { return false }
+        live = credentials
+        return true
+    }
+
     func storedClaudeOAuthCredentials(for profileID: UUID) throws -> ClaudeOAuthCredentials? {
         if let storedError {
             throw storedError
@@ -307,6 +316,16 @@ private final class FakeCredentialProvider: ClaudeOAuthCredentialProviding, @unc
 
     func updateStoredClaudeOAuthCredentials(_ credentials: ClaudeOAuthCredentials, for profileID: UUID) throws {
         stored[profileID] = credentials
+    }
+
+    func replaceStoredClaudeOAuthCredentials(
+        _ credentials: ClaudeOAuthCredentials,
+        for profileID: UUID,
+        ifAccessTokenMatches expectedAccessToken: String
+    ) throws -> Bool {
+        guard stored[profileID]?.accessToken == expectedAccessToken else { return false }
+        stored[profileID] = credentials
+        return true
     }
 }
 

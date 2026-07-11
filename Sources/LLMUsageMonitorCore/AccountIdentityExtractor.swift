@@ -262,11 +262,15 @@ public struct ClaudeIdentityReader {
     public func readIdentity(now: Date = Date()) -> AccountIdentity? {
         let configURL = homeDirectory.appendingPathComponent(".claude.json")
         guard fileManager.fileExists(atPath: configURL.path),
-              let data = try? Data(contentsOf: configURL),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let account = object["oauthAccount"] as? [String: Any] else {
+              let data = try? Data(contentsOf: configURL) else {
             return nil
         }
+        return Self.identity(fromClaudeJSON: data, now: now)
+    }
+
+    public static func identity(fromClaudeJSON data: Data, now: Date = Date()) -> AccountIdentity? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let account = object["oauthAccount"] as? [String: Any] else { return nil }
 
         let email = account["emailAddress"] as? String
         let displayName = account["displayName"] as? String
