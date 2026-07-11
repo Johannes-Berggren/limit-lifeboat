@@ -40,15 +40,20 @@ struct UsageHistoryChartView: View {
         var id: String { "\(label)|\(timestamp.timeIntervalSince1970)" }
     }
 
+    private struct LatestValue: Identifiable {
+        let label: String
+        let usedPercent: Double
+        var id: String { label }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: DS.Spacing.md) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Usage History")
-                        .font(.headline)
-                    Text(profile.label)
+                        .font(.title3.weight(.semibold))
+                    ProviderLabel(text: profile.label, provider: profile.provider)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
                 Spacer()
                 Picker("Scope", selection: $scope) {
@@ -69,6 +74,27 @@ struct UsageHistoryChartView: View {
                 )
                 .frame(minHeight: 220)
             } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: DS.Spacing.sm) {
+                        ForEach(latestValues) { value in
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(value.label)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                Text("\(Int(value.usedPercent.rounded()))%")
+                                    .font(.caption.monospacedDigit().weight(.semibold))
+                            }
+                            .padding(.horizontal, DS.Spacing.sm)
+                            .padding(.vertical, DS.Spacing.tight)
+                            .background(
+                                Color.primary.opacity(0.04),
+                                in: RoundedRectangle(cornerRadius: DS.Radius.small, style: .continuous)
+                            )
+                        }
+                    }
+                }
+
                 Chart(points) { point in
                     LineMark(
                         x: .value("Time", point.timestamp),
@@ -76,8 +102,17 @@ struct UsageHistoryChartView: View {
                     )
                     .foregroundStyle(by: .value("Window", point.label))
                     .interpolationMethod(.monotone)
+                    .lineStyle(StrokeStyle(lineWidth: 2))
+
+                    PointMark(
+                        x: .value("Time", point.timestamp),
+                        y: .value("Used", point.usedPercent)
+                    )
+                    .foregroundStyle(by: .value("Window", point.label))
+                    .symbolSize(16)
                 }
                 .chartYScale(domain: 0...100)
+                .chartLegend(position: .top, alignment: .leading, spacing: DS.Spacing.sm)
                 .chartYAxis {
                     AxisMarks(values: [0, 25, 50, 75, 100]) { value in
                         AxisGridLine()
@@ -89,6 +124,7 @@ struct UsageHistoryChartView: View {
                     }
                 }
                 .frame(minHeight: 220)
+                .accessibilityLabel("Usage history for \(profile.label)")
             }
 
             HStack {
@@ -97,8 +133,9 @@ struct UsageHistoryChartView: View {
                     .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(DS.Spacing.md)
-        .frame(width: 460)
+        .padding(DS.Spacing.lg)
+        .frame(width: 520)
+        .frame(minHeight: 360)
     }
 
     private var points: [Point] {
@@ -110,6 +147,15 @@ struct UsageHistoryChartView: View {
                     Point(timestamp: record.timestamp, label: label(for: reading), usedPercent: reading.usedPercent)
                 }
             }
+    }
+
+    private var latestValues: [LatestValue] {
+        Dictionary(grouping: points, by: \.label)
+            .compactMap { label, values in
+                guard let latest = values.max(by: { $0.timestamp < $1.timestamp }) else { return nil }
+                return LatestValue(label: label, usedPercent: latest.usedPercent)
+            }
+            .sorted { $0.label.localizedStandardCompare($1.label) == .orderedAscending }
     }
 
     private func label(for reading: UsageWindowReading) -> String {

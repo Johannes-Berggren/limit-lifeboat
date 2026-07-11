@@ -79,66 +79,86 @@ struct SettingsView: View {
     @State private var upToDateMessage: String?
 
     var body: some View {
-        Form {
-            Section("General") {
-                Picker("Refresh usage every", selection: $settings.refreshIntervalMinutes) {
-                    ForEach(SettingsStore.refreshIntervalOptions, id: \.self) { minutes in
-                        Text("\(minutes) minutes").tag(minutes)
-                    }
-                }
-
-                Picker("Menu bar shows", selection: $settings.menuBarWindowPreference) {
-                    Text("Most constrained window").tag(MenuBarWindowPreference.mostConstrained)
-                    Text("Session (5-hour)").tag(MenuBarWindowPreference.session)
-                    Text("Weekly").tag(MenuBarWindowPreference.weekly)
-                }
-                .help("Which quota window the menu-bar percentage tracks. A missing window falls back to the most constrained one.")
-
-                Toggle("Launch at login", isOn: $launchAtLogin)
-                    .onChange(of: launchAtLogin) { _, newValue in
-                        applyLaunchAtLogin(newValue)
-                    }
-                    .disabled(!LaunchAtLogin.isSupported)
-                if let launchAtLoginMessage {
-                    Text(launchAtLoginMessage)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                }
-            }
-
-            Section("Notifications") {
-                Toggle("Warn when included usage nears its limit", isOn: $settings.usageAlertsEnabled)
-                Toggle("Alert when an account's quota is likely back", isOn: $settings.resetAlertsEnabled)
-            }
-
-            Section("Switching") {
-                Toggle("Switch CLI automatically when the active account is depleted", isOn: $settings.autoSwitchEnabled)
-                Text("Switches to the account with the most remaining quota and sends a notification. Only fires when another account clearly has more headroom.")
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: DS.Spacing.xs) {
+                Label("LLM Usage Monitor", systemImage: "gauge.with.dots.needle.67percent")
+                    .font(.title3.weight(.semibold))
+                Text("Choose how usage is refreshed, shown, and acted on.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            .padding(.horizontal, DS.Spacing.xl)
+            .padding(.top, DS.Spacing.lg)
+            .padding(.bottom, DS.Spacing.sm)
 
-            Section("Updates") {
-                LabeledContent("Version", value: AppInfo.version)
-                if let update = state.availableUpdate {
-                    Button("Download version \(update.version)…") {
-                        state.openAvailableUpdate()
+            Form {
+                Section("General") {
+                    Picker("Refresh usage every", selection: $settings.refreshIntervalMinutes) {
+                        ForEach(SettingsStore.refreshIntervalOptions, id: \.self) { minutes in
+                            Text("\(minutes) minutes").tag(minutes)
+                        }
                     }
-                } else {
-                    Button(isCheckingForUpdates ? "Checking…" : "Check for Updates") {
-                        checkForUpdates()
+
+                    Picker("Menu bar shows", selection: $settings.menuBarWindowPreference) {
+                        Text("Most constrained window").tag(MenuBarWindowPreference.mostConstrained)
+                        Text("Session (5-hour)").tag(MenuBarWindowPreference.session)
+                        Text("Weekly").tag(MenuBarWindowPreference.weekly)
                     }
-                    .disabled(isCheckingForUpdates)
-                    if let upToDateMessage {
-                        Text(upToDateMessage)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                    .help("Which quota window the menu-bar percentage tracks. A missing window falls back to the most constrained one.")
+
+                    Toggle("Launch at login", isOn: $launchAtLogin)
+                        .onChange(of: launchAtLogin) { _, newValue in
+                            applyLaunchAtLogin(newValue)
+                        }
+                        .disabled(!LaunchAtLogin.isSupported)
+                    if let launchAtLoginMessage {
+                        StatusBanner(
+                            text: launchAtLoginMessage,
+                            systemImage: "exclamationmark.triangle.fill",
+                            color: .red
+                        )
+                    }
+                }
+
+                Section("Notifications") {
+                    Toggle("Warn when included usage nears its limit", isOn: $settings.usageAlertsEnabled)
+                    Toggle("Alert when an account's quota is likely back", isOn: $settings.resetAlertsEnabled)
+                }
+
+                Section("Switching") {
+                    Toggle("Switch CLI automatically when the active account is depleted", isOn: $settings.autoSwitchEnabled)
+                    Label(
+                        "Chooses the saved account with the most remaining quota and sends a notification. It only runs when another account clearly has more headroom.",
+                        systemImage: "info.circle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
+                Section("Updates") {
+                    LabeledContent("Version", value: AppInfo.version)
+                    if let update = state.availableUpdate {
+                        Button("Download version \(update.version)…") {
+                            state.openAvailableUpdate()
+                        }
+                    } else {
+                        Button(isCheckingForUpdates ? "Checking…" : "Check for Updates") {
+                            checkForUpdates()
+                        }
+                        .disabled(isCheckingForUpdates)
+                        if let upToDateMessage {
+                            StatusBanner(
+                                text: upToDateMessage,
+                                systemImage: "checkmark.circle.fill",
+                                color: .green
+                            )
+                        }
                     }
                 }
             }
+            .formStyle(.grouped)
         }
-        .formStyle(.grouped)
-        .frame(width: 420)
+        .frame(width: 480)
         .fixedSize(horizontal: false, vertical: true)
     }
 

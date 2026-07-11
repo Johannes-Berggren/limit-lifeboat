@@ -47,36 +47,47 @@ struct DashboardContainerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                ProviderLabel(text: profile.label, provider: profile.provider)
-                    .font(.headline)
+            HStack(spacing: DS.Spacing.md) {
+                VStack(alignment: .leading, spacing: 2) {
+                    ProviderLabel(text: profile.label, provider: profile.provider)
+                        .font(.headline)
+                    Text("Usage dashboard")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
 
                 Spacer()
-
-                Button {
-                    openInBrowser()
-                } label: {
-                    Label("Open in Browser", systemImage: "safari")
-                }
-                .help("Use this if Google sign-in fails in the app window")
-
-                Button {
-                    importBrowserTextFromClipboard()
-                } label: {
-                    Label("Import Browser Text", systemImage: "doc.on.clipboard")
-                }
-                .help("Copy dashboard page text from your browser, then import it here")
 
                 Button {
                     captureSignal += 1
                 } label: {
                     Label("Read Page", systemImage: "text.viewfinder")
                 }
+                .buttonStyle(.borderedProminent)
+
+                ControlGroup {
+                    Button {
+                        openInBrowser()
+                    } label: {
+                        Label("Open in Browser", systemImage: "safari")
+                    }
+                    .help("Use this if Google sign-in fails in the app window")
+
+                    Button {
+                        importBrowserTextFromClipboard()
+                    } label: {
+                        Label("Import Browser Text", systemImage: "doc.on.clipboard")
+                    }
+                    .help("Copy dashboard page text from your browser, then import it here")
+                }
             }
-            .padding(DS.Spacing.md)
+            .padding(.horizontal, DS.Spacing.lg)
+            .padding(.vertical, DS.Spacing.md)
 
             if let notice {
                 DashboardNoticeView(notice: notice)
+                    .padding(.horizontal, DS.Spacing.lg)
+                    .padding(.bottom, DS.Spacing.md)
             }
 
             Divider()
@@ -197,19 +208,7 @@ struct DashboardNoticeView: View {
     let notice: DashboardNotice
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: imageName)
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(color)
-            Text(notice.message)
-                .font(.caption)
-                .foregroundStyle(.primary)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer()
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(color.opacity(0.12))
+        StatusBanner(text: notice.message, systemImage: imageName, color: color)
     }
 
     private var imageName: String {
