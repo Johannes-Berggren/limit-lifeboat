@@ -465,12 +465,15 @@ struct TopUsageSummaryView: View {
         HStack(spacing: 0) {
             summarySegment(provider: .claude)
 
-            Divider()
-                .padding(.vertical, DS.Spacing.tight)
+            Rectangle()
+                .fill(Color.primary.opacity(0.10))
+                .frame(width: 1, height: 34)
+                .padding(.horizontal, DS.Spacing.xs)
 
             summarySegment(provider: .codex)
         }
         .padding(.vertical, DS.Spacing.xs)
+        .fixedSize(horizontal: false, vertical: true)
         .background(
             Color.primary.opacity(0.035),
             in: RoundedRectangle(cornerRadius: DS.Radius.medium, style: .continuous)
