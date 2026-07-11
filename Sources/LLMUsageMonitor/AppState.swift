@@ -2,22 +2,7 @@ import AppKit
 import Combine
 import Foundation
 import LLMUsageMonitorCore
-import UserNotifications
 import WebKit
-
-struct MenuBarSummary: Equatable {
-    var claudeValue: String
-    var codexValue: String
-    var accessibilityText: String
-    var riskLevel: RiskLevel
-
-    static let empty = MenuBarSummary(
-        claudeValue: "–",
-        codexValue: "–",
-        accessibilityText: "LLM usage has not been refreshed.",
-        riskLevel: .unknown
-    )
-}
 
 @MainActor
 final class AppState: ObservableObject {
@@ -59,6 +44,7 @@ final class AppState: ObservableObject {
     private let paceAlertPlanner = PaceAlertPlanner()
     private let updateService = UpdateService()
     private let settingsWindowController = SettingsWindowController()
+    private let terminalLauncher = TerminalCommandLauncher()
     private var refreshTask: Task<Void, Never>?
     private var loginFollowUpTask: Task<Void, Never>?
     private var wakeObserver: NSObjectProtocol?
@@ -170,7 +156,7 @@ final class AppState: ObservableObject {
     func refreshIfStale() {
         // Sync the active Codex login before reading so a terminal-side account
         // change is attributed to the right profile.
-        try? captureActiveCredentials(provider: .codex)
+        _ = try? captureActiveCredentials(provider: .codex)
         refreshCodexUsage()
         if shouldRefreshClaudeNow() {
             Task { await refreshAll() }
@@ -346,23 +332,11 @@ final class AppState: ObservableObject {
         }
         accountInfoFetched.insert(profile.id)
 
-        guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else {
-            return
-        }
-        var changed = false
-        if let plan = info.planLabel, profiles[index].planLabel != plan {
-            profiles[index].planLabel = plan
-            changed = true
-        }
-        if let identity = info.identity {
-            let merged = mergedIdentity(existing: profiles[index].identity, new: identity)
-            if profiles[index].identity != merged {
-                profiles[index].identity = merged
-                changed = true
-            }
-        }
-        if changed {
-            profiles[index].updatedAt = Date()
+        if AccountProfileUpdater.enrich(
+            profiles: &profiles,
+            profileID: profile.id,
+            enrichment: AccountProfileEnrichment(planLabel: info.planLabel, identity: info.identity)
+        ) {
             persistProfiles()
         }
     }
@@ -411,11 +385,11 @@ final class AppState: ObservableObject {
 
         switch action {
         case .deactivateAll:
-            for index in profiles.indices where profiles[index].provider == provider && profiles[index].isActiveCLI {
-                profiles[index].isActiveCLI = false
-                profiles[index].updatedAt = Date()
-                changed = true
-            }
+            changed = AccountProfileUpdater.setActiveCLI(
+                profiles: &profiles,
+                provider: provider,
+                profileID: nil
+            ).changed
         case .activate(let id), .adopt(let id):
             activeID = id
         case .create:
@@ -435,22 +409,23 @@ final class AppState: ObservableObject {
 
         var active: AccountProfile?
         if let activeID, let currentIdentity {
-            for index in profiles.indices where profiles[index].provider == provider {
-                let shouldBeActive = profiles[index].id == activeID
-                if profiles[index].isActiveCLI != shouldBeActive {
-                    profiles[index].isActiveCLI = shouldBeActive
-                    profiles[index].updatedAt = Date()
-                    changed = true
-                    // Anchor the Codex freshness gate on the inactive→active
-                    // transition only (never every sync, or the gate would
-                    // always reject the account's own latest event).
-                    if shouldBeActive, provider == .codex {
-                        codexActiveSince[profiles[index].id] = Date()
-                    }
-                }
+            let activation = AccountProfileUpdater.setActiveCLI(
+                profiles: &profiles,
+                provider: provider,
+                profileID: activeID
+            )
+            changed = changed || activation.changed
+            // Anchor the Codex freshness gate on the inactive→active
+            // transition only (never every sync, or the gate would always
+            // reject the account's own latest event).
+            if let activatedID = activation.activatedID, provider == .codex {
+                codexActiveSince[activatedID] = Date()
             }
             if let index = profiles.firstIndex(where: { $0.id == activeID }) {
-                let merged = mergedIdentity(existing: profiles[index].identity, new: currentIdentity)
+                let merged = AccountProfileUpdater.mergeIdentity(
+                    existing: profiles[index].identity,
+                    new: currentIdentity
+                )
                 if profiles[index].identity != merged {
                     profiles[index].identity = merged
                     profiles[index].updatedAt = Date()
@@ -573,23 +548,11 @@ final class AppState: ObservableObject {
         }
         accountInfoFetched.insert(profile.id)
 
-        guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else {
-            return
-        }
-        var changed = false
-        if let plan = info.planLabel, profiles[index].planLabel != plan {
-            profiles[index].planLabel = plan
-            changed = true
-        }
-        if let identity = info.identity {
-            let merged = mergedIdentity(existing: profiles[index].identity, new: identity)
-            if profiles[index].identity != merged {
-                profiles[index].identity = merged
-                changed = true
-            }
-        }
-        if changed {
-            profiles[index].updatedAt = Date()
+        if AccountProfileUpdater.enrich(
+            profiles: &profiles,
+            profileID: profile.id,
+            enrichment: AccountProfileEnrichment(planLabel: info.planLabel, identity: info.identity)
+        ) {
             persistProfiles()
         }
     }
@@ -791,10 +754,11 @@ final class AppState: ObservableObject {
 
         do {
             let result = try cliSwitcher.restoreSnapshot(for: profile)
-            for index in profiles.indices where profiles[index].provider == profile.provider {
-                profiles[index].isActiveCLI = profiles[index].id == profile.id
-                profiles[index].updatedAt = Date()
-            }
+            AccountProfileUpdater.setActiveCLI(
+                profiles: &profiles,
+                provider: profile.provider,
+                profileID: profile.id
+            )
             // The target just became active: anchor the Codex freshness gate so
             // it is not shown the outgoing account's still-newest log event
             // until it has actually run `codex` itself.
@@ -906,7 +870,7 @@ final class AppState: ObservableObject {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(provider.loginCommand, forType: .string)
         statusMessage = "Copied: \(provider.loginCommand)"
-        openTerminal()
+        terminalLauncher.open()
     }
 
     func beginCLILogin(for profile: AccountProfile) {
@@ -919,13 +883,13 @@ final class AppState: ObservableObject {
         // restorable snapshot), then log the terminal out before logging in.
         let hasExistingSession = profile.provider == .codex && cliSwitcher.validateActiveLogin(provider: .codex)
         if hasExistingSession {
-            try? captureActiveCredentials(provider: .codex)
+            _ = try? captureActiveCredentials(provider: .codex)
         }
         let command = terminalLoginCommand(for: profile.provider, hasExistingSession: hasExistingSession)
 
         // Preferred path: drive Terminal via AppleScript (reuses a window when
         // the user has granted Automation permission).
-        let appleScriptError = runTerminalCommand(command)
+        let appleScriptError = terminalLauncher.runViaAutomation(command)
         if appleScriptError == nil {
             statusMessage = "Started login for \(profile.label). The account links automatically after login."
             watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialIdentity: initialIdentity)
@@ -937,7 +901,7 @@ final class AppState: ObservableObject {
         // fall back to a bare Terminal that ran nothing. Instead run the
         // command by opening an executable `.command` file, which needs no
         // Apple Events permission.
-        if runCommandViaScriptFile(command) {
+        if terminalLauncher.runViaCommandFile(command) {
             statusMessage = "Opened Terminal to log in \(profile.label). The account links automatically after login."
             watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialIdentity: initialIdentity)
             return
@@ -949,7 +913,7 @@ final class AppState: ObservableObject {
         NSPasteboard.general.setString(command, forType: .string)
         statusMessage = appleScriptError
             ?? "Copied the login command. Paste it into Terminal; the account links automatically after login."
-        openTerminal()
+        terminalLauncher.open()
         watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialIdentity: initialIdentity)
     }
 
@@ -1050,94 +1014,12 @@ final class AppState: ObservableObject {
             return
         }
 
-        profiles[index].identity = mergedIdentity(existing: profiles[index].identity, new: identity)
+        profiles[index].identity = AccountProfileUpdater.mergeIdentity(existing: profiles[index].identity, new: identity)
         profiles[index].updatedAt = Date()
         persistProfiles()
     }
 
-    private func mergedIdentity(existing: AccountIdentity?, new: AccountIdentity) -> AccountIdentity {
-        guard let existing else {
-            return new
-        }
-
-        return AccountIdentity(
-            email: new.email ?? existing.email,
-            displayName: new.displayName ?? existing.displayName,
-            organization: new.organization ?? existing.organization,
-            organizationID: new.organizationID ?? existing.organizationID,
-            accountID: new.accountID ?? existing.accountID,
-            source: new.source,
-            updatedAt: new.updatedAt
-        )
-    }
-
     // MARK: - Helpers
-
-    private func openTerminal() {
-        let terminalURL = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
-        NSWorkspace.shared.openApplication(at: terminalURL, configuration: NSWorkspace.OpenConfiguration())
-    }
-
-    /// Runs `command` in Terminal.app via AppleScript. Returns `nil` on
-    /// success, or a human-readable error message on failure (previously this
-    /// swallowed `errorInfo`, so a denied Automation permission failed
-    /// silently and login appeared to do nothing).
-    private func runTerminalCommand(_ command: String) -> String? {
-        let escaped = command
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        let scriptSource = """
-        tell application "Terminal"
-            do script "\(escaped)"
-            activate
-        end tell
-        """
-
-        var errorInfo: NSDictionary?
-        if NSAppleScript(source: scriptSource)?.executeAndReturnError(&errorInfo) != nil {
-            return nil
-        }
-
-        let code = errorInfo?[NSAppleScript.errorNumber] as? Int
-        if code == -1743 {
-            return "Terminal automation is turned off for LLMUsageMonitor. Enable it in System Settings → Privacy & Security → Automation to log in with one click."
-        }
-        if let message = errorInfo?[NSAppleScript.errorMessage] as? String, !message.isEmpty {
-            return "Could not drive Terminal: \(message)"
-        }
-        return "Could not drive Terminal to run the login command."
-    }
-
-    /// Runs `command` by writing it to a temporary executable `.command` file
-    /// and opening it with Terminal.app. Unlike AppleScript, this needs no
-    /// Apple Events (Automation) permission, so it works even when the user has
-    /// denied Terminal automation. The `.command` file runs in a non-login
-    /// shell, which is why `command` carries its own PATH export.
-    private func runCommandViaScriptFile(_ command: String) -> Bool {
-        let terminalURL = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
-        let scriptURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("llm-usage-monitor-login-\(UUID().uuidString).command")
-        let contents = "#!/bin/zsh\n\(command)\n"
-        do {
-            try contents.write(to: scriptURL, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes(
-                [.posixPermissions: 0o755],
-                ofItemAtPath: scriptURL.path
-            )
-        } catch {
-            return false
-        }
-
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = true
-        NSWorkspace.shared.open(
-            [scriptURL],
-            withApplicationAt: terminalURL,
-            configuration: configuration,
-            completionHandler: nil
-        )
-        return true
-    }
 
     private func persistProfiles() {
         do {
@@ -1165,320 +1047,20 @@ final class AppState: ObservableObject {
     // MARK: - Menu bar summary
 
     private func updateMenuBarSummary() {
-        menuBarSummary = MenuBarSummary(
-            claudeValue: providerUsageValue(.claude),
-            codexValue: providerUsageValue(.codex),
-            accessibilityText: accessibilitySummary(),
-            riskLevel: highestRisk()
+        menuBarSummary = MenuBarSummaryProjector.project(
+            profiles: profiles,
+            snapshots: snapshots,
+            preference: settings.menuBarWindowPreference
         )
-    }
-
-    /// "–" = no active CLI login, "?" = active but not read yet, and a
-    /// trailing "*" marks numbers that are stale and may no longer be true.
-    private func providerUsageValue(_ provider: Provider) -> String {
-        guard let profile = activeProfile(for: provider) else {
-            return "–"
-        }
-        guard let snapshot = snapshots[profile.id] else {
-            return "?"
-        }
-
-        let staleMark = snapshot.isStale() ? "*" : ""
-        if snapshot.billingUsageMode == .overLimitPayAsYouGo {
-            return "PAYG\(staleMark)"
-        }
-
-        guard let used = preferredUsedFraction(for: snapshot) else {
-            return "?"
-        }
-        return "\(Int((used * 100).rounded()))%\(staleMark)"
     }
 
     /// The fraction behind the menu-bar number, honoring the Settings choice.
     /// A pinned window that is missing falls back to most-constrained — a
     /// wrong-but-plausible steady number would hide real risk.
     func preferredUsedFraction(for snapshot: UsageSnapshot) -> Double? {
-        let mostConstrained = snapshot.mostConstrainedWindow?.usedFraction ?? snapshot.usedFraction
-        switch settings.menuBarWindowPreference {
-        case .mostConstrained:
-            return mostConstrained
-        case .session:
-            return snapshot.window(ofKind: .session)?.usedFraction ?? mostConstrained
-        case .weekly:
-            return snapshot.primaryWeeklyWindow?.usedFraction ?? mostConstrained
-        }
-    }
-
-    /// Menu-bar risk reflects the accounts the terminal is actually using;
-    /// a stale inactive account must not paint warning glyphs.
-    private func highestRisk() -> RiskLevel {
-        let activeProfiles = Provider.allCases.compactMap { activeProfile(for: $0) }
-        let activeSnapshots = activeProfiles.compactMap { snapshots[$0.id] }
-        let snapshotRisk = activeSnapshots.map(\.riskLevel).min() ?? .unknown
-        let thresholdRisk = activeSnapshots
-            .compactMap(\.usedFraction)
-            .map(UsageThresholds.standard.riskLevel(usedFraction:))
-            .min() ?? .unknown
-
-        let risk = min(snapshotRisk, thresholdRisk)
-        // An okay-looking number that has not been re-read in a long time is
-        // not okay — it is unknown. Real warnings still win.
-        if risk == .healthy || risk == .unknown,
-           !activeSnapshots.isEmpty,
-           activeSnapshots.allSatisfy({ $0.isStale() }) {
-            return .stale
-        }
-        return risk
-    }
-
-    private func accessibilitySummary() -> String {
-        guard !profiles.isEmpty else {
-            return "No accounts yet. Log into Claude Code or Codex in the terminal to register one."
-        }
-
-        var parts: [String] = []
-        for provider in Provider.allCases {
-            guard let profile = activeProfile(for: provider),
-                  let snapshot = snapshots[profile.id] else {
-                parts.append("\(provider.displayName) usage unknown")
-                continue
-            }
-
-            let mode: String
-            switch snapshot.billingUsageMode {
-            case .includedSubscription:
-                mode = "using included subscription usage"
-            case .includedSubscriptionNearLimit:
-                mode = "using included subscription usage near the limit"
-            case .overLimitPayAsYouGo:
-                mode = "using pay as you go or credits"
-            case .payAsYouGoVisible:
-                mode = "showing pay as you go status"
-            case .needsLogin:
-                mode = "needs login"
-            case .unknown:
-                mode = "usage mode unknown"
-            }
-
-            var entry: String
-            let windowSummary = snapshot.orderedDisplayWindows
-                .map { "\($0.label) \(Int($0.usedPercent.rounded())) percent used" }
-                .joined(separator: ", ")
-            if !windowSummary.isEmpty {
-                entry = "\(provider.displayName) active account \(profile.label): \(windowSummary), \(mode)"
-            } else if let used = snapshot.usedFraction {
-                entry = "\(provider.displayName) active account \(profile.label) \(Int((used * 100).rounded())) percent used, \(mode)"
-            } else {
-                entry = "\(provider.displayName) active account \(profile.label) \(mode)"
-            }
-            if snapshot.isStale() {
-                entry += ", last checked \(snapshot.lastRefreshed.formatted(.relative(presentation: .named)))"
-            }
-            parts.append(entry)
-        }
-        return parts.joined(separator: ". ")
-    }
-}
-
-@MainActor
-final class UsageAlertController {
-    private var lastNotifiedRisk: [AlertWindowKey: RiskLevel] = [:]
-    private let thresholdPlanner = ThresholdAlertPlanner()
-    private let notifiedResetsKey = "notifiedResetDates"
-    private let notifiedPaceKey = "notifiedPaceAlerts"
-
-    /// Reset alerts survive relaunches (persisted, keyed by account+window and
-    /// reset date) so a restart does not re-announce quotas that were already
-    /// reported back. The UserDefaults key is `"<profileID>|<windowID>"`.
-    func notifiedResetKeys() -> [AlertWindowKey: Date] {
-        windowKeyedDates(forKey: notifiedResetsKey)
-    }
-
-    /// Same persistence scheme for "on pace to run out" alerts.
-    func notifiedPaceKeys() -> [AlertWindowKey: Date] {
-        windowKeyedDates(forKey: notifiedPaceKey)
-    }
-
-    private func windowKeyedDates(forKey defaultsKey: String) -> [AlertWindowKey: Date] {
-        let stored = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double] ?? [:]
-        var result: [AlertWindowKey: Date] = [:]
-        for (key, value) in stored {
-            // Legacy entries were bare UUIDs (no window component); drop them —
-            // the worst case is one duplicate "quota back" alert after upgrade.
-            guard let separator = key.firstIndex(of: "|") else {
-                continue
-            }
-            let idPart = String(key[..<separator])
-            let windowID = String(key[key.index(after: separator)...])
-            guard let id = UUID(uuidString: idPart), !windowID.isEmpty else {
-                continue
-            }
-            result[AlertWindowKey(profileID: id, windowID: windowID)] = Date(timeIntervalSince1970: value)
-        }
-        return result
-    }
-
-    func handlePaceAlert(_ alert: PaceAlert, provider: Provider) {
-        markWindowNotified(
-            defaultsKey: notifiedPaceKey,
-            profileID: alert.profileID,
-            windowID: alert.windowID,
-            date: alert.resetDate ?? Date()
+        MenuBarSummaryProjector.preferredUsedFraction(
+            for: snapshot,
+            preference: settings.menuBarWindowPreference
         )
-
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
-
-        var parts = [
-            "At the current pace, \(provider.displayName) \(alert.windowLabel) usage runs out around \(formatter.string(from: alert.projectedDepletion))."
-        ]
-        if let reset = alert.resetDate {
-            parts.append("The window resets \(formatter.string(from: reset)).")
-        }
-        postNotification(
-            identifier: "pace-\(alert.profileID.uuidString)-\(alert.windowID)-\(Int(alert.projectedDepletion.timeIntervalSince1970))",
-            title: "\(alert.profileLabel): on pace to hit the \(alert.windowLabel) limit",
-            body: parts.joined(separator: " ")
-        )
-    }
-
-    func handleAutoSwitch(fromLabel: String?, toLabel: String, provider: Provider, reason: String?) {
-        var parts: [String] = []
-        if let fromLabel {
-            parts.append("\(fromLabel) hit its limit.")
-        }
-        if let reason {
-            parts.append(reason)
-        }
-        parts.append("New terminal sessions use \(toLabel).")
-        postNotification(
-            identifier: "autoswitch-\(toLabel)-\(Int(Date().timeIntervalSince1970))",
-            title: "Switched \(provider.displayName) CLI to \(toLabel)",
-            body: parts.joined(separator: " ")
-        )
-    }
-
-    /// Drops every persisted and in-memory dedupe key for a removed profile
-    /// so UserDefaults does not accumulate dead entries forever.
-    func forgetProfile(_ profileID: UUID) {
-        let prefix = "\(profileID.uuidString)|"
-        for defaultsKey in [notifiedResetsKey, notifiedPaceKey] {
-            let stored = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double] ?? [:]
-            let remaining = stored.filter { !$0.key.hasPrefix(prefix) }
-            UserDefaults.standard.set(remaining, forKey: defaultsKey)
-        }
-        lastNotifiedRisk = lastNotifiedRisk.filter { $0.key.profileID != profileID }
-    }
-
-    // MARK: - Shared posting/persistence
-
-    private func markWindowNotified(defaultsKey: String, profileID: UUID, windowID: String, date: Date) {
-        var stored = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double] ?? [:]
-        stored["\(profileID.uuidString)|\(windowID)"] = date.timeIntervalSince1970
-        UserDefaults.standard.set(stored, forKey: defaultsKey)
-    }
-
-    private func postNotification(identifier: String, title: String, body: String) {
-        // UNUserNotificationCenter requires a real bundle; an unbundled
-        // `swift run` must not crash.
-        guard Bundle.main.bundleIdentifier != nil else {
-            return
-        }
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        content.sound = .default
-        let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
-        NSApplication.shared.requestUserAttention(.informationalRequest)
-    }
-
-    func handleResetElapsed(_ alert: ResetAlert) {
-        markWindowNotified(
-            defaultsKey: notifiedResetsKey,
-            profileID: alert.profileID,
-            windowID: alert.windowID,
-            date: alert.resetDate
-        )
-        postNotification(
-            identifier: "reset-\(alert.profileID.uuidString)-\(alert.windowID)-\(Int(alert.resetDate.timeIntervalSince1970))",
-            title: "\(alert.profileLabel): \(alert.windowLabel) quota likely back",
-            body: "The \(alert.provider.displayName) \(alert.windowLabel) limit window has rolled over since the last reading. Switch the CLI to \(alert.profileLabel) to keep using included usage."
-        )
-    }
-
-    func requestAuthorization() {
-        // UNUserNotificationCenter requires a real bundle; guard so an
-        // unbundled `swift run` does not crash at startup.
-        guard Bundle.main.bundleIdentifier != nil else {
-            return
-        }
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
-    }
-
-    /// Per-window near-limit alerts. Session (5h) windows never notify —
-    /// heavy sessions would fire on every burn-down; they stay visual-only.
-    /// Each window re-arms once it drops back below the warning band.
-    func handleThresholds(snapshot: UsageSnapshot, profile: AccountProfile) {
-        guard Bundle.main.bundleIdentifier != nil else {
-            return
-        }
-
-        guard snapshot.parseConfidence != .none else {
-            return
-        }
-
-        rearmRecoveredWindows(snapshot: snapshot, profile: profile)
-
-        let alerts = thresholdPlanner.alerts(
-            snapshot: snapshot,
-            profile: profile,
-            lastNotified: lastNotifiedRisk
-        )
-        for alert in alerts {
-            lastNotifiedRisk[AlertWindowKey(profileID: alert.profileID, windowID: alert.windowID)] = alert.riskLevel
-            postNotification(
-                identifier: "usage-\(alert.profileID.uuidString)-\(alert.windowID)-\(alert.riskLevel.rawValue)",
-                title: notificationTitle(alert: alert, profile: profile),
-                body: notificationBody(alert: alert, snapshot: snapshot, profile: profile)
-            )
-        }
-    }
-
-    /// Clears dedupe keys for windows that dropped back below the warning
-    /// band, without firing anything — used directly for inactive accounts.
-    func rearmThresholds(snapshot: UsageSnapshot, profile: AccountProfile) {
-        guard snapshot.parseConfidence != .none else {
-            return
-        }
-        rearmRecoveredWindows(snapshot: snapshot, profile: profile)
-    }
-
-    private func rearmRecoveredWindows(snapshot: UsageSnapshot, profile: AccountProfile) {
-        let currentRisk = thresholdPlanner.currentRisk(snapshot: snapshot, profile: profile)
-        for (key, risk) in currentRisk where risk != .warning && risk != .depleted {
-            lastNotifiedRisk[key] = nil
-        }
-    }
-
-    private func notificationTitle(alert: ThresholdAlert, profile: AccountProfile) -> String {
-        if alert.riskLevel == .depleted {
-            return "\(profile.label): \(alert.windowLabel) limit reached"
-        }
-        return "\(profile.label): \(alert.windowLabel) \(Int(alert.usedPercent.rounded()))% used"
-    }
-
-    private func notificationBody(alert: ThresholdAlert, snapshot: UsageSnapshot, profile: AccountProfile) -> String {
-        var parts = [
-            "\(profile.provider.displayName) \(alert.windowLabel) usage is \(alert.riskLevel == .depleted ? "depleted" : "near the limit")."
-        ]
-        if let reset = alert.resetDescription ?? snapshot.resetDescription {
-            parts.append("Resets \(reset).")
-        }
-        if let credit = snapshot.creditStatus {
-            parts.append(credit)
-        }
-        return parts.joined(separator: " ")
     }
 }

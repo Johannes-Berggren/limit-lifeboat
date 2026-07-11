@@ -242,6 +242,16 @@ struct AccountRowView: View {
     @State private var showsBillingDetails = false
     @State private var showsHistory = false
 
+    private var presentation: AccountRowPresentation {
+        AccountRowPresentation(
+            profile: profile,
+            snapshot: snapshot,
+            hasStoredSnapshot: hasStoredSnapshot,
+            refreshState: refreshState,
+            adviceReason: adviceReason
+        )
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: DS.Spacing.tight) {
             header
@@ -270,7 +280,7 @@ struct AccountRowView: View {
     private var header: some View {
         HStack(spacing: 6) {
             Circle()
-                .fill(riskColor)
+                .fill(DS.riskColor(presentation.riskLevel))
                 .frame(width: 8, height: 8)
 
             Text(profile.label)
@@ -278,11 +288,11 @@ struct AccountRowView: View {
                 .lineLimit(1)
                 .layoutPriority(1)
 
-            Text(identityText)
+            Text(presentation.identityText)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-                .help(identityText)
+                .help(presentation.identityText)
 
             if profile.isActiveCLI {
                 Badge(text: "Active", systemImage: "terminal.fill", color: .green)
@@ -291,11 +301,11 @@ struct AccountRowView: View {
 
             Spacer(minLength: 0)
 
-            if let billingBadge {
+            if let billingBadge = presentation.billingBadge {
                 Button {
                     showsBillingDetails = true
                 } label: {
-                    Badge(text: billingBadge.text, color: billingBadge.color)
+                    Badge(text: billingBadge.text, color: DS.presentationColor(billingBadge.tone))
                 }
                 .buttonStyle(.plain)
                 .help(billingBadge.help)
@@ -338,13 +348,8 @@ struct AccountRowView: View {
 
     @ViewBuilder
     private var gauges: some View {
-        let ordered = snapshot?.orderedDisplayWindows ?? []
-        let primary = ordered.filter { $0.kind != .weeklyScoped }
-        let scoped = ordered.filter { $0.kind == .weeklyScoped }
-        let atRiskScoped = scoped.filter { $0.riskLevel == .warning || $0.riskLevel == .depleted }
-        let collapsibleScoped = scoped.filter { $0.riskLevel != .warning && $0.riskLevel != .depleted }
-
-        let visible = primary + atRiskScoped + (showsScopedWindows ? collapsibleScoped : [])
+        let groups = presentation.gauges
+        let visible = groups.alwaysVisible + (showsScopedWindows ? groups.collapsible : [])
 
         if !visible.isEmpty {
             LazyVGrid(columns: gaugeColumns, alignment: .leading, spacing: DS.Spacing.tight) {
@@ -354,9 +359,9 @@ struct AccountRowView: View {
             }
         }
 
-        if needsSessionCaptureNote || !collapsibleScoped.isEmpty {
+        if groups.needsSessionCaptureNote || !groups.collapsible.isEmpty {
             HStack(spacing: DS.Spacing.sm) {
-                if needsSessionCaptureNote {
+                if groups.needsSessionCaptureNote {
                     Label("Session not captured", systemImage: "clock.badge.questionmark")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
@@ -365,14 +370,14 @@ struct AccountRowView: View {
 
                 Spacer(minLength: 0)
 
-                if !collapsibleScoped.isEmpty {
+                if !groups.collapsible.isEmpty {
                     Button {
                         withAnimation(.easeInOut(duration: 0.15)) {
                             showsScopedWindows.toggle()
                         }
                     } label: {
                         Label(
-                            showsScopedWindows ? "Show less" : "+\(collapsibleScoped.count) limits",
+                            showsScopedWindows ? "Show less" : "+\(groups.collapsible.count) limits",
                             systemImage: showsScopedWindows ? "chevron.up" : "chevron.down"
                         )
                         .font(.caption2)
@@ -392,28 +397,20 @@ struct AccountRowView: View {
         )
     }
 
-    private var needsSessionCaptureNote: Bool {
-        let ordered = snapshot?.orderedDisplayWindows ?? []
-        return profile.isActiveCLI
-            && profile.provider == .claude
-            && !ordered.isEmpty
-            && !ordered.contains(where: { $0.kind == .session })
-    }
-
     // MARK: Actionable status strip (omitted for ordinary accounts)
 
     @ViewBuilder
     private var statusStrip: some View {
         // A failed refresh takes precedence over the quiet note: the account is
         // showing stale or absent numbers for a reason the user can act on.
-        let problem = refreshProblem
-        let note = problem == nil ? footerNote : nil
+        let problem = presentation.refreshProblem
+        let note = problem == nil ? presentation.footerNote : nil
         if problem != nil || note != nil {
             HStack(spacing: DS.Spacing.sm) {
                 if let problem {
                     Label(problem.text, systemImage: problem.icon)
                         .font(.caption)
-                        .foregroundStyle(problem.color)
+                        .foregroundStyle(DS.presentationColor(problem.tone))
                         .lineLimit(2)
                         .help(problem.help)
                     if problem.showsRetry {
@@ -425,7 +422,7 @@ struct AccountRowView: View {
                 } else if let note {
                     Label(note.text, systemImage: note.icon)
                         .font(.caption)
-                        .foregroundStyle(note.color)
+                        .foregroundStyle(DS.presentationColor(note.tone))
                         .lineLimit(2)
                         .help(note.text)
                 }
@@ -435,142 +432,17 @@ struct AccountRowView: View {
         }
     }
 
-    /// A visible, actionable failure from the last refresh, or nil when the
-    /// account refreshed fine (or hasn't been tried).
-    private var refreshProblem: (text: String, icon: String, color: Color, help: String, showsRetry: Bool)? {
-        switch refreshState {
-        case .idle, .refreshing, .ok:
-            return nil
-        case .readFailed(let reason):
-            return ("Couldn't refresh", "exclamationmark.triangle", .orange, reason, true)
-        case .needsLogin:
-            // Only worth surfacing here for the active account or one that
-            // otherwise looks linked; the empty-state note already covers a
-            // brand-new account with no snapshot.
-            guard snapshot != nil || profile.isActiveCLI else {
-                return nil
-            }
-            return (
-                "Not linked — log in to track usage",
-                "person.crop.circle.badge.questionmark",
-                .secondary,
-                "Use the … menu → Log In via Terminal to link this account.",
-                false
-            )
-        case .keychainLocked:
-            return (
-                "Keychain access needed",
-                "lock",
-                DS.staleAmber,
-                "macOS denied access to this account's saved credentials. Tap Retry to grant access.",
-                true
-            )
-        }
-    }
-
     @ViewBuilder
     private var switchButton: some View {
-        let resetElapsed = snapshot?.resetHasElapsed() == true
-        let isAdvised = adviceReason != nil
-        let highlighted = resetElapsed || isAdvised
         Button {
             switchCLI()
         } label: {
-            Label(isAdvised ? "Best" : "Switch", systemImage: "arrow.triangle.2.circlepath")
+            Label(presentation.switchTitle, systemImage: "arrow.triangle.2.circlepath")
                 .font(.caption.weight(.medium))
         }
-        .compactGlassButton(tint: highlighted ? .green : nil)
+        .compactGlassButton(tint: presentation.highlightsSwitch ? .green : nil)
         .disabled(!hasStoredSnapshot)
-        .help(switchHelp(resetElapsed: resetElapsed))
-    }
-
-    private func switchHelp(resetElapsed: Bool) -> String {
-        guard hasStoredSnapshot else {
-            return "Log into this account once in the terminal so its credentials can be captured"
-        }
-        if let adviceReason {
-            return adviceReason
-        }
-        if resetElapsed {
-            return "This account's limit window has rolled over — switch the CLI to it for fresh quota"
-        }
-        return "Switch the CLI to this account's saved credentials"
-    }
-
-    private var footerNote: (text: String, icon: String, color: Color)? {
-        guard let snapshot else {
-            let text: String
-            if !hasStoredSnapshot {
-                text = "Log in via the terminal to link this account"
-            } else if profile.isActiveCLI {
-                // Already the active login, so "switch to it" would be wrong.
-                // Codex has no inactive usage source — its numbers come from
-                // the CLI's own session logs, so the row stays blank until
-                // this account actually runs a turn.
-                text = profile.provider == .codex
-                    ? "Active — usage appears after you run codex"
-                    : "Active — usage appears on the next refresh"
-            } else {
-                text = "Credentials saved — usage appears after switching to it"
-            }
-            return (text, "person.crop.circle.badge.questionmark", .secondary)
-        }
-
-        // The opportunity label stays inactive-only: for the active account a
-        // refresh simply confirms the reset, but stale readings deserve a
-        // flag on every row — active accounts drift too (sleep, failures).
-        if !profile.isActiveCLI, snapshot.resetHasElapsed() {
-            return ("Limit window elapsed — likely full quota again", "arrow.counterclockwise.circle", .green)
-        }
-
-        if snapshot.isStale() {
-            return (
-                "Last checked \(snapshot.lastRefreshed.formatted(.relative(presentation: .named)))",
-                "clock",
-                .secondary
-            )
-        }
-
-        if snapshot.orderedDisplayWindows.isEmpty, !snapshot.message.isEmpty {
-            return (snapshot.message, "info.circle", .secondary)
-        }
-
-        return nil
-    }
-
-    /// Only noteworthy billing states earn a badge; a healthy subscription
-    /// is the assumed default and stays quiet.
-    private var billingBadge: (text: String, color: Color, help: String)? {
-        switch snapshot?.billingUsageMode {
-        case .overLimitPayAsYouGo:
-            return ("PAYG", .red, "Included usage appears depleted — extra usage may be billed. Click for details.")
-        case .payAsYouGoVisible:
-            return ("Credits", .orange, "Credit/pay-as-you-go data found; included usage unclear. Click for details.")
-        case .needsLogin:
-            return ("Sign in", DS.staleAmber, "Connect or refresh this account before trusting its numbers. Click for details.")
-        case .includedSubscription, .includedSubscriptionNearLimit, .unknown, .none:
-            return nil
-        }
-    }
-
-    private var identityText: String {
-        var parts: [String] = []
-        if let identity = profile.identity {
-            if let primary = identity.primaryLabel {
-                parts.append(primary)
-            }
-            if let organization = identity.organization, !organization.isEmpty {
-                parts.append(organization)
-            }
-        }
-        if let plan = profile.planLabel, !plan.isEmpty {
-            parts.append(plan)
-        }
-        return parts.isEmpty ? "Not linked to a login yet" : parts.joined(separator: " • ")
-    }
-
-    private var riskColor: Color {
-        DS.riskColor(snapshot?.riskLevel ?? .unknown)
+        .help(presentation.switchHelp)
     }
 }
 
@@ -1044,7 +916,10 @@ struct AccountCardPreviewGallery: View {
     }
 }
 
-#Preview("Compact account card states") {
-    AccountCardPreviewGallery()
+private struct AccountCardPreviewGalleryPreviews: PreviewProvider {
+    static var previews: some View {
+        AccountCardPreviewGallery()
+            .previewDisplayName("Compact account card states")
+    }
 }
 #endif

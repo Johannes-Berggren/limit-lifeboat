@@ -26,51 +26,27 @@ public struct ClaudeCodeUsageReport: Equatable, Sendable {
     }
 
     public func makeSnapshot(for account: AccountProfile, now: Date = Date()) -> UsageSnapshot {
-        guard let selectedLimit = limits.max(by: { $0.usedPercent < $1.usedPercent }) else {
-            return UsageSnapshot(
-                accountID: account.id,
-                provider: .claude,
-                riskLevel: .unknown,
-                source: Self.source,
-                lastRefreshed: now,
-                parseConfidence: .none,
-                message: "Claude Code /usage did not include a recognizable limit."
-            )
-        }
-
         let windows = dedupeWindows(limits.map { makeWindow(from: $0, now: now) })
-        let usedPercent = min(100, max(0, selectedLimit.usedPercent))
-        return UsageSnapshot(
+        return UsageSnapshotFactory.snapshot(
             accountID: account.id,
             provider: .claude,
             windows: windows,
-            includedRemaining: max(0, 100 - usedPercent),
-            includedLimit: 100,
-            resetDate: selectedLimit.resetDescription.flatMap {
-                ClaudeResetDateParser().parse($0, now: now)
-            },
-            resetDescription: selectedLimit.resetDescription,
             creditStatus: creditStatus,
-            riskLevel: UsageThresholds.standard.riskLevel(usedPercent: usedPercent),
             source: Self.source,
             lastRefreshed: now,
-            parseConfidence: .high,
-            message: message
+            message: limits.isEmpty
+                ? "Claude Code /usage did not include a recognizable limit."
+                : message
         )
     }
 
     private func makeWindow(from limit: ClaudeCodeUsageLimit, now: Date) -> UsageWindow {
-        let usedPercent = min(100, max(0, limit.usedPercent))
-        let descriptor = windowDescriptor(for: limit.name)
-        return UsageWindow(
-            id: descriptor.id,
-            kind: descriptor.kind,
-            label: descriptor.label,
-            usedPercent: usedPercent,
+        let descriptor = ClaudeUsageWindowCatalog.tuiDescriptor(name: limit.name)
+        return UsageSnapshotFactory.window(
+            descriptor: descriptor,
+            usedPercent: limit.usedPercent,
             resetDate: limit.resetDescription.flatMap { ClaudeResetDateParser().parse($0, now: now) },
-            resetDescription: limit.resetDescription,
-            windowMinutes: nil,
-            riskLevel: UsageThresholds.standard.riskLevel(usedPercent: usedPercent)
+            resetDescription: limit.resetDescription
         )
     }
 
@@ -87,20 +63,6 @@ public struct ClaudeCodeUsageReport: Equatable, Sendable {
             lastByID[window.id] = window
         }
         return orderedIDs.compactMap { lastByID[$0] }
-    }
-
-    private func windowDescriptor(for name: String) -> (id: String, kind: UsageWindowKind, label: String) {
-        let lower = name.lowercased()
-        if lower == "current session" {
-            return ("session", .session, "Session")
-        }
-        if lower.contains("all models") {
-            return ("weekly-all", .weekly, "Weekly (all models)")
-        }
-        if let organization = firstCapture(#"\(([^)]+)\)"#, in: name) {
-            return ("weekly-\(UsageWindowID.slug(organization))", .weeklyScoped, "Weekly (\(organization))")
-        }
-        return (UsageWindowID.slug(name), .other, name)
     }
 
     private var creditStatus: String {
