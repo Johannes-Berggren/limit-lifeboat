@@ -231,6 +231,16 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         return resetDate < now
     }
 
+    /// True only when *every* reported window has rolled over. The scalar
+    /// `resetHasElapsed()` reflects just the most-constrained window, so a short
+    /// window resetting while a weekly is still live would otherwise read as
+    /// "full quota back" — the stricter condition SwitchAdvisor already uses.
+    public func allWindowsResetElapsed(asOf now: Date = Date()) -> Bool {
+        let windows = orderedDisplayWindows
+        guard !windows.isEmpty else { return resetHasElapsed(asOf: now) }
+        return windows.allSatisfy { $0.resetHasElapsed(asOf: now) }
+    }
+
     public var billingUsageMode: BillingUsageMode {
         if riskLevel == .stale {
             return .needsLogin

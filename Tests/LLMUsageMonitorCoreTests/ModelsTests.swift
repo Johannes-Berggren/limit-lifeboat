@@ -145,6 +145,40 @@ final class ModelsTests: XCTestCase {
         XCTAssertFalse(unknown.resetHasElapsed(asOf: now))
     }
 
+    /// `allWindowsResetElapsed` is stricter than the scalar `resetHasElapsed`:
+    /// a short window rolling over while a weekly is still live must NOT read as
+    /// "full quota back" — the quirk behind the over-optimistic Codex hint.
+    func testAllWindowsResetElapsedRequiresEveryWindow() {
+        let now = Date()
+        let past = now.addingTimeInterval(-60)
+        let future = now.addingTimeInterval(3600)
+
+        let mixed = makeSnapshot(resetDate: past, windows: [
+            makeWindow(id: "session", kind: .session, usedPercent: 20, resetDate: past),
+            makeWindow(id: "weekly", kind: .weekly, usedPercent: 90, resetDate: future)
+        ])
+        // The most-constrained scalar reset has passed, but a live weekly remains.
+        XCTAssertTrue(mixed.resetHasElapsed(asOf: now))
+        XCTAssertFalse(mixed.allWindowsResetElapsed(asOf: now))
+
+        let allElapsed = makeSnapshot(resetDate: past, windows: [
+            makeWindow(id: "session", kind: .session, usedPercent: 20, resetDate: past),
+            makeWindow(id: "weekly", kind: .weekly, usedPercent: 90, resetDate: past)
+        ])
+        XCTAssertTrue(allElapsed.allWindowsResetElapsed(asOf: now))
+    }
+
+    /// With no windows the method falls back to the snapshot-level reset date,
+    /// so legacy scalar-only snapshots keep behaving as before.
+    func testAllWindowsResetElapsedFallsBackToScalarWhenNoWindows() {
+        let now = Date()
+        let elapsed = makeSnapshot(resetDate: now.addingTimeInterval(-60))
+        let pending = makeSnapshot(resetDate: now.addingTimeInterval(3600))
+
+        XCTAssertTrue(elapsed.allWindowsResetElapsed(asOf: now))
+        XCTAssertFalse(pending.allWindowsResetElapsed(asOf: now))
+    }
+
     func testSnapshotWithWindowsRoundTrips() throws {
         let reset = Date(timeIntervalSince1970: 1_783_388_580)
         let original = UsageSnapshot(
@@ -449,8 +483,9 @@ final class ModelsTests: XCTestCase {
         kind: UsageWindowKind,
         label: String? = nil,
         usedPercent: Double = 0,
+        resetDate: Date? = nil,
         riskLevel: RiskLevel = .unknown
     ) -> UsageWindow {
-        UsageWindow(id: id, kind: kind, label: label ?? id, usedPercent: usedPercent, riskLevel: riskLevel)
+        UsageWindow(id: id, kind: kind, label: label ?? id, usedPercent: usedPercent, resetDate: resetDate, riskLevel: riskLevel)
     }
 }

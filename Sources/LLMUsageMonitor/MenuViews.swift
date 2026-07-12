@@ -383,6 +383,18 @@ struct AccountRowView: View {
             }
         }
 
+        // When an inactive account's windows have all rolled over, the gauges
+        // above are the last reading from *before* the reset — flag them so the
+        // stale bars don't contradict the green "quota restored" note below.
+        if groups.showsPreResetNote, let last = snapshot?.lastRefreshed {
+            Label(
+                "Last reading before reset — checked \(last.formatted(.relative(presentation: .named)))",
+                systemImage: "clock.arrow.circlepath"
+            )
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+        }
+
         if groups.needsSessionCaptureNote {
             HStack(spacing: DS.Spacing.sm) {
                 Label("Session not captured", systemImage: "clock.badge.questionmark")
@@ -424,7 +436,7 @@ struct AccountRowView: View {
                         .font(.caption)
                         .foregroundStyle(DS.presentationColor(note.tone))
                         .lineLimit(2)
-                        .help(note.text)
+                        .help(note.help)
                 }
 
             }

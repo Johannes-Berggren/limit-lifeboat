@@ -42,10 +42,16 @@ public struct AccountGaugeGroups: Equatable, Sendable {
     /// accidentally reintroduce a second collapsed state.
     public var visible: [UsageWindow]
     public var needsSessionCaptureNote: Bool
+    /// True when the visible gauges are the last reading from *before* an
+    /// inactive account's windows all rolled over, so the SwiftUI layer can
+    /// flag the numbers as pre-reset instead of letting stale bars contradict
+    /// the green "quota restored" footer note.
+    public var showsPreResetNote: Bool
 
-    public init(visible: [UsageWindow], needsSessionCaptureNote: Bool) {
+    public init(visible: [UsageWindow], needsSessionCaptureNote: Bool, showsPreResetNote: Bool = false) {
         self.visible = visible
         self.needsSessionCaptureNote = needsSessionCaptureNote
+        self.showsPreResetNote = showsPreResetNote
     }
 }
 
@@ -84,9 +90,9 @@ public struct AccountRowPresentation: Equatable, Sendable {
             now: now
         )
         self.billingBadge = Self.billingBadge(snapshot?.billingUsageMode)
-        self.gauges = Self.gaugeGroups(profile: profile, snapshot: snapshot)
+        self.gauges = Self.gaugeGroups(profile: profile, snapshot: snapshot, now: now)
 
-        let resetElapsed = snapshot?.resetHasElapsed(asOf: now) == true
+        let resetElapsed = snapshot?.allWindowsResetElapsed(asOf: now) == true
         self.switchTitle = adviceReason == nil ? "Switch" : "Best"
         self.highlightsSwitch = resetElapsed || adviceReason != nil
         if !hasStoredSnapshot {
@@ -173,11 +179,19 @@ public struct AccountRowPresentation: Equatable, Sendable {
             return AccountRowMessage(text: text, icon: "person.crop.circle.badge.questionmark", tone: .secondary)
         }
 
-        if !profile.isActiveCLI, snapshot.resetHasElapsed(asOf: now) {
+        // Gated on *every* window rolling over (not just the most-constrained
+        // one) so a short reset doesn't mask a still-live weekly, and framed as
+        // an estimate — for an inactive Codex account there is no live source to
+        // confirm it against.
+        if !profile.isActiveCLI, snapshot.allWindowsResetElapsed(asOf: now) {
+            let help = profile.provider == .codex
+                ? "Estimated, not measured: Codex only reports usage for the active CLI login. This is inferred from the last reading's reset time — switch to this account and run codex to see live numbers."
+                : "Estimated from the last reading's reset time, not a live measurement. Switch to this account to confirm."
             return AccountRowMessage(
-                text: "Limit window elapsed — likely full quota again",
+                text: "Reset window passed — quota likely restored (estimate)",
                 icon: "arrow.counterclockwise.circle",
-                tone: .success
+                tone: .success,
+                help: help
             )
         }
         if snapshot.isStale(asOf: now) {
@@ -218,15 +232,19 @@ public struct AccountRowPresentation: Equatable, Sendable {
         }
     }
 
-    private static func gaugeGroups(profile: AccountProfile, snapshot: UsageSnapshot?) -> AccountGaugeGroups {
+    private static func gaugeGroups(profile: AccountProfile, snapshot: UsageSnapshot?, now: Date) -> AccountGaugeGroups {
         let ordered = snapshot?.orderedDisplayWindows ?? []
         let needsSession = profile.isActiveCLI
             && profile.provider == .claude
             && !ordered.isEmpty
             && !ordered.contains(where: { $0.kind == .session })
+        let showsPreReset = !profile.isActiveCLI
+            && !ordered.isEmpty
+            && snapshot?.allWindowsResetElapsed(asOf: now) == true
         return AccountGaugeGroups(
             visible: ordered,
-            needsSessionCaptureNote: needsSession
+            needsSessionCaptureNote: needsSession,
+            showsPreResetNote: showsPreReset
         )
     }
 }

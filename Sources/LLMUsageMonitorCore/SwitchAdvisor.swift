@@ -163,7 +163,7 @@ public struct SwitchAdvisor: Sendable {
         // session quota but says nothing about the weekly window. Only when
         // every window has rolled over is the full quota likely back, no
         // matter how old the reading is.
-        if windows.allSatisfy({ $0.resetHasElapsed(asOf: now) }) {
+        if snapshot.allWindowsResetElapsed(asOf: now) {
             return ScoredTarget(
                 candidate: candidate,
                 score: 100,
