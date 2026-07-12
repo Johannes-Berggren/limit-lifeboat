@@ -1201,7 +1201,7 @@ final class AppState: ObservableObject {
         let mostConstrained = snapshot.mostConstrainedWindow?.usedFraction ?? snapshot.usedFraction
         switch settings.menuBarWindowPreference {
         case .mostConstrained:
-            return mostConstrained
+            return snapshot.surfacedConstrainedWindow?.usedFraction ?? mostConstrained
         case .session:
             return snapshot.window(ofKind: .session)?.usedFraction ?? mostConstrained
         case .weekly:

@@ -548,6 +548,17 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         orderedDisplayWindows.max { $0.usedPercent < $1.usedPercent }
     }
 
+    /// The most-constrained window the popover actually surfaces: session,
+    /// all-models weekly, or a model-scoped weekly only when it is at risk.
+    /// Healthy scoped weeklies are hidden in the card, so they must not
+    /// silently drive the menu-bar/summary number.
+    public var surfacedConstrainedWindow: UsageWindow? {
+        orderedDisplayWindows
+            .filter { $0.kind != .weeklyScoped
+                || $0.riskLevel == .warning || $0.riskLevel == .depleted }
+            .max { $0.usedPercent < $1.usedPercent }
+    }
+
     public func isStale(asOf now: Date = Date(), maxAge: TimeInterval = UsageThresholds.standard.staleAfter) -> Bool {
         now.timeIntervalSince(lastRefreshed) > maxAge
     }
