@@ -354,6 +354,19 @@ struct AccountRowView: View {
             }
         }
 
+        // When an inactive account's windows have all rolled over, the numbers
+        // above are the last reading from *before* the reset — flag them so the
+        // stale bars don't contradict the green "quota restored" note below.
+        if !profile.isActiveCLI, !visible.isEmpty,
+           snapshot?.allWindowsResetElapsed() == true, let last = snapshot?.lastRefreshed {
+            Label(
+                "Last reading before reset — checked \(last.formatted(.relative(presentation: .named)))",
+                systemImage: "clock.arrow.circlepath"
+            )
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+        }
+
         if needsSessionCaptureNote || !collapsibleScoped.isEmpty {
             HStack(spacing: DS.Spacing.sm) {
                 if needsSessionCaptureNote {
@@ -427,7 +440,7 @@ struct AccountRowView: View {
                         .font(.caption)
                         .foregroundStyle(note.color)
                         .lineLimit(2)
-                        .help(note.text)
+                        .help(note.help)
                 }
 
             }
@@ -470,7 +483,7 @@ struct AccountRowView: View {
 
     @ViewBuilder
     private var switchButton: some View {
-        let resetElapsed = snapshot?.resetHasElapsed() == true
+        let resetElapsed = snapshot?.allWindowsResetElapsed() == true
         let isAdvised = adviceReason != nil
         let highlighted = resetElapsed || isAdvised
         Button {
@@ -497,7 +510,7 @@ struct AccountRowView: View {
         return "Switch the CLI to this account's saved credentials"
     }
 
-    private var footerNote: (text: String, icon: String, color: Color)? {
+    private var footerNote: (text: String, icon: String, color: Color, help: String)? {
         guard let snapshot else {
             let text: String
             if !hasStoredSnapshot {
@@ -513,26 +526,30 @@ struct AccountRowView: View {
             } else {
                 text = "Credentials saved — usage appears after switching to it"
             }
-            return (text, "person.crop.circle.badge.questionmark", .secondary)
+            return (text, "person.crop.circle.badge.questionmark", .secondary, text)
         }
 
         // The opportunity label stays inactive-only: for the active account a
         // refresh simply confirms the reset, but stale readings deserve a
         // flag on every row — active accounts drift too (sleep, failures).
-        if !profile.isActiveCLI, snapshot.resetHasElapsed() {
-            return ("Limit window elapsed — likely full quota again", "arrow.counterclockwise.circle", .green)
+        // Gated on *every* window rolling over (not just the most-constrained
+        // one) so a short reset doesn't mask a still-live weekly, and framed
+        // as an estimate — for an inactive Codex account there is no live
+        // source to confirm it against.
+        if !profile.isActiveCLI, snapshot.allWindowsResetElapsed() {
+            let help = profile.provider == .codex
+                ? "Estimated, not measured: Codex only reports usage for the active CLI login. This is inferred from the last reading's reset time — switch to this account and run codex to see live numbers."
+                : "Estimated from the last reading's reset time, not a live measurement. Switch to this account to confirm."
+            return ("Reset window passed — quota likely restored (estimate)", "arrow.counterclockwise.circle", .green, help)
         }
 
         if snapshot.isStale() {
-            return (
-                "Last checked \(snapshot.lastRefreshed.formatted(.relative(presentation: .named)))",
-                "clock",
-                .secondary
-            )
+            let text = "Last checked \(snapshot.lastRefreshed.formatted(.relative(presentation: .named)))"
+            return (text, "clock", .secondary, text)
         }
 
         if snapshot.orderedDisplayWindows.isEmpty, !snapshot.message.isEmpty {
-            return (snapshot.message, "info.circle", .secondary)
+            return (snapshot.message, "info.circle", .secondary, snapshot.message)
         }
 
         return nil
