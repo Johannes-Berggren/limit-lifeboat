@@ -73,5 +73,19 @@ swift test
 open dist/LLMUsageMonitor.app
 ```
 
+Local packaging automatically uses the first available Apple Development
+certificate so macOS Keychain approvals remain valid across rebuilds. Set
+`SIGN_IDENTITY` to select a different identity. When no development identity is
+available the script falls back to ad-hoc signing and warns that a rebuilt app
+may require fresh Keychain approval. The first stably signed build can still ask
+once for each item created by an older ad-hoc build; choose `Always Allow` to
+migrate that item's trust to the stable identity.
+
+Quit the copy in `dist` before rebuilding it. The packaging script refuses to
+delete a running bundle because doing so prevents macOS from verifying that
+process for Keychain access. Conductor also stops a workspace-launched copy
+before archiving that workspace once the shared repository settings are present
+on the default branch.
+
 Do not use `swift run` — the app must run from a bundle for notifications
 to work. See [RELEASING.md](RELEASING.md) for signed/notarized releases.

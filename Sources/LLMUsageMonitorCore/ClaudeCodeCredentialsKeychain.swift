@@ -1,13 +1,20 @@
 import Foundation
+import Security
 
 public enum ClaudeCodeCredentialsKeychainError: Error, LocalizedError {
-    case securityToolFailed(status: Int32, message: String)
+    case credentialAccessUnavailable(underlying: Error)
+    case keychainError(OSStatus)
 
     public var errorDescription: String? {
         switch self {
-        case .securityToolFailed(let status, let message):
-            let detail = message.isEmpty ? "no error output" : message
-            return "/usr/bin/security exited with status \(status) (\(detail))."
+        case .credentialAccessUnavailable(let underlying):
+            return underlying.localizedDescription
+        case .keychainError(let status):
+            if CredentialStoreError.isCodeSigningStatus(status) {
+                return CredentialStoreError.keychainError(status).localizedDescription
+            }
+            let detail = SecCopyErrorMessageString(status, nil) as String? ?? "unknown Keychain error"
+            return "Could not access Claude Code credentials (Keychain status \(status): \(detail))."
         }
     }
 }
@@ -22,164 +29,143 @@ public protocol ClaudeCLICredentialSource: Sendable {
     func deleteLiveItem() throws
 }
 
-/// Reads and writes the "Claude Code-credentials" generic password via
-/// /usr/bin/security. The CLI owns that item, so going through the same tool
-/// (rather than SecItem, which would be scoped to this app's identity) keeps
-/// the item readable by Claude Code afterwards.
+/// Reads and writes the "Claude Code-credentials" generic password directly
+/// through Security.framework. Existing items keep their ACL because updates
+/// modify only kSecValueData. A newly-created item explicitly trusts both this
+/// app and /usr/bin/security so the Claude Code CLI remains interoperable.
 public struct ClaudeCodeCredentialsKeychain: ClaudeCLICredentialSource {
     public static let serviceName = "Claude Code-credentials"
 
-    /// `security` uses this exit status for errSecItemNotFound.
-    private static let itemNotFoundStatus: Int32 = 44
+    private let serviceName: String
+    private let accountName: String
+    private let validateAccess: @Sendable () throws -> Void
 
-    public init() {}
+    public init(
+        serviceName: String = Self.serviceName,
+        accountName: String = NSUserName(),
+        validateAccess: @escaping @Sendable () throws -> Void = {}
+    ) {
+        self.serviceName = serviceName
+        self.accountName = accountName
+        self.validateAccess = validateAccess
+    }
 
     public func readLiveItemJSON() throws -> Data? {
-        let result = try runSecurity(arguments: [
-            "find-generic-password",
-            "-s", Self.serviceName,
-            "-w"
-        ])
+        try validateCredentialAccess()
 
-        guard result.status == 0 else {
-            if result.status == Self.itemNotFoundStatus
-                || result.errorOutput.localizedCaseInsensitiveContains("could not be found") {
-                return nil
-            }
-            throw ClaudeCodeCredentialsKeychainError.securityToolFailed(
-                status: result.status,
-                message: result.errorOutput
-            )
-        }
+        var query = baseQuery()
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
 
-        return Self.decodePasswordOutput(result.output)
-    }
-
-    public func writeLiveItemJSON(_ data: Data) throws {
-        // The item JSON is secret material, so it must never appear in the
-        // process argument list (visible to `ps`). `security -i` reads the
-        // whole add command from stdin instead.
-        let command = Self.makeAddGenericPasswordCommand(
-            account: NSUserName(),
-            service: Self.serviceName,
-            value: String(decoding: data, as: UTF8.self)
-        )
-        let result = try runSecurity(arguments: ["-i"], input: Data((command + "\n").utf8))
-
-        guard result.status == 0 else {
-            throw ClaudeCodeCredentialsKeychainError.securityToolFailed(
-                status: result.status,
-                message: result.errorOutput
-            )
-        }
-    }
-
-    public func deleteLiveItem() throws {
-        let result = try runSecurity(arguments: [
-            "delete-generic-password",
-            "-a", NSUserName(),
-            "-s", Self.serviceName
-        ])
-        guard result.status == 0 || result.status == Self.itemNotFoundStatus else {
-            throw ClaudeCodeCredentialsKeychainError.securityToolFailed(
-                status: result.status,
-                message: result.errorOutput
-            )
-        }
-    }
-
-    /// Normalizes `security find-generic-password -w` output into the stored
-    /// password bytes, or nil when the output is empty.
-    ///
-    /// `-w` prints an ASCII password as plain text, but a password containing
-    /// ANY non-ASCII byte as bare lowercase hex with no "0x" prefix (the
-    /// "0x<HEX> \"...\"" form only appears in `-g` output). Our passwords are
-    /// JSON, so text starting with "{" or "[" is taken verbatim before the
-    /// hex interpretation gets a chance to misread an all-hex-looking value.
-    static func decodePasswordOutput(_ raw: String) -> Data? {
-        let output = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !output.isEmpty else {
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound {
             return nil
         }
-        if output.hasPrefix("{") || output.hasPrefix("[") {
-            return Data(output.utf8)
+        guard status == errSecSuccess else {
+            throw ClaudeCodeCredentialsKeychainError.keychainError(status)
         }
-        if let decoded = decodeHexPassword(output) {
-            return decoded
-        }
-        return Data(output.utf8)
-    }
-
-    /// Builds the `add-generic-password` line fed to `security -i`. The value
-    /// is double-quoted with backslashes escaped before inner quotes; raw
-    /// UTF-8 passes through unchanged.
-    static func makeAddGenericPasswordCommand(account: String, service: String, value: String) -> String {
-        "add-generic-password -U -a \"\(escapeQuoted(account))\" -s \"\(escapeQuoted(service))\" -w \"\(escapeQuoted(value))\""
-    }
-
-    private static func escapeQuoted(_ text: String) -> String {
-        text
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-    }
-
-    private static func decodeHexPassword(_ output: String) -> Data? {
-        var hexText = Substring(output)
-        if hexText.hasPrefix("0x") {
-            hexText = hexText.dropFirst(2)
-        }
-        guard !hexText.isEmpty,
-              hexText.count.isMultiple(of: 2),
-              hexText.allSatisfy(\.isHexDigit) else {
-            return nil
+        guard let data = result as? Data else {
+            throw ClaudeCodeCredentialsKeychainError.keychainError(errSecDecode)
         }
 
-        var data = Data(capacity: hexText.count / 2)
-        var index = hexText.startIndex
-        while index < hexText.endIndex {
-            let next = hexText.index(index, offsetBy: 2)
-            guard let byte = UInt8(hexText[index..<next], radix: 16) else {
-                return nil
-            }
-            data.append(byte)
-            index = next
-        }
         return data
     }
 
-    private func runSecurity(arguments: [String], input: Data? = nil) throws -> (status: Int32, output: String, errorOutput: String) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = arguments
+    public func writeLiveItemJSON(_ data: Data) throws {
+        try validateCredentialAccess()
 
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
-
-        let inputPipe: Pipe?
-        if input != nil {
-            let pipe = Pipe()
-            process.standardInput = pipe
-            inputPipe = pipe
-        } else {
-            inputPipe = nil
-        }
-
-        try process.run()
-        if let input, let inputPipe {
-            inputPipe.fileHandleForWriting.write(input)
-            try? inputPipe.fileHandleForWriting.close()
-        }
-        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-
-        return (
-            process.terminationStatus,
-            String(decoding: outputData, as: UTF8.self),
-            String(decoding: errorData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        let status = SecItemUpdate(
+            baseQuery() as CFDictionary,
+            [kSecValueData as String: data] as CFDictionary
         )
+        if status == errSecSuccess {
+            return
+        }
+        guard status == errSecItemNotFound else {
+            throw ClaudeCodeCredentialsKeychainError.keychainError(status)
+        }
+
+        try addSharedItem(data)
+    }
+
+    public func deleteLiveItem() throws {
+        try validateCredentialAccess()
+
+        let status = SecItemDelete(baseQuery() as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw ClaudeCodeCredentialsKeychainError.keychainError(status)
+        }
+    }
+
+    private func addSharedItem(_ data: Data) throws {
+        let access = try makeSharedAccess()
+        var query = baseQuery()
+        query[kSecValueData as String] = data
+        query[kSecAttrAccess as String] = access
+
+        let status = SecItemAdd(query as CFDictionary, nil)
+        if status == errSecSuccess {
+            return
+        }
+
+        // Another process may have created the item after our update missed
+        // it. Retry as a data-only update so its ACL remains untouched.
+        if status == errSecDuplicateItem {
+            let retryStatus = SecItemUpdate(
+                baseQuery() as CFDictionary,
+                [kSecValueData as String: data] as CFDictionary
+            )
+            guard retryStatus == errSecSuccess else {
+                throw ClaudeCodeCredentialsKeychainError.keychainError(retryStatus)
+            }
+            return
+        }
+
+        throw ClaudeCodeCredentialsKeychainError.keychainError(status)
+    }
+
+    private func makeSharedAccess() throws -> SecAccess {
+        var currentApplication: SecTrustedApplication?
+        var status = SecTrustedApplicationCreateFromPath(nil, &currentApplication)
+        guard status == errSecSuccess, let currentApplication else {
+            throw ClaudeCodeCredentialsKeychainError.keychainError(status)
+        }
+
+        var securityTool: SecTrustedApplication?
+        status = "/usr/bin/security".withCString {
+            SecTrustedApplicationCreateFromPath($0, &securityTool)
+        }
+        guard status == errSecSuccess, let securityTool else {
+            throw ClaudeCodeCredentialsKeychainError.keychainError(status)
+        }
+
+        var access: SecAccess?
+        status = SecAccessCreate(
+            serviceName as CFString,
+            [currentApplication, securityTool] as CFArray,
+            &access
+        )
+        guard status == errSecSuccess, let access else {
+            throw ClaudeCodeCredentialsKeychainError.keychainError(status)
+        }
+        return access
+    }
+
+    private func baseQuery() -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: accountName
+        ]
+    }
+
+    private func validateCredentialAccess() throws {
+        do {
+            try validateAccess()
+        } catch {
+            throw ClaudeCodeCredentialsKeychainError.credentialAccessUnavailable(underlying: error)
+        }
     }
 }
 

@@ -132,6 +132,20 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Stops all work that may touch credentials after the executable backing
+    /// this process has disappeared or been replaced. The app delegate shows a
+    /// single explanation and terminates immediately afterwards.
+    func stopForInvalidatedBundle() {
+        refreshTask?.cancel()
+        refreshTask = nil
+        loginFollowUpTasks.values.forEach { $0.cancel() }
+        loginFollowUpTasks.removeAll()
+        authPollTask?.cancel()
+        authPollTask = nil
+        authStateMonitor = nil
+        statusMessage = "The running app bundle was replaced or deleted. Relaunch LLM Usage Monitor to continue."
+    }
+
     private func startAuthPolling() {
         authPollTask?.cancel()
         authPollTask = Task { [weak self] in

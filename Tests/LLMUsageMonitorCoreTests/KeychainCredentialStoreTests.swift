@@ -68,22 +68,28 @@ final class KeychainCredentialStoreTests: XCTestCase {
         }
     }
 
-    func testCodeSigningStatusYieldsActionableRelaunchMessage() {
-        // -67068 = errSecCSStaticCodeNotFound: the running copy was deleted or
-        // rebuilt out from under the process, so the Keychain can't authorize
-        // the item. The message must name the cause and the fix, not a bare code.
-        let error = CredentialStoreError.keychainError(-67068)
-        let description = error.errorDescription ?? ""
-        XCTAssertTrue(description.contains("-67068"), "Keeps the raw status for support")
-        XCTAssertTrue(description.localizedCaseInsensitiveContains("relaunch"),
-                      "Tells the user to relaunch; was: \(description)")
-        XCTAssertTrue(error.isKeychainAccessDenied,
-                      "Code-signing failures are recoverable access errors, not a missing item")
+    func testIntegrityFailureIsAnActionableAccessDenial() {
+        let expected = RunningExecutableIntegrityError.unavailable(path: "/tmp/missing/LLMUsageMonitor")
+        let store = KeychainCredentialStore(
+            service: "unused",
+            validateAccess: { throw expected }
+        )
+
+        XCTAssertThrowsError(try store.hasSnapshot(for: UUID())) { error in
+            guard let storeError = error as? CredentialStoreError,
+                  case .credentialAccessUnavailable(let underlying) = storeError else {
+                return XCTFail("Expected credentialAccessUnavailable, got \(error)")
+            }
+            XCTAssertEqual(underlying as? RunningExecutableIntegrityError, expected)
+            XCTAssertTrue(storeError.isKeychainAccessDenied)
+            XCTAssertTrue(storeError.localizedDescription.contains("relaunch"))
+        }
     }
 
     func testOrdinaryKeychainStatusKeepsGenericMessageAndIsNotAccessDenied() {
         let error = CredentialStoreError.keychainError(errSecItemNotFound)
-        XCTAssertEqual(error.errorDescription, "Keychain operation failed with status \(errSecItemNotFound).")
+
+        XCTAssertEqual(error.localizedDescription, "Keychain operation failed with status \(errSecItemNotFound).")
         XCTAssertFalse(error.isKeychainAccessDenied)
     }
 }

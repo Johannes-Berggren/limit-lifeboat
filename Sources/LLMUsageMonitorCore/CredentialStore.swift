@@ -4,6 +4,7 @@ import Security
 public enum CredentialStoreError: Error, LocalizedError {
     case encodeFailed
     case decodeFailed(underlying: Error?)
+    case credentialAccessUnavailable(underlying: Error)
     case keychainError(OSStatus)
 
     public var errorDescription: String? {
@@ -13,6 +14,8 @@ public enum CredentialStoreError: Error, LocalizedError {
         case .decodeFailed(let underlying):
             let reason = underlying?.localizedDescription ?? "the data is not in the expected format"
             return "Could not decode the saved credentials (\(reason))."
+        case .credentialAccessUnavailable(let underlying):
+            return underlying.localizedDescription
         case .keychainError(let status):
             if Self.isCodeSigningStatus(status) {
                 // The Keychain couldn't resolve this app's on-disk code to
@@ -32,14 +35,18 @@ public enum CredentialStoreError: Error, LocalizedError {
     /// genuine absence, so the app can prompt the user to grant access instead
     /// of treating the account as having no saved credentials.
     public var isKeychainAccessDenied: Bool {
-        guard case .keychainError(let status) = self else {
+        switch self {
+        case .credentialAccessUnavailable:
+            return true
+        case .keychainError(let status):
+            return status == errSecInteractionNotAllowed
+                || status == errSecInteractionRequired
+                || status == errSecAuthFailed
+                || status == errSecUserCanceled
+                || Self.isCodeSigningStatus(status)
+        case .encodeFailed, .decodeFailed:
             return false
         }
-        return status == errSecInteractionNotAllowed
-            || status == errSecInteractionRequired
-            || status == errSecAuthFailed
-            || status == errSecUserCanceled
-            || Self.isCodeSigningStatus(status)
     }
 
     /// Code-signing / static-code errors (the `errSecCS*` family, e.g.
@@ -62,14 +69,20 @@ public protocol CredentialStoreProtocol {
 
 public final class KeychainCredentialStore: CredentialStoreProtocol {
     private let service: String
+    private let validateAccess: @Sendable () throws -> Void
     private let encoder = JSONEncoder.appEncoder
     private let decoder = JSONDecoder.appDecoder
 
-    public init(service: String = "com.johannesberggren.LLMUsageMonitor.credentials") {
+    public init(
+        service: String = "com.johannesberggren.LLMUsageMonitor.credentials",
+        validateAccess: @escaping @Sendable () throws -> Void = {}
+    ) {
         self.service = service
+        self.validateAccess = validateAccess
     }
 
     public func save(snapshot: CredentialSnapshot, for accountID: UUID) throws {
+        try validateCredentialAccess()
         guard let data = try? encoder.encode(snapshot) else {
             throw CredentialStoreError.encodeFailed
         }
@@ -98,6 +111,7 @@ public final class KeychainCredentialStore: CredentialStoreProtocol {
     }
 
     public func loadSnapshot(for accountID: UUID) throws -> CredentialSnapshot? {
+        try validateCredentialAccess()
         var query = baseQuery(accountID: accountID)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -121,6 +135,7 @@ public final class KeychainCredentialStore: CredentialStoreProtocol {
     }
 
     public func deleteSnapshot(for accountID: UUID) throws {
+        try validateCredentialAccess()
         let status = SecItemDelete(baseQuery(accountID: accountID) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw CredentialStoreError.keychainError(status)
@@ -128,6 +143,7 @@ public final class KeychainCredentialStore: CredentialStoreProtocol {
     }
 
     public func hasSnapshot(for accountID: UUID) throws -> Bool {
+        try validateCredentialAccess()
         var query = baseQuery(accountID: accountID)
         query[kSecReturnData as String] = false
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -148,5 +164,13 @@ public final class KeychainCredentialStore: CredentialStoreProtocol {
             kSecAttrService as String: service,
             kSecAttrAccount as String: accountID.uuidString
         ]
+    }
+
+    private func validateCredentialAccess() throws {
+        do {
+            try validateAccess()
+        } catch {
+            throw CredentialStoreError.credentialAccessUnavailable(underlying: error)
+        }
     }
 }
