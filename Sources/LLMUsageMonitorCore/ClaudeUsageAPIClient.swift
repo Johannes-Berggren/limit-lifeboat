@@ -154,35 +154,19 @@ public struct ClaudeUsageAPIClient: Sendable {
     }
 
     public func makeSnapshot(for profile: AccountProfile, usage: ClaudeAPIUsage, now: Date = Date()) -> UsageSnapshot {
-        guard let selectedWindow = usage.windows.max(by: { $0.usedPercent < $1.usedPercent }) else {
-            return UsageSnapshot(
-                accountID: profile.id,
-                provider: .claude,
-                riskLevel: .unknown,
-                source: Self.source,
-                lastRefreshed: now,
-                parseConfidence: .none,
-                message: "Anthropic usage API did not include a recognizable limit."
-            )
-        }
-
         let windows = usage.windows.map(makeWindow(from:))
-        let usedPercent = min(100, max(0, selectedWindow.usedPercent))
-        let payAsYouGoState = payAsYouGoState(for: usage, mostConstrainedUsedPercent: selectedWindow.usedPercent)
-        return UsageSnapshot(
+        let mostConstrained = windows.map(\.usedPercent).max() ?? 0
+        let payAsYouGoState = payAsYouGoState(for: usage, mostConstrainedUsedPercent: mostConstrained)
+        return UsageSnapshotFactory.snapshot(
             accountID: profile.id,
             provider: .claude,
             windows: windows,
-            includedRemaining: max(0, 100 - usedPercent),
-            includedLimit: 100,
-            resetDate: selectedWindow.resetsAt,
-            resetDescription: resetDescription(for: selectedWindow.resetsAt),
             creditStatus: creditStatus(for: payAsYouGoState),
-            riskLevel: UsageThresholds.standard.riskLevel(usedPercent: usedPercent),
             source: Self.source,
             lastRefreshed: now,
-            parseConfidence: .high,
-            message: message(for: usage.windows),
+            message: usage.windows.isEmpty
+                ? "Anthropic usage API did not include a recognizable limit."
+                : message(for: usage.windows),
             payAsYouGoState: payAsYouGoState
         )
     }
@@ -314,42 +298,16 @@ public struct ClaudeUsageAPIClient: Sendable {
     // MARK: - Snapshot mapping
 
     private func makeWindow(from window: ClaudeAPIUsageWindow) -> UsageWindow {
-        let usedPercent = min(100, max(0, window.usedPercent))
-        let descriptor = windowDescriptor(for: window)
-        return UsageWindow(
-            id: descriptor.id,
-            kind: descriptor.kind,
-            label: descriptor.label,
-            usedPercent: usedPercent,
-            resetDate: window.resetsAt,
-            resetDescription: resetDescription(for: window.resetsAt),
-            windowMinutes: descriptor.windowMinutes,
-            riskLevel: UsageThresholds.standard.riskLevel(usedPercent: usedPercent)
+        let descriptor = ClaudeUsageWindowCatalog.apiDescriptor(
+            kindRaw: window.kindRaw,
+            scopeName: window.scopeName
         )
-    }
-
-    /// Ids deliberately mirror `ClaudeCodeUsageReport`'s windowDescriptor so
-    /// per-window alert dedupe keys survive switching between sources.
-    private func windowDescriptor(
-        for window: ClaudeAPIUsageWindow
-    ) -> (id: String, kind: UsageWindowKind, label: String, windowMinutes: Int?) {
-        switch window.kindRaw {
-        case "session", "five_hour":
-            return ("session", .session, "Session (5h)", 300)
-        case "weekly_all", "seven_day":
-            return ("weekly-all", .weekly, "Weekly (all models)", 10080)
-        case "weekly_scoped":
-            guard let scopeName = window.scopeName else {
-                return ("weekly-scoped", .weeklyScoped, "Weekly (scoped)", 10080)
-            }
-            return ("weekly-\(UsageWindowID.slug(scopeName))", .weeklyScoped, "Weekly (\(scopeName))", 10080)
-        case "seven_day_opus":
-            return ("weekly-opus", .weeklyScoped, "Weekly (Opus)", 10080)
-        case "seven_day_sonnet":
-            return ("weekly-sonnet", .weeklyScoped, "Weekly (Sonnet)", 10080)
-        default:
-            return (UsageWindowID.slug(window.kindRaw), .other, humanized(window.kindRaw).capitalized, nil)
-        }
+        return UsageSnapshotFactory.window(
+            descriptor: descriptor,
+            usedPercent: window.usedPercent,
+            resetDate: window.resetsAt,
+            resetDescription: resetDescription(for: window.resetsAt)
+        )
     }
 
     private func message(for windows: [ClaudeAPIUsageWindow]) -> String {
@@ -360,20 +318,7 @@ public struct ClaudeUsageAPIClient: Sendable {
     }
 
     private func messageLabel(for window: ClaudeAPIUsageWindow) -> String {
-        switch window.kindRaw {
-        case "session", "five_hour":
-            return "session"
-        case "weekly_all", "seven_day":
-            return "weekly all models"
-        case "weekly_scoped":
-            return window.scopeName.map { "weekly \($0)" } ?? "weekly scoped"
-        case "seven_day_opus":
-            return "weekly Opus"
-        case "seven_day_sonnet":
-            return "weekly Sonnet"
-        default:
-            return humanized(window.kindRaw)
-        }
+        ClaudeUsageWindowCatalog.apiMessageLabel(kindRaw: window.kindRaw, scopeName: window.scopeName)
     }
 
     /// A short absolute local time ("Jul 8, 2026 at 1:49 AM"); the API gives
@@ -388,9 +333,6 @@ public struct ClaudeUsageAPIClient: Sendable {
         return formatter.string(from: date)
     }
 
-    private func humanized(_ kindRaw: String) -> String {
-        kindRaw.replacingOccurrences(of: "_", with: " ")
-    }
 }
 
 // MARK: - Account info (api/oauth/profile)

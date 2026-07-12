@@ -2,22 +2,7 @@ import AppKit
 import Combine
 import Foundation
 import LLMUsageMonitorCore
-import UserNotifications
 import WebKit
-
-struct MenuBarSummary: Equatable {
-    var claudeValue: String
-    var codexValue: String
-    var accessibilityText: String
-    var riskLevel: RiskLevel
-
-    static let empty = MenuBarSummary(
-        claudeValue: "–",
-        codexValue: "–",
-        accessibilityText: "LLM usage has not been refreshed.",
-        riskLevel: .unknown
-    )
-}
 
 @MainActor
 final class AppState: ObservableObject {
@@ -59,8 +44,12 @@ final class AppState: ObservableObject {
     private let paceAlertPlanner = PaceAlertPlanner()
     private let updateService = UpdateService()
     private let settingsWindowController = SettingsWindowController()
+    private let terminalLauncher = TerminalCommandLauncher()
     private var refreshTask: Task<Void, Never>?
-    private var loginFollowUpTask: Task<Void, Never>?
+    private var loginFollowUpTasks: [Provider: Task<Void, Never>] = [:]
+    private var authPollTask: Task<Void, Never>?
+    private var authStateMonitor: AuthStateMonitor?
+    private var authObservationInteractive = false
     private var wakeObserver: NSObjectProtocol?
     private var cancellables: Set<AnyCancellable> = []
     /// Popover-open refreshes are throttled on attempts, not outcomes — an
@@ -103,6 +92,12 @@ final class AppState: ObservableObject {
         }
         usageAlertController.requestAuthorization()
         observeWake()
+        authStateMonitor = AuthStateMonitor { [weak self] provider in
+            Task { @MainActor [weak self] in
+                await self?.reconcileStableExternalChange(provider: provider, origin: .fileEvent)
+            }
+        }
+        startAuthPolling()
 
         self.settings.$refreshIntervalMinutes
             .dropFirst()
@@ -130,9 +125,49 @@ final class AppState: ObservableObject {
 
     deinit {
         refreshTask?.cancel()
-        loginFollowUpTask?.cancel()
+        loginFollowUpTasks.values.forEach { $0.cancel() }
+        authPollTask?.cancel()
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+        }
+    }
+
+    /// Stops all work that may touch credentials after the executable backing
+    /// this process has disappeared or been replaced. The app delegate shows a
+    /// single explanation and terminates immediately afterwards.
+    func stopForInvalidatedBundle() {
+        refreshTask?.cancel()
+        refreshTask = nil
+        loginFollowUpTasks.values.forEach { $0.cancel() }
+        loginFollowUpTasks.removeAll()
+        authPollTask?.cancel()
+        authPollTask = nil
+        authStateMonitor = nil
+        statusMessage = "The running app bundle was replaced or deleted. Relaunch LLM Usage Monitor to continue."
+    }
+
+    private func startAuthPolling() {
+        authPollTask?.cancel()
+        authPollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                let seconds = self?.authObservationInteractive == true ? 5 : 30
+                try? await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000)
+                guard !Task.isCancelled else { return }
+                for provider in Provider.allCases {
+                    await self?.reconcileStableExternalChange(provider: provider, origin: .polling)
+                }
+            }
+        }
+    }
+
+    func setAuthObservationInteractive(_ interactive: Bool) {
+        guard authObservationInteractive != interactive else { return }
+        authObservationInteractive = interactive
+        startAuthPolling()
+        if interactive {
+            for provider in Provider.allCases {
+                Task { await reconcileStableExternalChange(provider: provider, origin: .popover) }
+            }
         }
     }
 
@@ -158,6 +193,9 @@ final class AppState: ObservableObject {
             Task { @MainActor [weak self] in
                 // Give the network and the CLIs a moment to come back.
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
+                for provider in Provider.allCases {
+                    await self?.reconcileStableExternalChange(provider: provider, origin: .wake)
+                }
                 await self?.refreshAll()
             }
         }
@@ -168,9 +206,10 @@ final class AppState: ObservableObject {
     /// with the slow CLI probe only as fallback) when any of them has
     /// outlived the refresh interval.
     func refreshIfStale() {
-        // Sync the active Codex login before reading so a terminal-side account
-        // change is attributed to the right profile.
-        try? captureActiveCredentials(provider: .codex)
+        // Both providers can be changed by another app. Reconcile them before
+        // rendering or attributing usage, even when usage itself is still fresh.
+        _ = try? reconcileLiveCredentials(provider: .codex, origin: .popover)
+        Task { await reconcileStableExternalChange(provider: .claude, origin: .popover) }
         refreshCodexUsage()
         if shouldRefreshClaudeNow() {
             Task { await refreshAll() }
@@ -218,11 +257,7 @@ final class AppState: ObservableObject {
         // Attribute the current CLI logins to profiles (registering new
         // accounts as needed) and keep their credential snapshots fresh.
         for provider in Provider.allCases {
-            do {
-                try captureActiveCredentials(provider: provider)
-            } catch {
-                statusMessage = "Could not capture the current \(provider.displayName) login: \(error.localizedDescription)"
-            }
+            await reconcileStableExternalChange(provider: provider, origin: .scheduledRefresh)
         }
 
         // Claude usage comes from the account-wide usage API for every
@@ -346,23 +381,11 @@ final class AppState: ObservableObject {
         }
         accountInfoFetched.insert(profile.id)
 
-        guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else {
-            return
-        }
-        var changed = false
-        if let plan = info.planLabel, profiles[index].planLabel != plan {
-            profiles[index].planLabel = plan
-            changed = true
-        }
-        if let identity = info.identity {
-            let merged = mergedIdentity(existing: profiles[index].identity, new: identity)
-            if profiles[index].identity != merged {
-                profiles[index].identity = merged
-                changed = true
-            }
-        }
-        if changed {
-            profiles[index].updatedAt = Date()
+        if AccountProfileUpdater.enrich(
+            profiles: &profiles,
+            profileID: profile.id,
+            enrichment: AccountProfileEnrichment(planLabel: info.planLabel, identity: info.identity)
+        ) {
             persistProfiles()
         }
     }
@@ -391,35 +414,53 @@ final class AppState: ObservableObject {
     /// login, then captures its credentials into the matching profile so
     /// switching never depends on a manual snapshot step.
     @discardableResult
-    private func captureActiveCredentials(provider: Provider) throws -> AccountProfile? {
-        guard let active = syncActiveCLIAccount(provider: provider) else {
-            return nil
+    private func reconcileLiveCredentials(
+        provider: Provider,
+        origin: AuthChangeOrigin,
+        observation suppliedObservation: LiveCredentialObservation? = nil,
+        preferredLoginProfileID: UUID? = nil
+    ) throws -> AccountProfile? {
+        let observation = try suppliedObservation ?? cliSwitcher.liveObservation(provider: provider)
+        let previousActiveID = activeProfile(for: provider)?.id
+        var storedFingerprints: [UUID: String] = [:]
+        var profilesWithStoredCredentials: Set<UUID> = []
+        for profile in profiles where profile.provider == provider {
+            if let fingerprint = try cliSwitcher.storedCredentialFingerprint(for: profile.id) {
+                storedFingerprints[profile.id] = fingerprint
+                profilesWithStoredCredentials.insert(profile.id)
+            }
         }
-        guard cliSwitcher.validateActiveLogin(provider: provider) else {
-            return active
+        var action = syncPlanner.plan(
+            provider: provider,
+            currentIdentity: observation.identity,
+            profiles: profiles,
+            liveCredentialFingerprint: observation.credentialFingerprint,
+            storedCredentialFingerprints: storedFingerprints,
+            profilesWithStoredCredentials: profilesWithStoredCredentials
+        )
+        if let preferredLoginProfileID,
+           let identity = observation.identity,
+           let preferred = profiles.first(where: { $0.id == preferredLoginProfileID && $0.provider == provider }),
+           preferred.identity == nil,
+           !profilesWithStoredCredentials.contains(preferred.id),
+           !profiles.contains(where: { $0.provider == provider && $0.identity?.matches(identity) == true }) {
+            action = .adopt(preferred.id)
         }
-        _ = try cliSwitcher.captureAndStoreSnapshot(for: active)
-        return active
-    }
-
-    @discardableResult
-    private func syncActiveCLIAccount(provider: Provider) -> AccountProfile? {
-        let currentIdentity = cliSwitcher.currentIdentity(provider: provider)
-        let action = syncPlanner.plan(provider: provider, currentIdentity: currentIdentity, profiles: profiles)
         var changed = false
         var activeID: UUID?
 
         switch action {
         case .deactivateAll:
-            for index in profiles.indices where profiles[index].provider == provider && profiles[index].isActiveCLI {
-                profiles[index].isActiveCLI = false
-                profiles[index].updatedAt = Date()
-                changed = true
-            }
+            changed = AccountProfileUpdater.setActiveCLI(
+                profiles: &profiles,
+                provider: provider,
+                profileID: nil
+            ).changed
         case .activate(let id), .adopt(let id):
             activeID = id
         case .create:
-            guard let currentIdentity else {
+            guard let currentIdentity = observation.identity else {
+                statusMessage = "Detected new \(provider.displayName) credentials; waiting for stable account identity."
                 break
             }
             let profile = AccountProfile(
@@ -434,27 +475,30 @@ final class AppState: ObservableObject {
         }
 
         var active: AccountProfile?
-        if let activeID, let currentIdentity {
-            for index in profiles.indices where profiles[index].provider == provider {
-                let shouldBeActive = profiles[index].id == activeID
-                if profiles[index].isActiveCLI != shouldBeActive {
-                    profiles[index].isActiveCLI = shouldBeActive
-                    profiles[index].updatedAt = Date()
-                    changed = true
-                    // Anchor the Codex freshness gate on the inactive→active
-                    // transition only (never every sync, or the gate would
-                    // always reject the account's own latest event).
-                    if shouldBeActive, provider == .codex {
-                        codexActiveSince[profiles[index].id] = Date()
-                    }
-                }
+        if let activeID {
+            let activation = AccountProfileUpdater.setActiveCLI(
+                profiles: &profiles,
+                provider: provider,
+                profileID: activeID
+            )
+            changed = changed || activation.changed
+            // Anchor the Codex freshness gate on the inactive→active
+            // transition only (never every sync, or the gate would always
+            // reject the account's own latest event).
+            if let activatedID = activation.activatedID, provider == .codex {
+                codexActiveSince[activatedID] = Date()
             }
             if let index = profiles.firstIndex(where: { $0.id == activeID }) {
-                let merged = mergedIdentity(existing: profiles[index].identity, new: currentIdentity)
+                if let currentIdentity = observation.identity {
+                let merged = AccountProfileUpdater.mergeIdentity(
+                    existing: profiles[index].identity,
+                    new: currentIdentity
+                )
                 if profiles[index].identity != merged {
                     profiles[index].identity = merged
                     profiles[index].updatedAt = Date()
                     changed = true
+                }
                 }
                 active = profiles[index]
             }
@@ -463,7 +507,40 @@ final class AppState: ObservableObject {
         if changed {
             persistProfiles()
         }
+        if let active,
+           observation.isLoggedIn,
+           observation.snapshot != nil {
+            _ = try cliSwitcher.storeObservation(observation, for: active)
+            objectWillChange.send()
+        }
+        let newActiveID = active?.id
+        let isExternalOrigin = origin == .fileEvent
+            || origin == .polling
+            || origin == .popover
+            || origin == .wake
+            || origin == .scheduledRefresh
+        if previousActiveID != newActiveID,
+           isExternalOrigin {
+            // An outside account choice is deliberate user intent. Give it the
+            // same protection as a switch made from this app.
+            lastManualSwitchAt[provider] = Date()
+            lastAutoSwitchAttempt[provider] = nil
+        }
+        updateMenuBarSummary()
         return active
+    }
+
+    private func reconcileStableExternalChange(provider: Provider, origin: AuthChangeOrigin) async {
+        do {
+            let first = try cliSwitcher.liveObservation(provider: provider)
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            let second = try cliSwitcher.liveObservation(provider: provider)
+            guard first.stabilityKey == second.stabilityKey else { return }
+            _ = try reconcileLiveCredentials(provider: provider, origin: origin, observation: second)
+        } catch {
+            statusMessage = "Could not reconcile \(provider.displayName) credentials: \(error.localizedDescription)"
+        }
     }
 
     private func defaultLabel(for identity: AccountIdentity, provider: Provider) -> String {
@@ -573,23 +650,11 @@ final class AppState: ObservableObject {
         }
         accountInfoFetched.insert(profile.id)
 
-        guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else {
-            return
-        }
-        var changed = false
-        if let plan = info.planLabel, profiles[index].planLabel != plan {
-            profiles[index].planLabel = plan
-            changed = true
-        }
-        if let identity = info.identity {
-            let merged = mergedIdentity(existing: profiles[index].identity, new: identity)
-            if profiles[index].identity != merged {
-                profiles[index].identity = merged
-                changed = true
-            }
-        }
-        if changed {
-            profiles[index].updatedAt = Date()
+        if AccountProfileUpdater.enrich(
+            profiles: &profiles,
+            profileID: profile.id,
+            enrichment: AccountProfileEnrichment(planLabel: info.planLabel, identity: info.identity)
+        ) {
             persistProfiles()
         }
     }
@@ -766,8 +831,14 @@ final class AppState: ObservableObject {
         }
 
         // Capture the currently active login first so nothing is lost.
+        let outgoingObservation: LiveCredentialObservation
         do {
-            try captureActiveCredentials(provider: profile.provider)
+            outgoingObservation = try cliSwitcher.stableLiveObservation(provider: profile.provider)
+            _ = try reconcileLiveCredentials(
+                provider: profile.provider,
+                origin: interactive ? .manualSwitch : .automaticSwitch,
+                observation: outgoingObservation
+            )
         } catch {
             statusMessage = "Switch cancelled: \(error.localizedDescription)"
             reportSwitchProblem(
@@ -790,35 +861,34 @@ final class AppState: ObservableObject {
         }
 
         do {
-            let result = try cliSwitcher.restoreSnapshot(for: profile)
-            for index in profiles.indices where profiles[index].provider == profile.provider {
-                profiles[index].isActiveCLI = profiles[index].id == profile.id
-                profiles[index].updatedAt = Date()
-            }
-            // The target just became active: anchor the Codex freshness gate so
-            // it is not shown the outgoing account's still-newest log event
-            // until it has actually run `codex` itself.
-            if profile.provider == .codex {
-                codexActiveSince[profile.id] = Date()
-            }
-            persistProfiles()
-            updateMenuBarSummary()
-
-            if let newIdentity = cliSwitcher.currentIdentity(provider: profile.provider),
-               let targetIdentity = profile.identity,
-               !targetIdentity.matches(newIdentity) {
+            let result = try cliSwitcher.restoreSnapshot(
+                for: profile,
+                expectedLiveFingerprint: outgoingObservation.credentialFingerprint,
+                enforceExpectedLiveState: true
+            )
+            let verified = try cliSwitcher.liveObservation(provider: profile.provider)
+            let identityMatches = profile.identity.map { target in
+                verified.identity.map(target.matches) == true
+            } ?? false
+            let targetFingerprint = try cliSwitcher.storedCredentialFingerprint(for: profile.id)
+            let fingerprintMatches = targetFingerprint != nil
+                && verified.credentialFingerprint == targetFingerprint
+            guard verified.isLoggedIn, identityMatches || fingerprintMatches else {
                 reportSwitchProblem(
                     interactive: interactive,
-                    message: "Switch finished with a different account",
-                    details: "The CLI now reports \(newIdentity.primaryLabel ?? "an unknown account"), which does not match \(profile.label). The previous files were backed up to: \(result.backupURLs.map(\.path).joined(separator: ", "))"
+                    message: "Switch could not be verified",
+                    details: "The live credentials do not identify \(profile.label). Outside changes were preserved and backups are at: \(result.backupURLs.map(\.path).joined(separator: ", "))"
                 )
-                // Not a success: the auto-switch path must not announce
-                // "New terminal sessions use <target>" for the wrong account.
                 if interactive {
                     Task { await refreshAll() }
                 }
                 return false
             }
+            _ = try reconcileLiveCredentials(
+                provider: profile.provider,
+                origin: interactive ? .manualSwitch : .automaticSwitch,
+                observation: verified
+            )
 
             statusMessage = "Switched \(profile.provider.displayName) CLI to \(profile.label)."
             if interactive {
@@ -857,11 +927,19 @@ final class AppState: ObservableObject {
     }
 
     func captureCLISnapshot(for profile: AccountProfile) {
+        guard profile.isActiveCLI else {
+            showError(
+                message: "Capture cancelled",
+                details: "Only the active terminal account can be captured. Refresh to reconcile the current login first."
+            )
+            return
+        }
         do {
-            _ = try cliSwitcher.captureAndStoreSnapshot(for: profile)
-            if let identity = cliSwitcher.currentIdentity(provider: profile.provider) {
-                updateIdentity(identity, for: profile)
+            let observation = try cliSwitcher.stableLiveObservation(provider: profile.provider)
+            guard observation.identity.map({ profile.identity?.matches($0) ?? true }) != false else {
+                throw CLISwitcherError.credentialConflict("live \(profile.provider.displayName) identity")
             }
+            _ = try reconcileLiveCredentials(provider: profile.provider, origin: .manualCapture, observation: observation)
             statusMessage = "Captured \(profile.provider.displayName) CLI credentials for \(profile.label)."
             objectWillChange.send()
         } catch {
@@ -873,7 +951,7 @@ final class AppState: ObservableObject {
     /// Whether a saved credential snapshot exists for the account, and if not,
     /// whether that is a genuine absence or a locked/denied Keychain — the two
     /// lead to different UI (log in vs. grant access).
-    enum StoredSnapshotStatus {
+    enum StoredSnapshotStatus: Equatable {
         case present
         case absent
         case locked
@@ -906,11 +984,11 @@ final class AppState: ObservableObject {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(provider.loginCommand, forType: .string)
         statusMessage = "Copied: \(provider.loginCommand)"
-        openTerminal()
+        terminalLauncher.open()
     }
 
     func beginCLILogin(for profile: AccountProfile) {
-        let initialIdentity = cliSwitcher.currentIdentity(provider: profile.provider)
+        let initialObservation = try? cliSwitcher.stableLiveObservation(provider: profile.provider)
 
         // Codex accounts share the single `~/.codex/auth.json`, so a bare
         // `codex login` launched while another account is signed in runs
@@ -919,16 +997,28 @@ final class AppState: ObservableObject {
         // restorable snapshot), then log the terminal out before logging in.
         let hasExistingSession = profile.provider == .codex && cliSwitcher.validateActiveLogin(provider: .codex)
         if hasExistingSession {
-            try? captureActiveCredentials(provider: .codex)
+            do {
+                guard let initialObservation else {
+                    throw CLISwitcherError.credentialConflict("live ChatGPT/Codex credentials")
+                }
+                _ = try reconcileLiveCredentials(provider: .codex, origin: .login, observation: initialObservation)
+            } catch {
+                statusMessage = "Login cancelled: the current Codex account could not be saved."
+                showError(
+                    message: "Could not safely start Codex login",
+                    details: "The current account was not logged out because its credentials could not be captured. \(error.localizedDescription)"
+                )
+                return
+            }
         }
         let command = terminalLoginCommand(for: profile.provider, hasExistingSession: hasExistingSession)
 
         // Preferred path: drive Terminal via AppleScript (reuses a window when
         // the user has granted Automation permission).
-        let appleScriptError = runTerminalCommand(command)
+        let appleScriptError = terminalLauncher.runViaAutomation(command)
         if appleScriptError == nil {
             statusMessage = "Started login for \(profile.label). The account links automatically after login."
-            watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialIdentity: initialIdentity)
+            watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialObservation: initialObservation)
             return
         }
 
@@ -937,9 +1027,9 @@ final class AppState: ObservableObject {
         // fall back to a bare Terminal that ran nothing. Instead run the
         // command by opening an executable `.command` file, which needs no
         // Apple Events permission.
-        if runCommandViaScriptFile(command) {
+        if terminalLauncher.runViaCommandFile(command) {
             statusMessage = "Opened Terminal to log in \(profile.label). The account links automatically after login."
-            watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialIdentity: initialIdentity)
+            watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialObservation: initialObservation)
             return
         }
 
@@ -949,8 +1039,8 @@ final class AppState: ObservableObject {
         NSPasteboard.general.setString(command, forType: .string)
         statusMessage = appleScriptError
             ?? "Copied the login command. Paste it into Terminal; the account links automatically after login."
-        openTerminal()
-        watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialIdentity: initialIdentity)
+        terminalLauncher.open()
+        watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialObservation: initialObservation)
     }
 
     /// Builds the CLI login command, prefixed with a PATH export so the
@@ -973,10 +1063,10 @@ final class AppState: ObservableObject {
     private func watchForCompletedLogin(
         profileID: UUID,
         provider: Provider,
-        initialIdentity: AccountIdentity?
+        initialObservation: LiveCredentialObservation?
     ) {
-        loginFollowUpTask?.cancel()
-        loginFollowUpTask = Task { [weak self] in
+        loginFollowUpTasks[provider]?.cancel()
+        loginFollowUpTasks[provider] = Task { [weak self] in
             for _ in 0..<60 {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 guard !Task.isCancelled else {
@@ -986,7 +1076,7 @@ final class AppState: ObservableObject {
                 let linked = await self?.refreshAfterCompletedLogin(
                     profileID: profileID,
                     provider: provider,
-                    initialIdentity: initialIdentity
+                    initialObservation: initialObservation
                 ) ?? true
                 if linked {
                     return
@@ -998,17 +1088,35 @@ final class AppState: ObservableObject {
     private func refreshAfterCompletedLogin(
         profileID: UUID,
         provider: Provider,
-        initialIdentity: AccountIdentity?
+        initialObservation: LiveCredentialObservation?
     ) async -> Bool {
-        guard let currentIdentity = cliSwitcher.currentIdentity(provider: provider) else {
+        guard let current = try? cliSwitcher.liveObservation(provider: provider),
+              current.isLoggedIn else {
             return false
         }
-        if let initialIdentity, currentIdentity.matches(initialIdentity) {
+        let identityChanged: Bool
+        if let initial = initialObservation?.identity, let currentIdentity = current.identity {
+            identityChanged = !currentIdentity.matches(initial)
+        } else {
+            identityChanged = current.identity != nil && initialObservation?.identity == nil
+        }
+        let credentialsChanged = current.credentialFingerprint != initialObservation?.credentialFingerprint
+        guard identityChanged || credentialsChanged else {
             return false
         }
-
-        await refreshAll()
-        return profiles.first(where: { $0.id == profileID })?.identity != nil
+        do {
+            _ = try reconcileLiveCredentials(
+                provider: provider,
+                origin: .login,
+                observation: current,
+                preferredLoginProfileID: profileID
+            )
+            await refreshAll()
+            return profiles.first(where: { $0.id == profileID })?.isActiveCLI == true
+        } catch {
+            statusMessage = "Login finished, but the account could not be saved: \(error.localizedDescription)"
+            return false
+        }
     }
 
     func quit() {
@@ -1050,94 +1158,12 @@ final class AppState: ObservableObject {
             return
         }
 
-        profiles[index].identity = mergedIdentity(existing: profiles[index].identity, new: identity)
+        profiles[index].identity = AccountProfileUpdater.mergeIdentity(existing: profiles[index].identity, new: identity)
         profiles[index].updatedAt = Date()
         persistProfiles()
     }
 
-    private func mergedIdentity(existing: AccountIdentity?, new: AccountIdentity) -> AccountIdentity {
-        guard let existing else {
-            return new
-        }
-
-        return AccountIdentity(
-            email: new.email ?? existing.email,
-            displayName: new.displayName ?? existing.displayName,
-            organization: new.organization ?? existing.organization,
-            organizationID: new.organizationID ?? existing.organizationID,
-            accountID: new.accountID ?? existing.accountID,
-            source: new.source,
-            updatedAt: new.updatedAt
-        )
-    }
-
     // MARK: - Helpers
-
-    private func openTerminal() {
-        let terminalURL = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
-        NSWorkspace.shared.openApplication(at: terminalURL, configuration: NSWorkspace.OpenConfiguration())
-    }
-
-    /// Runs `command` in Terminal.app via AppleScript. Returns `nil` on
-    /// success, or a human-readable error message on failure (previously this
-    /// swallowed `errorInfo`, so a denied Automation permission failed
-    /// silently and login appeared to do nothing).
-    private func runTerminalCommand(_ command: String) -> String? {
-        let escaped = command
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        let scriptSource = """
-        tell application "Terminal"
-            do script "\(escaped)"
-            activate
-        end tell
-        """
-
-        var errorInfo: NSDictionary?
-        if NSAppleScript(source: scriptSource)?.executeAndReturnError(&errorInfo) != nil {
-            return nil
-        }
-
-        let code = errorInfo?[NSAppleScript.errorNumber] as? Int
-        if code == -1743 {
-            return "Terminal automation is turned off for LLMUsageMonitor. Enable it in System Settings → Privacy & Security → Automation to log in with one click."
-        }
-        if let message = errorInfo?[NSAppleScript.errorMessage] as? String, !message.isEmpty {
-            return "Could not drive Terminal: \(message)"
-        }
-        return "Could not drive Terminal to run the login command."
-    }
-
-    /// Runs `command` by writing it to a temporary executable `.command` file
-    /// and opening it with Terminal.app. Unlike AppleScript, this needs no
-    /// Apple Events (Automation) permission, so it works even when the user has
-    /// denied Terminal automation. The `.command` file runs in a non-login
-    /// shell, which is why `command` carries its own PATH export.
-    private func runCommandViaScriptFile(_ command: String) -> Bool {
-        let terminalURL = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
-        let scriptURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("llm-usage-monitor-login-\(UUID().uuidString).command")
-        let contents = "#!/bin/zsh\n\(command)\n"
-        do {
-            try contents.write(to: scriptURL, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes(
-                [.posixPermissions: 0o755],
-                ofItemAtPath: scriptURL.path
-            )
-        } catch {
-            return false
-        }
-
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = true
-        NSWorkspace.shared.open(
-            [scriptURL],
-            withApplicationAt: terminalURL,
-            configuration: configuration,
-            completionHandler: nil
-        )
-        return true
-    }
 
     private func persistProfiles() {
         do {
@@ -1165,320 +1191,20 @@ final class AppState: ObservableObject {
     // MARK: - Menu bar summary
 
     private func updateMenuBarSummary() {
-        menuBarSummary = MenuBarSummary(
-            claudeValue: providerUsageValue(.claude),
-            codexValue: providerUsageValue(.codex),
-            accessibilityText: accessibilitySummary(),
-            riskLevel: highestRisk()
+        menuBarSummary = MenuBarSummaryProjector.project(
+            profiles: profiles,
+            snapshots: snapshots,
+            preference: settings.menuBarWindowPreference
         )
-    }
-
-    /// "–" = no active CLI login, "?" = active but not read yet, and a
-    /// trailing "*" marks numbers that are stale and may no longer be true.
-    private func providerUsageValue(_ provider: Provider) -> String {
-        guard let profile = activeProfile(for: provider) else {
-            return "–"
-        }
-        guard let snapshot = snapshots[profile.id] else {
-            return "?"
-        }
-
-        let staleMark = snapshot.isStale() ? "*" : ""
-        if snapshot.billingUsageMode == .overLimitPayAsYouGo {
-            return "PAYG\(staleMark)"
-        }
-
-        guard let used = preferredUsedFraction(for: snapshot) else {
-            return "?"
-        }
-        return "\(Int((used * 100).rounded()))%\(staleMark)"
     }
 
     /// The fraction behind the menu-bar number, honoring the Settings choice.
     /// A pinned window that is missing falls back to most-constrained — a
     /// wrong-but-plausible steady number would hide real risk.
     func preferredUsedFraction(for snapshot: UsageSnapshot) -> Double? {
-        let mostConstrained = snapshot.mostConstrainedWindow?.usedFraction ?? snapshot.usedFraction
-        switch settings.menuBarWindowPreference {
-        case .mostConstrained:
-            return mostConstrained
-        case .session:
-            return snapshot.window(ofKind: .session)?.usedFraction ?? mostConstrained
-        case .weekly:
-            return snapshot.primaryWeeklyWindow?.usedFraction ?? mostConstrained
-        }
-    }
-
-    /// Menu-bar risk reflects the accounts the terminal is actually using;
-    /// a stale inactive account must not paint warning glyphs.
-    private func highestRisk() -> RiskLevel {
-        let activeProfiles = Provider.allCases.compactMap { activeProfile(for: $0) }
-        let activeSnapshots = activeProfiles.compactMap { snapshots[$0.id] }
-        let snapshotRisk = activeSnapshots.map(\.riskLevel).min() ?? .unknown
-        let thresholdRisk = activeSnapshots
-            .compactMap(\.usedFraction)
-            .map(UsageThresholds.standard.riskLevel(usedFraction:))
-            .min() ?? .unknown
-
-        let risk = min(snapshotRisk, thresholdRisk)
-        // An okay-looking number that has not been re-read in a long time is
-        // not okay — it is unknown. Real warnings still win.
-        if risk == .healthy || risk == .unknown,
-           !activeSnapshots.isEmpty,
-           activeSnapshots.allSatisfy({ $0.isStale() }) {
-            return .stale
-        }
-        return risk
-    }
-
-    private func accessibilitySummary() -> String {
-        guard !profiles.isEmpty else {
-            return "No accounts yet. Log into Claude Code or Codex in the terminal to register one."
-        }
-
-        var parts: [String] = []
-        for provider in Provider.allCases {
-            guard let profile = activeProfile(for: provider),
-                  let snapshot = snapshots[profile.id] else {
-                parts.append("\(provider.displayName) usage unknown")
-                continue
-            }
-
-            let mode: String
-            switch snapshot.billingUsageMode {
-            case .includedSubscription:
-                mode = "using included subscription usage"
-            case .includedSubscriptionNearLimit:
-                mode = "using included subscription usage near the limit"
-            case .overLimitPayAsYouGo:
-                mode = "using pay as you go or credits"
-            case .payAsYouGoVisible:
-                mode = "showing pay as you go status"
-            case .needsLogin:
-                mode = "needs login"
-            case .unknown:
-                mode = "usage mode unknown"
-            }
-
-            var entry: String
-            let windowSummary = snapshot.orderedDisplayWindows
-                .map { "\($0.label) \(Int($0.usedPercent.rounded())) percent used" }
-                .joined(separator: ", ")
-            if !windowSummary.isEmpty {
-                entry = "\(provider.displayName) active account \(profile.label): \(windowSummary), \(mode)"
-            } else if let used = snapshot.usedFraction {
-                entry = "\(provider.displayName) active account \(profile.label) \(Int((used * 100).rounded())) percent used, \(mode)"
-            } else {
-                entry = "\(provider.displayName) active account \(profile.label) \(mode)"
-            }
-            if snapshot.isStale() {
-                entry += ", last checked \(snapshot.lastRefreshed.formatted(.relative(presentation: .named)))"
-            }
-            parts.append(entry)
-        }
-        return parts.joined(separator: ". ")
-    }
-}
-
-@MainActor
-final class UsageAlertController {
-    private var lastNotifiedRisk: [AlertWindowKey: RiskLevel] = [:]
-    private let thresholdPlanner = ThresholdAlertPlanner()
-    private let notifiedResetsKey = "notifiedResetDates"
-    private let notifiedPaceKey = "notifiedPaceAlerts"
-
-    /// Reset alerts survive relaunches (persisted, keyed by account+window and
-    /// reset date) so a restart does not re-announce quotas that were already
-    /// reported back. The UserDefaults key is `"<profileID>|<windowID>"`.
-    func notifiedResetKeys() -> [AlertWindowKey: Date] {
-        windowKeyedDates(forKey: notifiedResetsKey)
-    }
-
-    /// Same persistence scheme for "on pace to run out" alerts.
-    func notifiedPaceKeys() -> [AlertWindowKey: Date] {
-        windowKeyedDates(forKey: notifiedPaceKey)
-    }
-
-    private func windowKeyedDates(forKey defaultsKey: String) -> [AlertWindowKey: Date] {
-        let stored = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double] ?? [:]
-        var result: [AlertWindowKey: Date] = [:]
-        for (key, value) in stored {
-            // Legacy entries were bare UUIDs (no window component); drop them —
-            // the worst case is one duplicate "quota back" alert after upgrade.
-            guard let separator = key.firstIndex(of: "|") else {
-                continue
-            }
-            let idPart = String(key[..<separator])
-            let windowID = String(key[key.index(after: separator)...])
-            guard let id = UUID(uuidString: idPart), !windowID.isEmpty else {
-                continue
-            }
-            result[AlertWindowKey(profileID: id, windowID: windowID)] = Date(timeIntervalSince1970: value)
-        }
-        return result
-    }
-
-    func handlePaceAlert(_ alert: PaceAlert, provider: Provider) {
-        markWindowNotified(
-            defaultsKey: notifiedPaceKey,
-            profileID: alert.profileID,
-            windowID: alert.windowID,
-            date: alert.resetDate ?? Date()
+        MenuBarSummaryProjector.preferredUsedFraction(
+            for: snapshot,
+            preference: settings.menuBarWindowPreference
         )
-
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
-
-        var parts = [
-            "At the current pace, \(provider.displayName) \(alert.windowLabel) usage runs out around \(formatter.string(from: alert.projectedDepletion))."
-        ]
-        if let reset = alert.resetDate {
-            parts.append("The window resets \(formatter.string(from: reset)).")
-        }
-        postNotification(
-            identifier: "pace-\(alert.profileID.uuidString)-\(alert.windowID)-\(Int(alert.projectedDepletion.timeIntervalSince1970))",
-            title: "\(alert.profileLabel): on pace to hit the \(alert.windowLabel) limit",
-            body: parts.joined(separator: " ")
-        )
-    }
-
-    func handleAutoSwitch(fromLabel: String?, toLabel: String, provider: Provider, reason: String?) {
-        var parts: [String] = []
-        if let fromLabel {
-            parts.append("\(fromLabel) hit its limit.")
-        }
-        if let reason {
-            parts.append(reason)
-        }
-        parts.append("New terminal sessions use \(toLabel).")
-        postNotification(
-            identifier: "autoswitch-\(toLabel)-\(Int(Date().timeIntervalSince1970))",
-            title: "Switched \(provider.displayName) CLI to \(toLabel)",
-            body: parts.joined(separator: " ")
-        )
-    }
-
-    /// Drops every persisted and in-memory dedupe key for a removed profile
-    /// so UserDefaults does not accumulate dead entries forever.
-    func forgetProfile(_ profileID: UUID) {
-        let prefix = "\(profileID.uuidString)|"
-        for defaultsKey in [notifiedResetsKey, notifiedPaceKey] {
-            let stored = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double] ?? [:]
-            let remaining = stored.filter { !$0.key.hasPrefix(prefix) }
-            UserDefaults.standard.set(remaining, forKey: defaultsKey)
-        }
-        lastNotifiedRisk = lastNotifiedRisk.filter { $0.key.profileID != profileID }
-    }
-
-    // MARK: - Shared posting/persistence
-
-    private func markWindowNotified(defaultsKey: String, profileID: UUID, windowID: String, date: Date) {
-        var stored = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double] ?? [:]
-        stored["\(profileID.uuidString)|\(windowID)"] = date.timeIntervalSince1970
-        UserDefaults.standard.set(stored, forKey: defaultsKey)
-    }
-
-    private func postNotification(identifier: String, title: String, body: String) {
-        // UNUserNotificationCenter requires a real bundle; an unbundled
-        // `swift run` must not crash.
-        guard Bundle.main.bundleIdentifier != nil else {
-            return
-        }
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        content.sound = .default
-        let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
-        NSApplication.shared.requestUserAttention(.informationalRequest)
-    }
-
-    func handleResetElapsed(_ alert: ResetAlert) {
-        markWindowNotified(
-            defaultsKey: notifiedResetsKey,
-            profileID: alert.profileID,
-            windowID: alert.windowID,
-            date: alert.resetDate
-        )
-        postNotification(
-            identifier: "reset-\(alert.profileID.uuidString)-\(alert.windowID)-\(Int(alert.resetDate.timeIntervalSince1970))",
-            title: "\(alert.profileLabel): \(alert.windowLabel) quota likely back",
-            body: "The \(alert.provider.displayName) \(alert.windowLabel) limit window has rolled over since the last reading. Switch the CLI to \(alert.profileLabel) to keep using included usage."
-        )
-    }
-
-    func requestAuthorization() {
-        // UNUserNotificationCenter requires a real bundle; guard so an
-        // unbundled `swift run` does not crash at startup.
-        guard Bundle.main.bundleIdentifier != nil else {
-            return
-        }
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
-    }
-
-    /// Per-window near-limit alerts. Session (5h) windows never notify —
-    /// heavy sessions would fire on every burn-down; they stay visual-only.
-    /// Each window re-arms once it drops back below the warning band.
-    func handleThresholds(snapshot: UsageSnapshot, profile: AccountProfile) {
-        guard Bundle.main.bundleIdentifier != nil else {
-            return
-        }
-
-        guard snapshot.parseConfidence != .none else {
-            return
-        }
-
-        rearmRecoveredWindows(snapshot: snapshot, profile: profile)
-
-        let alerts = thresholdPlanner.alerts(
-            snapshot: snapshot,
-            profile: profile,
-            lastNotified: lastNotifiedRisk
-        )
-        for alert in alerts {
-            lastNotifiedRisk[AlertWindowKey(profileID: alert.profileID, windowID: alert.windowID)] = alert.riskLevel
-            postNotification(
-                identifier: "usage-\(alert.profileID.uuidString)-\(alert.windowID)-\(alert.riskLevel.rawValue)",
-                title: notificationTitle(alert: alert, profile: profile),
-                body: notificationBody(alert: alert, snapshot: snapshot, profile: profile)
-            )
-        }
-    }
-
-    /// Clears dedupe keys for windows that dropped back below the warning
-    /// band, without firing anything — used directly for inactive accounts.
-    func rearmThresholds(snapshot: UsageSnapshot, profile: AccountProfile) {
-        guard snapshot.parseConfidence != .none else {
-            return
-        }
-        rearmRecoveredWindows(snapshot: snapshot, profile: profile)
-    }
-
-    private func rearmRecoveredWindows(snapshot: UsageSnapshot, profile: AccountProfile) {
-        let currentRisk = thresholdPlanner.currentRisk(snapshot: snapshot, profile: profile)
-        for (key, risk) in currentRisk where risk != .warning && risk != .depleted {
-            lastNotifiedRisk[key] = nil
-        }
-    }
-
-    private func notificationTitle(alert: ThresholdAlert, profile: AccountProfile) -> String {
-        if alert.riskLevel == .depleted {
-            return "\(profile.label): \(alert.windowLabel) limit reached"
-        }
-        return "\(profile.label): \(alert.windowLabel) \(Int(alert.usedPercent.rounded()))% used"
-    }
-
-    private func notificationBody(alert: ThresholdAlert, snapshot: UsageSnapshot, profile: AccountProfile) -> String {
-        var parts = [
-            "\(profile.provider.displayName) \(alert.windowLabel) usage is \(alert.riskLevel == .depleted ? "depleted" : "near the limit")."
-        ]
-        if let reset = alert.resetDescription ?? snapshot.resetDescription {
-            parts.append("Resets \(reset).")
-        }
-        if let credit = snapshot.creditStatus {
-            parts.append(credit)
-        }
-        return parts.joined(separator: " ")
     }
 }

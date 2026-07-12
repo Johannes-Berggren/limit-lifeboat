@@ -366,6 +366,33 @@ final class ModelsTests: XCTestCase {
         XCTAssertNil(makeSnapshot().mostConstrainedWindow)
     }
 
+    /// A *healthy* model-scoped weekly is hidden in the card ("+N limits"), so it
+    /// must not drive the menu-bar number even when it is the highest-used window.
+    /// The surfaced constraint is the all-models weekly the popover actually shows.
+    func testSurfacedConstrainedWindowIgnoresHealthyScopedWeekly() {
+        let snapshot = makeSnapshot(windows: [
+            makeWindow(id: "session", kind: .session, usedPercent: 3, riskLevel: .healthy),
+            makeWindow(id: "weekly-all", kind: .weekly, usedPercent: 12, riskLevel: .healthy),
+            makeWindow(id: "weekly-fable", kind: .weeklyScoped, usedPercent: 22, riskLevel: .healthy)
+        ])
+
+        XCTAssertEqual(snapshot.surfacedConstrainedWindow?.id, "weekly-all")
+        XCTAssertEqual(snapshot.surfacedConstrainedWindow?.usedPercent, 12)
+    }
+
+    /// When the scoped weekly is genuinely at risk it becomes visible in the card,
+    /// so it is allowed to drive the number — risk is never hidden.
+    func testSurfacedConstrainedWindowSurfacesAtRiskScopedWeekly() {
+        let snapshot = makeSnapshot(windows: [
+            makeWindow(id: "session", kind: .session, usedPercent: 3, riskLevel: .healthy),
+            makeWindow(id: "weekly-all", kind: .weekly, usedPercent: 12, riskLevel: .healthy),
+            makeWindow(id: "weekly-fable", kind: .weeklyScoped, usedPercent: 22, riskLevel: .warning)
+        ])
+
+        XCTAssertEqual(snapshot.surfacedConstrainedWindow?.id, "weekly-fable")
+        XCTAssertEqual(snapshot.surfacedConstrainedWindow?.usedPercent, 22)
+    }
+
     // MARK: - billingUsageMode
 
     /// An explicit `.enabledActive` from the API overrides the used-fraction
@@ -456,8 +483,9 @@ final class ModelsTests: XCTestCase {
         kind: UsageWindowKind,
         label: String? = nil,
         usedPercent: Double = 0,
-        resetDate: Date? = nil
+        resetDate: Date? = nil,
+        riskLevel: RiskLevel = .unknown
     ) -> UsageWindow {
-        UsageWindow(id: id, kind: kind, label: label ?? id, usedPercent: usedPercent, resetDate: resetDate)
+        UsageWindow(id: id, kind: kind, label: label ?? id, usedPercent: usedPercent, resetDate: resetDate, riskLevel: riskLevel)
     }
 }

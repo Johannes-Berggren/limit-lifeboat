@@ -4,7 +4,7 @@ import LLMUsageMonitorCore
 import SwiftUI
 
 @MainActor
-final class MenuBarController {
+final class MenuBarController: NSObject, NSPopoverDelegate {
     private let state: AppState
     private let statusItem: NSStatusItem
     private let popover: NSPopover
@@ -14,8 +14,10 @@ final class MenuBarController {
         self.state = state
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         self.popover = NSPopover()
+        super.init()
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: 460, height: 560)
+        popover.delegate = self
+        popover.contentSize = NSSize(width: 480, height: 620)
         popover.contentViewController = NSHostingController(rootView: MenuRootView(state: state))
 
         if let button = statusItem.button {
@@ -41,10 +43,15 @@ final class MenuBarController {
         if popover.isShown {
             popover.performClose(sender)
         } else {
+            state.setAuthObservationInteractive(true)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
             state.refreshIfStale()
         }
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        state.setAuthObservationInteractive(false)
     }
 
     private func updateStatusItem(summary: MenuBarSummary) {
