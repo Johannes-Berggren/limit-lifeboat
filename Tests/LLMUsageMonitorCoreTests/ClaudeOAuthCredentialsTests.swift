@@ -151,6 +151,10 @@ final class ClaudeCodeCredentialsKeychainTests: XCTestCase {
         try keychain.writeLiveItemJSON(second)
         XCTAssertEqual(try keychain.readLiveItemJSON(), second)
         XCTAssertEqual(try readWithSecurityTool(service: service, account: account), second)
+
+        try keychain.deleteLiveItem()
+        XCTAssertNil(try keychain.readLiveItemJSON())
+        XCTAssertNoThrow(try keychain.deleteLiveItem(), "Deleting an already-missing item is idempotent")
     }
 
     func testIntegrityFailureStopsBeforeKeychainAccess() {

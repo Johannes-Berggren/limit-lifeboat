@@ -1,12 +1,5 @@
 import Foundation
-
-/// Which quota window the menu-bar percentage (and the summary tiles) show.
-enum MenuBarWindowPreference: String, CaseIterable {
-    /// The window closest to its limit — answers "can I keep working?".
-    case mostConstrained
-    case session
-    case weekly
-}
+import LLMUsageMonitorCore
 
 /// UserDefaults-backed app preferences.
 @MainActor
