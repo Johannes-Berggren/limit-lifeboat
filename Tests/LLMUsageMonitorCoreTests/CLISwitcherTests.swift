@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import XCTest
 @testable import LLMUsageMonitorCore
 
@@ -164,10 +165,207 @@ final class CLISwitcherTests: XCTestCase {
         _ = try switcher.captureAndStoreSnapshot(for: profileB)
 
         _ = try switcher.restoreSnapshot(for: profileA)
-        XCTAssertEqual(try String(contentsOf: authURL), contentsA)
+        XCTAssertEqual(try codexAccessToken(at: authURL), "account-a")
 
         _ = try switcher.restoreSnapshot(for: profileB)
-        XCTAssertEqual(try String(contentsOf: authURL), contentsB)
+        XCTAssertEqual(try codexAccessToken(at: authURL), "account-b")
+    }
+
+    func testCodexRestorePreservesUnknownExternalFields() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let authURL = fixture.home.appendingPathComponent(".codex/auth.json")
+        try FileManager.default.createDirectory(at: authURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(#"{"tokens":{"access_token":"account-a"},"future_machine_state":"old"}"#.utf8).write(to: authURL)
+
+        let store = MemoryCredentialStore()
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: store,
+            claudeCLICredentialSource: FakeClaudeCLICredentialSource()
+        )
+        let profile = AccountProfile(provider: .codex, label: "A")
+        _ = try switcher.captureAndStoreSnapshot(for: profile)
+        try Data(#"{"tokens":{"access_token":"account-b"},"future_machine_state":"external"}"#.utf8).write(to: authURL)
+
+        _ = try switcher.restoreSnapshot(for: profile)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: authURL)) as? [String: Any])
+        XCTAssertEqual(object["future_machine_state"] as? String, "external")
+        XCTAssertEqual(try codexAccessToken(at: authURL), "account-a")
+    }
+
+    func testClaudeAccountRestorePreservesUnrelatedDotClaudeSettings() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let claudeURL = fixture.home.appendingPathComponent(".claude.json")
+        try Data(#"{"oauthAccount":{"emailAddress":"a@example.com"},"theme":"dark"}"#.utf8).write(to: claudeURL)
+        let store = MemoryCredentialStore()
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: store,
+            claudeCLICredentialSource: FakeClaudeCLICredentialSource()
+        )
+        let profile = AccountProfile(provider: .claude, label: "A")
+        _ = try switcher.captureAndStoreSnapshot(for: profile)
+        try Data(#"{"oauthAccount":{"emailAddress":"b@example.com"},"theme":"light"}"#.utf8).write(to: claudeURL)
+
+        _ = try switcher.restoreSnapshot(for: profile)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: claudeURL)) as? [String: Any])
+        let account = try XCTUnwrap(object["oauthAccount"] as? [String: Any])
+        XCTAssertEqual(account["emailAddress"] as? String, "a@example.com")
+        XCTAssertEqual(object["theme"] as? String, "light")
+    }
+
+    func testExpectedFingerprintConflictPreservesExternalCodexLogin() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let authURL = fixture.home.appendingPathComponent(".codex/auth.json")
+        try FileManager.default.createDirectory(at: authURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(#"{"tokens":{"access_token":"account-a"}}"#.utf8).write(to: authURL)
+        let store = MemoryCredentialStore()
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: store,
+            claudeCLICredentialSource: FakeClaudeCLICredentialSource()
+        )
+        let profile = AccountProfile(provider: .codex, label: "A")
+        let captured = try switcher.captureAndStoreSnapshot(for: profile)
+        let expected = CredentialFingerprint.make(for: captured)
+        try Data(#"{"tokens":{"access_token":"external"}}"#.utf8).write(to: authURL)
+
+        XCTAssertThrowsError(try switcher.restoreSnapshot(for: profile, expectedLiveFingerprint: expected)) { error in
+            guard case CLISwitcherError.credentialConflict = error else {
+                return XCTFail("Expected credentialConflict, got \(error)")
+            }
+        }
+        XCTAssertEqual(try codexAccessToken(at: authURL), "external")
+    }
+
+    func testRollbackRemovesFileCreatedByFailedRestore() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let blocker = fixture.home.appendingPathComponent("blocker")
+        try Data("not a directory".utf8).write(to: blocker)
+        let store = MemoryCredentialStore()
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: store,
+            claudeCLICredentialSource: FakeClaudeCLICredentialSource()
+        )
+        let profile = AccountProfile(provider: .codex, label: "A")
+        try store.save(
+            snapshot: CredentialSnapshot(provider: .codex, items: [
+                CredentialSnapshotItem(relativePath: "created/auth.json", kind: .fullFile, contents: Data("one".utf8), posixPermissions: 0o600),
+                CredentialSnapshotItem(relativePath: "blocker/auth.json", kind: .fullFile, contents: Data("two".utf8), posixPermissions: 0o600)
+            ]),
+            for: profile.id
+        )
+
+        XCTAssertThrowsError(try switcher.restoreSnapshot(for: profile))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.home.appendingPathComponent("created/auth.json").path))
+    }
+
+    func testDestinationChangeAfterBackupAbortsAndPreservesExternalBytes() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let authURL = fixture.home.appendingPathComponent(".codex/auth.json")
+        try FileManager.default.createDirectory(at: authURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(#"{"tokens":{"access_token":"baseline"}}"#.utf8).write(to: authURL)
+        var mutated = false
+        let transaction = CredentialRestoreTransaction(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            fileManager: .default,
+            claudeCredentialSource: FakeClaudeCLICredentialSource(),
+            hooks: CredentialRestoreHooks(beforeDestinationCheck: { destination in
+                guard !mutated, destination.path == authURL.path else { return }
+                mutated = true
+                try Data(#"{"tokens":{"access_token":"external"}}"#.utf8).write(to: destination)
+            })
+        )
+        let snapshot = CredentialSnapshot(provider: .codex, items: [
+            CredentialSnapshotItem(
+                relativePath: ".codex/auth.json",
+                kind: .jsonFields,
+                contents: Data(#"{"tokens":{"access_token":"target"}}"#.utf8),
+                posixPermissions: 0o600,
+                ownedJSONKeys: CodexCredentialAdapter.ownedKeys
+            )
+        ])
+
+        XCTAssertThrowsError(try transaction.restore(snapshot)) { error in
+            guard case CLISwitcherError.credentialConflict = error else {
+                return XCTFail("Expected credentialConflict, got \(error)")
+            }
+        }
+        XCTAssertEqual(try codexAccessToken(at: authURL), "external")
+    }
+
+    func testRollbackDoesNotOverwriteChangeMadeAfterFirstWrite() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let firstURL = fixture.home.appendingPathComponent("first/auth.json")
+        let blocker = fixture.home.appendingPathComponent("blocker")
+        try Data("not a directory".utf8).write(to: blocker)
+        let transaction = CredentialRestoreTransaction(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            fileManager: .default,
+            claudeCredentialSource: FakeClaudeCLICredentialSource(),
+            hooks: CredentialRestoreHooks(beforeDestinationCheck: { destination in
+                guard destination.path.hasSuffix("blocker/auth.json") else { return }
+                try Data("external".utf8).write(to: firstURL)
+            })
+        )
+        let snapshot = CredentialSnapshot(provider: .codex, items: [
+            CredentialSnapshotItem(relativePath: "first/auth.json", kind: .fullFile, contents: Data("target".utf8), posixPermissions: 0o600),
+            CredentialSnapshotItem(relativePath: "blocker/auth.json", kind: .fullFile, contents: Data("fails".utf8), posixPermissions: 0o600)
+        ])
+
+        XCTAssertThrowsError(try transaction.restore(snapshot)) { error in
+            guard case CLISwitcherError.rollbackConflict = error else {
+                return XCTFail("Expected rollbackConflict, got \(error)")
+            }
+        }
+        XCTAssertEqual(try String(contentsOf: firstURL), "external")
+    }
+
+    func testLegacyClaudeSnapshotClearsStaleAccountFieldWithoutClobberingSettings() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let configURL = fixture.home.appendingPathComponent("Library/Application Support/Claude/config.json")
+        let claudeURL = fixture.home.appendingPathComponent(".claude.json")
+        try FileManager.default.createDirectory(at: configURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(#"{"oauth:tokenCache":{"accessToken":"live"}}"#.utf8).write(to: configURL)
+        try Data(#"{"oauthAccount":{"emailAddress":"stale@example.com"},"theme":"light"}"#.utf8).write(to: claudeURL)
+        let store = MemoryCredentialStore()
+        let profile = AccountProfile(provider: .claude, label: "Legacy")
+        try store.save(
+            snapshot: CredentialSnapshot(provider: .claude, items: [
+                CredentialSnapshotItem(
+                    relativePath: "Library/Application Support/Claude/config.json",
+                    kind: .jsonFields,
+                    contents: Data(#"{"oauth:tokenCache":{"accessToken":"target"}}"#.utf8),
+                    posixPermissions: 0o600
+                )
+            ]),
+            for: profile.id
+        )
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: store,
+            claudeCLICredentialSource: FakeClaudeCLICredentialSource()
+        )
+
+        _ = try switcher.restoreSnapshot(for: profile)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: claudeURL)) as? [String: Any])
+        XCTAssertNil(object["oauthAccount"])
+        XCTAssertEqual(object["theme"] as? String, "light")
     }
 
     func testCurrentIdentityReadsCodexAuthFile() throws {
@@ -293,7 +491,7 @@ final class CLISwitcherTests: XCTestCase {
         try #"{"oauth:tokenCache":{"accessToken":"one"}}"#.data(using: .utf8)!.write(to: configURL)
 
         let source = FakeClaudeCLICredentialSource()
-        source.readError = ClaudeCodeCredentialsKeychainError.securityToolFailed(status: 51, message: "busy")
+        source.readError = ClaudeCodeCredentialsKeychainError.keychainError(errSecNotAvailable)
 
         let store = MemoryCredentialStore()
         let switcher = CLISwitcher(
@@ -346,7 +544,7 @@ final class CLISwitcherTests: XCTestCase {
         defer { fixture.cleanup() }
 
         let source = FakeClaudeCLICredentialSource()
-        source.readError = ClaudeCodeCredentialsKeychainError.securityToolFailed(status: 51, message: "busy")
+        source.readError = ClaudeCodeCredentialsKeychainError.keychainError(errSecNotAvailable)
 
         let switcher = CLISwitcher(
             homeDirectory: fixture.home,
@@ -386,7 +584,7 @@ final class CLISwitcherTests: XCTestCase {
         _ = try switcher.captureAndStoreSnapshot(for: profile)
 
         try #"{"oauth:tokenCache":{"accessToken":"two"}}"#.data(using: .utf8)!.write(to: configURL)
-        source.readError = ClaudeCodeCredentialsKeychainError.securityToolFailed(status: 51, message: "busy")
+        source.readError = ClaudeCodeCredentialsKeychainError.keychainError(errSecNotAvailable)
 
         XCTAssertThrowsError(try switcher.restoreSnapshot(for: profile)) { error in
             guard case CLISwitcherError.backupFailed = error else {
@@ -494,6 +692,12 @@ final class CLISwitcherTests: XCTestCase {
 
         XCTAssertNil(switcher.resolveExecutablePath(command: "definitely-not-a-real-cli-xyzzy"))
     }
+
+    private func codexAccessToken(at url: URL) throws -> String? {
+        let object = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+        let tokens = object?["tokens"] as? [String: Any]
+        return tokens?["access_token"] as? String
+    }
 }
 
 /// In-memory stand-in for the login-keychain item so tests never touch the
@@ -513,6 +717,10 @@ private final class FakeClaudeCLICredentialSource: ClaudeCLICredentialSource, @u
     func writeLiveItemJSON(_ data: Data) throws {
         writes.append(data)
         itemJSON = data
+    }
+
+    func deleteLiveItem() throws {
+        itemJSON = nil
     }
 }
 

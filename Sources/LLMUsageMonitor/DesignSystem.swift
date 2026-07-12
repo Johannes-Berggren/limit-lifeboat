@@ -8,11 +8,14 @@ enum DS {
         static let tight: CGFloat = 6
         static let sm: CGFloat = 8
         static let md: CGFloat = 12
-        static let cardPadding: CGFloat = 8
+        static let lg: CGFloat = 16
+        static let xl: CGFloat = 20
+        static let cardPadding: CGFloat = 12
     }
 
     enum Radius {
         static let small: CGFloat = 6
+        static let medium: CGFloat = 10
         static let card: CGFloat = 14
     }
 
@@ -52,6 +55,21 @@ enum DS {
             return staleAmber
         case .unknown:
             return .gray
+        }
+    }
+
+    static func presentationColor(_ tone: PresentationTone) -> Color {
+        switch tone {
+        case .secondary:
+            return .secondary
+        case .warning:
+            return .orange
+        case .stale:
+            return staleAmber
+        case .success:
+            return .green
+        case .danger:
+            return .red
         }
     }
 
@@ -102,6 +120,36 @@ struct Badge: View {
     }
 }
 
+struct StatusBanner: View {
+    let text: String
+    let systemImage: String
+    let color: Color
+
+    var body: some View {
+        HStack(alignment: .top, spacing: DS.Spacing.sm) {
+            Image(systemName: systemImage)
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(color)
+                .frame(width: 16)
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, DS.Spacing.md)
+        .padding(.vertical, DS.Spacing.sm)
+        .background(
+            color.opacity(0.09),
+            in: RoundedRectangle(cornerRadius: DS.Radius.medium, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: DS.Radius.medium, style: .continuous)
+                .strokeBorder(color.opacity(0.16), lineWidth: 0.5)
+        }
+    }
+}
+
 extension View {
     func cardSurface(tint: Color? = nil) -> some View {
         modifier(CardSurfaceModifier(tint: tint))
@@ -136,24 +184,24 @@ private struct CardSurfaceModifier: ViewModifier {
             content
                 .background(Color(nsColor: .controlBackgroundColor), in: shape)
                 .overlay(shape.strokeBorder(borderGradient, lineWidth: 0.75))
-                .shadow(color: .black.opacity(0.08), radius: 5, y: 2)
+                .shadow(color: .black.opacity(0.05), radius: 3, y: 1)
         } else if #available(macOS 26.0, *) {
             content
-                .glassEffect(.regular.tint(tint?.opacity(0.10)), in: shape)
+                .glassEffect(.regular.tint(tint?.opacity(0.06)), in: shape)
         } else {
             content
                 .background(.regularMaterial, in: shape)
                 .overlay(shape.strokeBorder(borderGradient, lineWidth: 0.75))
-                .shadow(color: .black.opacity(0.10), radius: 7, y: 3)
+                .shadow(color: .black.opacity(0.06), radius: 4, y: 1)
         }
     }
 
     private var borderGradient: LinearGradient {
         LinearGradient(
             colors: [
-                .white.opacity(0.34),
-                (tint ?? .white).opacity(0.13),
-                .black.opacity(0.08)
+                .white.opacity(0.24),
+                (tint ?? .white).opacity(0.09),
+                .black.opacity(0.07)
             ],
             startPoint: .topLeading,
             endPoint: .bottomTrailing

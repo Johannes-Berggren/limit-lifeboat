@@ -27,35 +27,26 @@ public struct CodexLocalUsageReader {
     public func readUsage(for profile: AccountProfile, producedAfter: Date? = nil, now: Date = Date()) -> UsageSnapshot? {
         guard profile.provider == .codex,
               let event = latestRateLimitEvent(),
-              producedAfter.map({ event.timestamp > $0 }) ?? true,
-              let selectedLimit = event.limits.max(by: { $0.usedPercent < $1.usedPercent }) else {
+              producedAfter.map({ event.timestamp > $0 }) ?? true else {
             return nil
         }
 
         let windows = event.limits.map { makeWindow(from: $0, now: now) }
-        let usedPercent = min(100, max(0, selectedLimit.usedPercent))
-        let remainingPercent = max(0, 100 - usedPercent)
-        let resetDate = selectedLimit.resetsAt
-
-        return UsageSnapshot(
+        guard let selectedLimit = event.limits.max(by: { $0.usedPercent < $1.usedPercent }) else {
+            return nil
+        }
+        return UsageSnapshotFactory.snapshot(
             accountID: profile.id,
             provider: .codex,
             windows: windows,
-            includedRemaining: remainingPercent,
-            includedLimit: 100,
-            resetDate: resetDate,
-            resetDescription: resetDescription(for: resetDate, now: now),
             creditStatus: creditStatus(from: event),
-            riskLevel: UsageThresholds.standard.riskLevel(usedPercent: usedPercent),
             source: "local Codex CLI logs",
             lastRefreshed: now,
-            parseConfidence: .high,
             message: message(for: selectedLimit, event: event)
         )
     }
 
     private func makeWindow(from limit: CodexRateLimit, now: Date) -> UsageWindow {
-        let usedPercent = min(100, max(0, limit.usedPercent))
         let kind: UsageWindowKind
         if let minutes = limit.windowMinutes {
             kind = minutes <= 60 * 24 ? .session : .weekly
@@ -67,15 +58,16 @@ public struct CodexLocalUsageReader {
         let label = limit.windowMinutes.map { "\(base) (\(shortDuration(minutes: $0)))" } ?? base
         let id = limit.windowMinutes.map { "codex-\($0)" } ?? "codex-\(limit.name)"
 
-        return UsageWindow(
-            id: id,
-            kind: kind,
-            label: label,
-            usedPercent: usedPercent,
+        return UsageSnapshotFactory.window(
+            descriptor: UsageWindowDescriptor(
+                id: id,
+                kind: kind,
+                label: label,
+                windowMinutes: limit.windowMinutes
+            ),
+            usedPercent: limit.usedPercent,
             resetDate: limit.resetsAt,
-            resetDescription: resetDescription(for: limit.resetsAt, now: now),
-            windowMinutes: limit.windowMinutes,
-            riskLevel: UsageThresholds.standard.riskLevel(usedPercent: usedPercent)
+            resetDescription: resetDescription(for: limit.resetsAt, now: now)
         )
     }
 
