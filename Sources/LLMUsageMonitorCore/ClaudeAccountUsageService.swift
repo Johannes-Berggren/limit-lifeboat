@@ -3,20 +3,32 @@ import Foundation
 /// The credential surface `ClaudeAccountUsageService` needs; `CLISwitcher`
 /// is the production implementation, tests use an in-memory fake.
 public protocol ClaudeOAuthCredentialProviding: AnyObject {
-    func liveClaudeOAuthCredentials() -> ClaudeOAuthCredentials?
-    func writeLiveClaudeOAuthCredentials(_ credentials: ClaudeOAuthCredentials) throws
+    func liveClaudeOAuthCredentials(accessMode: CredentialAccessMode) throws -> ClaudeOAuthCredentials?
+    func writeLiveClaudeOAuthCredentials(
+        _ credentials: ClaudeOAuthCredentials,
+        accessMode: CredentialAccessMode
+    ) throws
     @discardableResult
     func replaceLiveClaudeOAuthCredentials(
         _ credentials: ClaudeOAuthCredentials,
-        ifAccessTokenMatches expectedAccessToken: String
+        ifAccessTokenMatches expectedAccessToken: String,
+        accessMode: CredentialAccessMode
     ) throws -> Bool
-    func storedClaudeOAuthCredentials(for profileID: UUID) throws -> ClaudeOAuthCredentials?
-    func updateStoredClaudeOAuthCredentials(_ credentials: ClaudeOAuthCredentials, for profileID: UUID) throws
+    func storedClaudeOAuthCredentials(
+        for profileID: UUID,
+        accessMode: CredentialAccessMode
+    ) throws -> ClaudeOAuthCredentials?
+    func updateStoredClaudeOAuthCredentials(
+        _ credentials: ClaudeOAuthCredentials,
+        for profileID: UUID,
+        accessMode: CredentialAccessMode
+    ) throws
     @discardableResult
     func replaceStoredClaudeOAuthCredentials(
         _ credentials: ClaudeOAuthCredentials,
         for profileID: UUID,
-        ifAccessTokenMatches expectedAccessToken: String
+        ifAccessTokenMatches expectedAccessToken: String,
+        accessMode: CredentialAccessMode
     ) throws -> Bool
 }
 
@@ -71,12 +83,24 @@ public struct ClaudeAccountUsageService {
     public func fetchSnapshot(
         for profile: AccountProfile,
         isActiveCLI: Bool,
-        now: Date = Date()
+        now: Date = Date(),
+        accessMode: CredentialAccessMode = CredentialAccess.currentMode
     ) async throws -> UsageSnapshot {
-        let (active, cameFromLiveItem) = try await resolveCredentials(for: profile, isActiveCLI: isActiveCLI, now: now)
+        let (active, cameFromLiveItem) = try await resolveCredentials(
+            for: profile,
+            isActiveCLI: isActiveCLI,
+            now: now,
+            accessMode: accessMode
+        )
 
         do {
-            let usage = try await fetchUsage(with: active, for: profile, updateLiveItem: cameFromLiveItem, now: now)
+            let usage = try await fetchUsage(
+                with: active,
+                for: profile,
+                updateLiveItem: cameFromLiveItem,
+                now: now,
+                accessMode: accessMode
+            )
             // A 2xx body with no recognizable windows must fail the fetch:
             // a parseConfidence-.none snapshot would overwrite the last good
             // one and bypass AppState's CLI fallback.
@@ -97,9 +121,15 @@ public struct ClaudeAccountUsageService {
     public func fetchAccountInfo(
         for profile: AccountProfile,
         isActiveCLI: Bool,
-        now: Date = Date()
+        now: Date = Date(),
+        accessMode: CredentialAccessMode = CredentialAccess.currentMode
     ) async throws -> ClaudeAPIAccountInfo {
-        let (active, _) = try await resolveCredentials(for: profile, isActiveCLI: isActiveCLI, now: now)
+        let (active, _) = try await resolveCredentials(
+            for: profile,
+            isActiveCLI: isActiveCLI,
+            now: now,
+            accessMode: accessMode
+        )
 
         do {
             return try await apiClient.fetchAccountInfo(accessToken: active.accessToken, now: now)
@@ -119,16 +149,29 @@ public struct ClaudeAccountUsageService {
     private func resolveCredentials(
         for profile: AccountProfile,
         isActiveCLI: Bool,
-        now: Date
+        now: Date,
+        accessMode: CredentialAccessMode
     ) async throws -> (credentials: ClaudeOAuthCredentials, cameFromLiveItem: Bool) {
         var cameFromLiveItem = false
         var current: ClaudeOAuthCredentials?
-        if isActiveCLI, let live = credentials.liveClaudeOAuthCredentials() {
-            current = live
-            cameFromLiveItem = true
-        } else {
+        if isActiveCLI {
             do {
-                current = try credentials.storedClaudeOAuthCredentials(for: profile.id)
+                if let live = try credentials.liveClaudeOAuthCredentials(accessMode: accessMode) {
+                    current = live
+                    cameFromLiveItem = true
+                }
+            } catch let error as ClaudeCodeCredentialsKeychainError where error.isKeychainAccessDenied {
+                throw ClaudeAccountUsageFetchError.keychainLocked
+            } catch {
+                current = nil
+            }
+        }
+        if current == nil {
+            do {
+                current = try credentials.storedClaudeOAuthCredentials(
+                    for: profile.id,
+                    accessMode: accessMode
+                )
             } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
                 // A locked/denied Keychain is not the same as "no credentials":
                 // surface it so the UI can prompt to grant access.
@@ -145,7 +188,13 @@ public struct ClaudeAccountUsageService {
         }
 
         if active.isExpired(asOf: now) {
-            active = try await refreshAndPersist(active, for: profile, updateLiveItem: cameFromLiveItem, now: now)
+            active = try await refreshAndPersist(
+                active,
+                for: profile,
+                updateLiveItem: cameFromLiveItem,
+                now: now,
+                accessMode: accessMode
+            )
         }
         return (active, cameFromLiveItem)
     }
@@ -154,14 +203,21 @@ public struct ClaudeAccountUsageService {
         with credentials: ClaudeOAuthCredentials,
         for profile: AccountProfile,
         updateLiveItem: Bool,
-        now: Date
+        now: Date,
+        accessMode: CredentialAccessMode
     ) async throws -> ClaudeAPIUsage {
         do {
             return try await apiClient.fetchUsage(accessToken: credentials.accessToken)
         } catch ClaudeUsageAPIError.unauthorized {
             // The token can be revoked before its recorded expiry; one forced
             // refresh is the only retry.
-            let refreshed = try await refreshAndPersist(credentials, for: profile, updateLiveItem: updateLiveItem, now: now)
+            let refreshed = try await refreshAndPersist(
+                credentials,
+                for: profile,
+                updateLiveItem: updateLiveItem,
+                now: now,
+                accessMode: accessMode
+            )
             do {
                 return try await apiClient.fetchUsage(accessToken: refreshed.accessToken)
             } catch ClaudeUsageAPIError.unauthorized {
@@ -174,7 +230,8 @@ public struct ClaudeAccountUsageService {
         _ stale: ClaudeOAuthCredentials,
         for profile: AccountProfile,
         updateLiveItem: Bool,
-        now: Date
+        now: Date,
+        accessMode: CredentialAccessMode
     ) async throws -> ClaudeOAuthCredentials {
         let refreshed: ClaudeOAuthCredentials
         do {
@@ -194,12 +251,17 @@ public struct ClaudeAccountUsageService {
         _ = try? credentials.replaceStoredClaudeOAuthCredentials(
             refreshed,
             for: profile.id,
-            ifAccessTokenMatches: stale.accessToken
+            ifAccessTokenMatches: stale.accessToken,
+            accessMode: accessMode
         )
-        if updateLiveItem {
+        // A scheduled/background usage refresh must never mutate the CLI's
+        // live login. Only an explicit user action (Retry, manual switch, or
+        // capture workflow) may write refreshed tokens back to Claude Code.
+        if updateLiveItem, accessMode == .userInitiated {
             _ = try? credentials.replaceLiveClaudeOAuthCredentials(
                 refreshed,
-                ifAccessTokenMatches: stale.accessToken
+                ifAccessTokenMatches: stale.accessToken,
+                accessMode: accessMode
             )
         }
         return refreshed

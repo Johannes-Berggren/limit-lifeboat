@@ -28,9 +28,8 @@ final class CLISwitcherTests: XCTestCase {
         try #"{"auth_mode":"chatgpt","tokens":{"access_token":"two"}}"#.data(using: .utf8)!.write(to: authURL)
 
         let result = try switcher.restoreSnapshot(for: profile)
-        let restored = try String(contentsOf: authURL)
 
-        XCTAssertTrue(restored.contains(#""access_token":"one""#) || restored.contains(#""access_token": "one""#))
+        XCTAssertEqual(try codexAccessToken(at: authURL), "one")
         XCTAssertEqual(result.backupURLs.count, 1)
         XCTAssertTrue(FileManager.default.fileExists(atPath: result.backupURLs[0].path))
     }
@@ -46,16 +45,18 @@ final class CLISwitcherTests: XCTestCase {
         try #"{"userThemeMode":"dark","oauth:tokenCache":{"accessToken":"one"}}"#.data(using: .utf8)!.write(to: configURL)
 
         let store = MemoryCredentialStore()
+        let source = fakeClaudeSource(accessToken: "account-a")
         let switcher = CLISwitcher(
             homeDirectory: fixture.home,
             backupDirectory: fixture.backups,
             credentialStore: store,
-            claudeCLICredentialSource: FakeClaudeCLICredentialSource()
+            claudeCLICredentialSource: source
         )
         let profile = AccountProfile(provider: .claude, label: "Claude")
 
         _ = try switcher.captureAndStoreSnapshot(for: profile)
         try #"{"userThemeMode":"light","oauth:tokenCache":{"accessToken":"two"}}"#.data(using: .utf8)!.write(to: configURL)
+        source.itemJSON = Data(#"{"claudeAiOauth":{"accessToken":"account-b","expiresAt":1783458000000}}"#.utf8)
 
         _ = try switcher.restoreSnapshot(for: profile)
         let restoredData = try Data(contentsOf: configURL)
@@ -70,8 +71,8 @@ final class CLISwitcherTests: XCTestCase {
         let fixture = try TemporaryFixture()
         defer { fixture.cleanup() }
 
-        // A Claude snapshot with two items: desktop config (jsonFields) and
-        // ~/.claude.json (fullFile).
+        // A Claude snapshot with three items: keychain OAuth plus the desktop
+        // config and ~/.claude.json JSON fields.
         let configURL = fixture.home
             .appendingPathComponent("Library/Application Support/Claude", isDirectory: true)
             .appendingPathComponent("config.json")
@@ -81,21 +82,22 @@ final class CLISwitcherTests: XCTestCase {
         try #"{"oauthAccount":{"emailAddress":"a@example.com"}}"#.data(using: .utf8)!.write(to: claudeJSONURL)
 
         let store = MemoryCredentialStore()
+        let source = fakeClaudeSource()
         let switcher = CLISwitcher(
             homeDirectory: fixture.home,
             backupDirectory: fixture.backups,
             credentialStore: store,
-            claudeCLICredentialSource: FakeClaudeCLICredentialSource()
+            claudeCLICredentialSource: source
         )
         let profile = AccountProfile(provider: .claude, label: "Claude")
         let captured = try switcher.captureAndStoreSnapshot(for: profile)
-        XCTAssertEqual(captured.items.count, 2)
+        XCTAssertEqual(captured.items.count, 3)
 
         let result = try switcher.restoreSnapshot(for: profile)
 
         let backupDirectories = try FileManager.default.contentsOfDirectory(atPath: fixture.backups.path)
         XCTAssertEqual(backupDirectories.count, 1)
-        XCTAssertEqual(result.backupURLs.count, 2)
+        XCTAssertEqual(result.backupURLs.count, 3)
         for backup in result.backupURLs {
             XCTAssertEqual(backup.deletingLastPathComponent().lastPathComponent, backupDirectories[0])
         }
@@ -201,11 +203,12 @@ final class CLISwitcherTests: XCTestCase {
         let claudeURL = fixture.home.appendingPathComponent(".claude.json")
         try Data(#"{"oauthAccount":{"emailAddress":"a@example.com"},"theme":"dark"}"#.utf8).write(to: claudeURL)
         let store = MemoryCredentialStore()
+        let source = fakeClaudeSource()
         let switcher = CLISwitcher(
             homeDirectory: fixture.home,
             backupDirectory: fixture.backups,
             credentialStore: store,
-            claudeCLICredentialSource: FakeClaudeCLICredentialSource()
+            claudeCLICredentialSource: source
         )
         let profile = AccountProfile(provider: .claude, label: "A")
         _ = try switcher.captureAndStoreSnapshot(for: profile)
@@ -344,6 +347,12 @@ final class CLISwitcherTests: XCTestCase {
         try Data(#"{"oauthAccount":{"emailAddress":"stale@example.com"},"theme":"light"}"#.utf8).write(to: claudeURL)
         let store = MemoryCredentialStore()
         let profile = AccountProfile(provider: .claude, label: "Legacy")
+        let keychainItem = CredentialSnapshotItem(
+            relativePath: CLISwitcher.claudeKeychainItemPath,
+            kind: .keychainJSONFields,
+            contents: Data(#"{"accessToken":"target","expiresAt":1783458000000}"#.utf8),
+            posixPermissions: nil
+        )
         try store.save(
             snapshot: CredentialSnapshot(provider: .claude, items: [
                 CredentialSnapshotItem(
@@ -351,15 +360,17 @@ final class CLISwitcherTests: XCTestCase {
                     kind: .jsonFields,
                     contents: Data(#"{"oauth:tokenCache":{"accessToken":"target"}}"#.utf8),
                     posixPermissions: 0o600
-                )
+                ),
+                keychainItem
             ]),
             for: profile.id
         )
+        let source = fakeClaudeSource(accessToken: "live")
         let switcher = CLISwitcher(
             homeDirectory: fixture.home,
             backupDirectory: fixture.backups,
             credentialStore: store,
-            claudeCLICredentialSource: FakeClaudeCLICredentialSource()
+            claudeCLICredentialSource: source
         )
 
         _ = try switcher.restoreSnapshot(for: profile)
@@ -599,7 +610,7 @@ final class CLISwitcherTests: XCTestCase {
         XCTAssertEqual(tokenCache["accessToken"] as? String, "two", "Files must be untouched when the keychain read fails")
     }
 
-    func testRestoreLegacySnapshotWithoutKeychainItemLogsOutPreviousAccount() throws {
+    func testRestoreLegacySnapshotWithoutKeychainItemIsRejectedByDefault() throws {
         let fixture = try TemporaryFixture()
         defer { fixture.cleanup() }
 
@@ -622,21 +633,21 @@ final class CLISwitcherTests: XCTestCase {
         let profile = AccountProfile(provider: .claude, label: "A")
         let legacy = try switcher.captureAndStoreSnapshot(for: profile)
         XCTAssertFalse(legacy.items.contains { $0.kind == .keychainJSONFields })
+        XCTAssertFalse(try switcher.hasRestorableSnapshot(for: profile))
 
         // The terminal is now logged into account B.
         source.itemJSON = Data(#"{"claudeAiOauth":{"accessToken":"account-b","expiresAt":1783458000000},"mcpOAuth":{"serverX":{"accessToken":"mcp"}}}"#.utf8)
+        let liveBeforeRestore = source.itemJSON
 
-        let result = try switcher.restoreSnapshot(for: profile)
-
-        let live = try XCTUnwrap(source.itemJSON)
-        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: live) as? [String: Any])
-        XCTAssertNil(object["claudeAiOauth"], "The previous account's token must not survive the switch")
-        let mcp = try XCTUnwrap(object["mcpOAuth"] as? [String: Any])
-        XCTAssertNotNil(mcp["serverX"], "mcpOAuth must survive the logout")
-        XCTAssertTrue(
-            result.backupURLs.contains { $0.lastPathComponent.contains("keychain") },
-            "The live item must be backed up before it is rewritten"
-        )
+        XCTAssertThrowsError(
+            try switcher.restoreSnapshot(for: profile)
+        ) { error in
+            guard case CLISwitcherError.missingCredentials = error else {
+                return XCTFail("Expected missingCredentials, got \(error)")
+            }
+        }
+        XCTAssertEqual(source.itemJSON, liveBeforeRestore)
+        XCTAssertTrue(source.writes.isEmpty, "An incomplete snapshot must never rewrite the live login")
     }
 
     func testProviderMismatchIsRejected() throws {
@@ -693,10 +704,36 @@ final class CLISwitcherTests: XCTestCase {
         XCTAssertNil(switcher.resolveExecutablePath(command: "definitely-not-a-real-cli-xyzzy"))
     }
 
+    func testCredentialAccessModePropagatesThroughSwitcherInterfaces() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let store = MemoryCredentialStore()
+        let source = FakeClaudeCLICredentialSource()
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: store,
+            claudeCLICredentialSource: source
+        )
+        let profile = AccountProfile(provider: .claude, label: "Claude")
+
+        _ = try switcher.liveObservation(provider: .claude, accessMode: .nonInteractive)
+        _ = try switcher.hasStoredSnapshot(for: profile, accessMode: .userInitiated)
+
+        XCTAssertEqual(source.accessModes, [.nonInteractive])
+        XCTAssertEqual(store.accessModes, [.userInitiated])
+    }
+
     private func codexAccessToken(at url: URL) throws -> String? {
         let object = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
         let tokens = object?["tokens"] as? [String: Any]
         return tokens?["access_token"] as? String
+    }
+
+    private func fakeClaudeSource(accessToken: String = "tok-a") -> FakeClaudeCLICredentialSource {
+        let source = FakeClaudeCLICredentialSource()
+        source.itemJSON = Data(#"{"claudeAiOauth":{"accessToken":"\#(accessToken)","expiresAt":1783458000000},"mcpOAuth":{"serverX":{"accessToken":"mcp"}}}"#.utf8)
+        return source
     }
 }
 
@@ -706,41 +743,57 @@ private final class FakeClaudeCLICredentialSource: ClaudeCLICredentialSource, @u
     var itemJSON: Data?
     var readError: Error?
     private(set) var writes: [Data] = []
+    private(set) var accessModes: [CredentialAccessMode] = []
 
-    func readLiveItemJSON() throws -> Data? {
+    func readLiveItemJSON(accessMode: CredentialAccessMode) throws -> Data? {
+        accessModes.append(accessMode)
         if let readError {
             throw readError
         }
         return itemJSON
     }
 
-    func writeLiveItemJSON(_ data: Data) throws {
+    func writeLiveItemJSON(_ data: Data, accessMode: CredentialAccessMode) throws {
+        accessModes.append(accessMode)
         writes.append(data)
         itemJSON = data
     }
 
-    func deleteLiveItem() throws {
+    func deleteLiveItem(accessMode: CredentialAccessMode) throws {
+        accessModes.append(accessMode)
         itemJSON = nil
     }
 }
 
 private final class MemoryCredentialStore: CredentialStoreProtocol {
     private var storage: [UUID: CredentialSnapshot] = [:]
+    private(set) var accessModes: [CredentialAccessMode] = []
 
-    func save(snapshot: CredentialSnapshot, for accountID: UUID) throws {
+    func save(
+        snapshot: CredentialSnapshot,
+        for accountID: UUID,
+        accessMode: CredentialAccessMode
+    ) throws {
+        accessModes.append(accessMode)
         storage[accountID] = snapshot
     }
 
-    func loadSnapshot(for accountID: UUID) throws -> CredentialSnapshot? {
-        storage[accountID]
+    func loadSnapshot(
+        for accountID: UUID,
+        accessMode: CredentialAccessMode
+    ) throws -> CredentialSnapshot? {
+        accessModes.append(accessMode)
+        return storage[accountID]
     }
 
-    func deleteSnapshot(for accountID: UUID) throws {
+    func deleteSnapshot(for accountID: UUID, accessMode: CredentialAccessMode) throws {
+        accessModes.append(accessMode)
         storage[accountID] = nil
     }
 
-    func hasSnapshot(for accountID: UUID) throws -> Bool {
-        storage[accountID] != nil
+    func hasSnapshot(for accountID: UUID, accessMode: CredentialAccessMode) throws -> Bool {
+        accessModes.append(accessMode)
+        return storage[accountID] != nil
     }
 }
 

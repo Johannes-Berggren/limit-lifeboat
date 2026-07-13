@@ -134,27 +134,50 @@ final class ClaudeOAuthCredentialsTests: XCTestCase {
 }
 
 final class ClaudeCodeCredentialsKeychainTests: XCTestCase {
-    func testCreateReadUpdateAndSecurityToolInteroperability() throws {
+    func testReadUpdateAndDeleteExistingItem() throws {
         let service = "com.johannesberggren.LLMUsageMonitor.claude-tests.\(UUID().uuidString)"
         let account = "test-\(UUID().uuidString)"
         let keychain = ClaudeCodeCredentialsKeychain(serviceName: service, accountName: account)
         defer { deleteItem(service: service, account: account) }
 
-        XCTAssertNil(try keychain.readLiveItemJSON())
-
         let first = Data(#"{"claudeAiOauth":{"accessToken":"one"},"mcpOAuth":{"server":"keep"}}"#.utf8)
-        try keychain.writeLiveItemJSON(first)
+        try addItem(first, service: service, account: account)
         XCTAssertEqual(try keychain.readLiveItemJSON(), first)
-        XCTAssertEqual(try readWithSecurityTool(service: service, account: account), first)
 
         let second = Data(#"{"claudeAiOauth":{"accessToken":"two"},"mcpOAuth":{"server":"keep"}}"#.utf8)
         try keychain.writeLiveItemJSON(second)
         XCTAssertEqual(try keychain.readLiveItemJSON(), second)
-        XCTAssertEqual(try readWithSecurityTool(service: service, account: account), second)
 
         try keychain.deleteLiveItem()
         XCTAssertNil(try keychain.readLiveItemJSON())
         XCTAssertNoThrow(try keychain.deleteLiveItem(), "Deleting an already-missing item is idempotent")
+    }
+
+    func testSecurityToolInteroperability() throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["RUN_KEYCHAIN_INTEROP_TESTS"] == "1",
+            "Opt-in only: /usr/bin/security can display a real macOS authorization dialog."
+        )
+
+        let service = "com.johannesberggren.LLMUsageMonitor.claude-tests.\(UUID().uuidString)"
+        let account = "test-\(UUID().uuidString)"
+        defer { deleteItem(service: service, account: account) }
+
+        let item = Data(#"{"claudeAiOauth":{"accessToken":"one"},"mcpOAuth":{"server":"keep"}}"#.utf8)
+        try addItem(item, service: service, account: account)
+        XCTAssertEqual(try readWithSecurityTool(service: service, account: account), item)
+    }
+
+    func testWriteRefusesToCreateClaudeOwnedItem() {
+        let service = "com.johannesberggren.LLMUsageMonitor.claude-tests.\(UUID().uuidString)"
+        let account = "test-\(UUID().uuidString)"
+        let keychain = ClaudeCodeCredentialsKeychain(serviceName: service, accountName: account)
+
+        XCTAssertThrowsError(try keychain.writeLiveItemJSON(Data("{}".utf8))) { error in
+            guard case ClaudeCodeCredentialsKeychainError.missingLiveItem = error else {
+                return XCTFail("Expected missingLiveItem, got \(error)")
+            }
+        }
     }
 
     func testIntegrityFailureStopsBeforeKeychainAccess() {
@@ -186,6 +209,19 @@ final class ClaudeCodeCredentialsKeychainTests: XCTestCase {
             kSecAttrService as String: service,
             kSecAttrAccount as String: account
         ] as CFDictionary)
+    }
+
+    private func addItem(_ data: Data, service: String, account: String) throws {
+        let status = SecItemAdd([
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ] as CFDictionary, nil)
+        guard status == errSecSuccess else {
+            throw ClaudeCodeCredentialsKeychainError.keychainError(status)
+        }
     }
 
     private func readWithSecurityTool(service: String, account: String) throws -> Data {

@@ -61,10 +61,28 @@ public enum CredentialStoreError: Error, LocalizedError {
 }
 
 public protocol CredentialStoreProtocol {
-    func save(snapshot: CredentialSnapshot, for accountID: UUID) throws
-    func loadSnapshot(for accountID: UUID) throws -> CredentialSnapshot?
-    func deleteSnapshot(for accountID: UUID) throws
-    func hasSnapshot(for accountID: UUID) throws -> Bool
+    func save(snapshot: CredentialSnapshot, for accountID: UUID, accessMode: CredentialAccessMode) throws
+    func loadSnapshot(for accountID: UUID, accessMode: CredentialAccessMode) throws -> CredentialSnapshot?
+    func deleteSnapshot(for accountID: UUID, accessMode: CredentialAccessMode) throws
+    func hasSnapshot(for accountID: UUID, accessMode: CredentialAccessMode) throws -> Bool
+}
+
+public extension CredentialStoreProtocol {
+    func save(snapshot: CredentialSnapshot, for accountID: UUID) throws {
+        try save(snapshot: snapshot, for: accountID, accessMode: CredentialAccess.currentMode)
+    }
+
+    func loadSnapshot(for accountID: UUID) throws -> CredentialSnapshot? {
+        try loadSnapshot(for: accountID, accessMode: CredentialAccess.currentMode)
+    }
+
+    func deleteSnapshot(for accountID: UUID) throws {
+        try deleteSnapshot(for: accountID, accessMode: CredentialAccess.currentMode)
+    }
+
+    func hasSnapshot(for accountID: UUID) throws -> Bool {
+        try hasSnapshot(for: accountID, accessMode: CredentialAccess.currentMode)
+    }
 }
 
 public final class KeychainCredentialStore: CredentialStoreProtocol {
@@ -81,13 +99,17 @@ public final class KeychainCredentialStore: CredentialStoreProtocol {
         self.validateAccess = validateAccess
     }
 
-    public func save(snapshot: CredentialSnapshot, for accountID: UUID) throws {
+    public func save(
+        snapshot: CredentialSnapshot,
+        for accountID: UUID,
+        accessMode: CredentialAccessMode
+    ) throws {
         try validateCredentialAccess()
         guard let data = try? encoder.encode(snapshot) else {
             throw CredentialStoreError.encodeFailed
         }
 
-        var addQuery = baseQuery(accountID: accountID)
+        var addQuery = baseQuery(accountID: accountID, accessMode: accessMode)
         addQuery[kSecValueData as String] = data
         addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
 
@@ -98,7 +120,7 @@ public final class KeychainCredentialStore: CredentialStoreProtocol {
 
         if addStatus == errSecDuplicateItem {
             let updateStatus = SecItemUpdate(
-                baseQuery(accountID: accountID) as CFDictionary,
+                baseQuery(accountID: accountID, accessMode: accessMode) as CFDictionary,
                 [kSecValueData as String: data] as CFDictionary
             )
             guard updateStatus == errSecSuccess else {
@@ -110,9 +132,12 @@ public final class KeychainCredentialStore: CredentialStoreProtocol {
         throw CredentialStoreError.keychainError(addStatus)
     }
 
-    public func loadSnapshot(for accountID: UUID) throws -> CredentialSnapshot? {
+    public func loadSnapshot(
+        for accountID: UUID,
+        accessMode: CredentialAccessMode
+    ) throws -> CredentialSnapshot? {
         try validateCredentialAccess()
-        var query = baseQuery(accountID: accountID)
+        var query = baseQuery(accountID: accountID, accessMode: accessMode)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 
@@ -134,17 +159,17 @@ public final class KeychainCredentialStore: CredentialStoreProtocol {
         }
     }
 
-    public func deleteSnapshot(for accountID: UUID) throws {
+    public func deleteSnapshot(for accountID: UUID, accessMode: CredentialAccessMode) throws {
         try validateCredentialAccess()
-        let status = SecItemDelete(baseQuery(accountID: accountID) as CFDictionary)
+        let status = SecItemDelete(baseQuery(accountID: accountID, accessMode: accessMode) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw CredentialStoreError.keychainError(status)
         }
     }
 
-    public func hasSnapshot(for accountID: UUID) throws -> Bool {
+    public func hasSnapshot(for accountID: UUID, accessMode: CredentialAccessMode) throws -> Bool {
         try validateCredentialAccess()
-        var query = baseQuery(accountID: accountID)
+        var query = baseQuery(accountID: accountID, accessMode: accessMode)
         query[kSecReturnData as String] = false
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 
@@ -158,11 +183,12 @@ public final class KeychainCredentialStore: CredentialStoreProtocol {
         return true
     }
 
-    private func baseQuery(accountID: UUID) -> [String: Any] {
+    private func baseQuery(accountID: UUID, accessMode: CredentialAccessMode) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: accountID.uuidString
+            kSecAttrAccount as String: accountID.uuidString,
+            kSecUseAuthenticationContext as String: CredentialAccess.authenticationContext(for: accessMode)
         ]
     }
 

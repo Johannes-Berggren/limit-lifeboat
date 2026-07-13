@@ -2,6 +2,17 @@ import XCTest
 @testable import LLMUsageMonitorCore
 
 final class ModelsTests: XCTestCase {
+    func testActiveAccountOrderingIsStableWithinGroups() {
+        let inactiveOne = AccountProfile(provider: .claude, label: "Inactive One")
+        let active = AccountProfile(provider: .claude, label: "Active", isActiveCLI: true)
+        let inactiveTwo = AccountProfile(provider: .claude, label: "Inactive Two")
+
+        XCTAssertEqual(
+            AccountProfileOrdering.activeFirst([inactiveOne, active, inactiveTwo]).map(\.id),
+            [active.id, inactiveOne.id, inactiveTwo.id]
+        )
+    }
+
     func testProviderLoginCommandsMatchCurrentCLIs() {
         XCTAssertEqual(Provider.claude.loginCommand, "claude auth login")
         XCTAssertEqual(Provider.codex.loginCommand, "codex login")
@@ -366,31 +377,25 @@ final class ModelsTests: XCTestCase {
         XCTAssertNil(makeSnapshot().mostConstrainedWindow)
     }
 
-    /// A *healthy* model-scoped weekly is hidden in the card ("+N limits"), so it
-    /// must not drive the menu-bar number even when it is the highest-used window.
-    /// The surfaced constraint is the all-models weekly the popover actually shows.
-    func testSurfacedConstrainedWindowIgnoresHealthyScopedWeekly() {
+    func testPrimaryLimitsExcludeScopedWeekly() {
         let snapshot = makeSnapshot(windows: [
             makeWindow(id: "session", kind: .session, usedPercent: 3, riskLevel: .healthy),
             makeWindow(id: "weekly-all", kind: .weekly, usedPercent: 12, riskLevel: .healthy),
-            makeWindow(id: "weekly-fable", kind: .weeklyScoped, usedPercent: 22, riskLevel: .healthy)
+            makeWindow(id: "weekly-fable", kind: .weeklyScoped, usedPercent: 100, riskLevel: .depleted)
         ])
 
-        XCTAssertEqual(snapshot.surfacedConstrainedWindow?.id, "weekly-all")
-        XCTAssertEqual(snapshot.surfacedConstrainedWindow?.usedPercent, 12)
+        XCTAssertEqual(snapshot.primaryLimitWindows.map(\.id), ["session", "weekly-all"])
+        XCTAssertEqual(snapshot.primaryConstrainedWindow?.id, "weekly-all")
     }
 
-    /// When the scoped weekly is genuinely at risk it becomes visible in the card,
-    /// so it is allowed to drive the number — risk is never hidden.
-    func testSurfacedConstrainedWindowSurfacesAtRiskScopedWeekly() {
+    func testPrimaryWeeklyDoesNotFallBackToScopedWeekly() {
         let snapshot = makeSnapshot(windows: [
             makeWindow(id: "session", kind: .session, usedPercent: 3, riskLevel: .healthy),
-            makeWindow(id: "weekly-all", kind: .weekly, usedPercent: 12, riskLevel: .healthy),
             makeWindow(id: "weekly-fable", kind: .weeklyScoped, usedPercent: 22, riskLevel: .warning)
         ])
 
-        XCTAssertEqual(snapshot.surfacedConstrainedWindow?.id, "weekly-fable")
-        XCTAssertEqual(snapshot.surfacedConstrainedWindow?.usedPercent, 22)
+        XCTAssertEqual(snapshot.primaryLimitWindows.map(\.id), ["session"])
+        XCTAssertEqual(snapshot.primaryConstrainedWindow?.id, "session")
     }
 
     // MARK: - billingUsageMode

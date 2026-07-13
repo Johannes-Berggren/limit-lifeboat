@@ -99,13 +99,6 @@ struct SettingsView: View {
                         }
                     }
 
-                    Picker("Menu bar shows", selection: $settings.menuBarWindowPreference) {
-                        Text("Most constrained window").tag(MenuBarWindowPreference.mostConstrained)
-                        Text("Session (5-hour)").tag(MenuBarWindowPreference.session)
-                        Text("Weekly").tag(MenuBarWindowPreference.weekly)
-                    }
-                    .help("Which quota window the menu-bar percentage tracks. A missing window falls back to the most constrained one.")
-
                     Toggle("Launch at login", isOn: $launchAtLogin)
                         .onChange(of: launchAtLogin) { _, newValue in
                             applyLaunchAtLogin(newValue)

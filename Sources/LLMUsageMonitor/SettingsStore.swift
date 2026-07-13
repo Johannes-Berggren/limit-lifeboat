@@ -10,10 +10,6 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(refreshIntervalMinutes, forKey: Keys.refreshIntervalMinutes) }
     }
 
-    @Published var menuBarWindowPreference: MenuBarWindowPreference {
-        didSet { defaults.set(menuBarWindowPreference.rawValue, forKey: Keys.menuBarWindowPreference) }
-    }
-
     /// Gates the "usage nearing / at its limit" notifications.
     @Published var usageAlertsEnabled: Bool {
         didSet { defaults.set(usageAlertsEnabled, forKey: Keys.usageAlertsEnabled) }
@@ -43,8 +39,6 @@ final class SettingsStore: ObservableObject {
         // A refresh is now a sub-second API call, so the default cadence
         // dropped from 10 to 5 minutes; an explicitly chosen interval wins.
         self.refreshIntervalMinutes = min(240, max(1, storedInterval ?? 5))
-        self.menuBarWindowPreference = (defaults.string(forKey: Keys.menuBarWindowPreference))
-            .flatMap(MenuBarWindowPreference.init(rawValue:)) ?? .mostConstrained
         self.usageAlertsEnabled = defaults.object(forKey: Keys.usageAlertsEnabled) as? Bool ?? true
         self.autoSwitchEnabled = defaults.object(forKey: Keys.autoSwitchEnabled) as? Bool ?? false
         self.resetAlertsEnabled = defaults.object(forKey: Keys.resetAlertsEnabled) as? Bool ?? true
@@ -52,7 +46,6 @@ final class SettingsStore: ObservableObject {
 
     private enum Keys {
         static let refreshIntervalMinutes = "refreshIntervalMinutes"
-        static let menuBarWindowPreference = "menuBarWindowPreference"
         static let usageAlertsEnabled = "usageAlertsEnabled"
         static let autoSwitchEnabled = "autoSwitchEnabled"
         static let resetAlertsEnabled = "resetAlertsEnabled"

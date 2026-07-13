@@ -55,22 +55,55 @@ final class ClaudeAccountUsageServiceTests: XCTestCase {
         XCTAssertNil(store.live, "An inactive profile's refresh must not touch the live keychain item")
     }
 
-    func testActiveProfileRefreshWritesBackToLiveItem() async throws {
+    func testUserInitiatedActiveRefreshWritesBackToLiveItem() async throws {
         let store = FakeCredentialProvider()
-        store.live = makeCredentials(
+        let stale = makeCredentials(
             accessToken: "stale",
             refreshToken: "refresh-1",
             expiresAt: now.addingTimeInterval(-60)
         )
+        store.live = stale
+        store.stored[profile.id] = stale
         let http = ScriptedHTTPClient(responses: [
             (refreshJSON(accessToken: "fresh"), 200),
             (usageJSON, 200)
         ])
 
         let service = makeService(http: http, credentials: store)
-        _ = try await service.fetchSnapshot(for: profile, isActiveCLI: true, now: now)
+        _ = try await service.fetchSnapshot(
+            for: profile,
+            isActiveCLI: true,
+            now: now,
+            accessMode: .userInitiated
+        )
 
         XCTAssertEqual(store.live?.accessToken, "fresh")
+        XCTAssertEqual(store.stored[profile.id]?.accessToken, "fresh")
+    }
+
+    func testBackgroundActiveRefreshNeverMutatesLiveLogin() async throws {
+        let store = FakeCredentialProvider()
+        let stale = makeCredentials(
+            accessToken: "stale",
+            refreshToken: "refresh-1",
+            expiresAt: now.addingTimeInterval(-60)
+        )
+        store.live = stale
+        store.stored[profile.id] = stale
+        let http = ScriptedHTTPClient(responses: [
+            (refreshJSON(accessToken: "fresh"), 200),
+            (usageJSON, 200)
+        ])
+
+        let service = makeService(http: http, credentials: store)
+        _ = try await service.fetchSnapshot(
+            for: profile,
+            isActiveCLI: true,
+            now: now,
+            accessMode: .nonInteractive
+        )
+
+        XCTAssertEqual(store.live?.accessToken, "stale")
         XCTAssertEqual(store.stored[profile.id]?.accessToken, "fresh")
     }
 
@@ -145,11 +178,13 @@ final class ClaudeAccountUsageServiceTests: XCTestCase {
 
     func testLiveItemChangedDuringRefreshIsNotOverwritten() async throws {
         let store = FakeCredentialProvider()
-        store.live = makeCredentials(
+        let stale = makeCredentials(
             accessToken: "stale",
             refreshToken: "refresh-1",
             expiresAt: now.addingTimeInterval(-60)
         )
+        store.live = stale
+        store.stored[profile.id] = stale
         let http = ScriptedHTTPClient(responses: [
             (refreshJSON(accessToken: "fresh"), 200),
             (usageJSON, 200)
@@ -166,7 +201,12 @@ final class ClaudeAccountUsageServiceTests: XCTestCase {
         }
 
         let service = makeService(http: http, credentials: store)
-        _ = try await service.fetchSnapshot(for: profile, isActiveCLI: true, now: now)
+        _ = try await service.fetchSnapshot(
+            for: profile,
+            isActiveCLI: true,
+            now: now,
+            accessMode: .userInitiated
+        )
 
         XCTAssertEqual(
             store.live?.accessToken, "other-account",
@@ -223,6 +263,39 @@ final class ClaudeAccountUsageServiceTests: XCTestCase {
             }
         } catch {
             XCTFail("Unexpected error \(error)")
+        }
+    }
+
+    func testActiveLiveKeychainDeniedSurfacesAsKeychainLocked() async {
+        let store = FakeCredentialProvider()
+        store.liveError = ClaudeCodeCredentialsKeychainError.keychainError(errSecInteractionNotAllowed)
+        let service = makeService(http: ScriptedHTTPClient(responses: []), credentials: store)
+        do {
+            _ = try await service.fetchSnapshot(for: profile, isActiveCLI: true, now: now)
+            XCTFail("Expected keychainLocked")
+        } catch let error as ClaudeAccountUsageFetchError {
+            guard case .keychainLocked = error else {
+                return XCTFail("Expected keychainLocked, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error \(error)")
+        }
+    }
+
+    func testCredentialAccessModePropagatesToCredentialProvider() async {
+        let store = FakeCredentialProvider()
+        let service = makeService(http: ScriptedHTTPClient(responses: []), credentials: store)
+
+        do {
+            _ = try await service.fetchSnapshot(
+                for: profile,
+                isActiveCLI: false,
+                now: now,
+                accessMode: .userInitiated
+            )
+            XCTFail("Expected noCredentials")
+        } catch {
+            XCTAssertEqual(store.accessModes, [.userInitiated])
         }
     }
 
@@ -285,44 +358,67 @@ final class ClaudeAccountUsageServiceTests: XCTestCase {
 
 private final class FakeCredentialProvider: ClaudeOAuthCredentialProviding, @unchecked Sendable {
     var live: ClaudeOAuthCredentials?
+    var liveError: Error?
     var stored: [UUID: ClaudeOAuthCredentials] = [:]
     /// When set, `storedClaudeOAuthCredentials` throws it — used to simulate a
     /// locked/denied Keychain or an unreadable snapshot.
     var storedError: Error?
+    private(set) var accessModes: [CredentialAccessMode] = []
 
-    func liveClaudeOAuthCredentials() -> ClaudeOAuthCredentials? {
-        live
+    func liveClaudeOAuthCredentials(accessMode: CredentialAccessMode) throws -> ClaudeOAuthCredentials? {
+        accessModes.append(accessMode)
+        if let liveError {
+            throw liveError
+        }
+        return live
     }
 
-    func writeLiveClaudeOAuthCredentials(_ credentials: ClaudeOAuthCredentials) throws {
+    func writeLiveClaudeOAuthCredentials(
+        _ credentials: ClaudeOAuthCredentials,
+        accessMode: CredentialAccessMode
+    ) throws {
+        accessModes.append(accessMode)
         live = credentials
     }
 
     func replaceLiveClaudeOAuthCredentials(
         _ credentials: ClaudeOAuthCredentials,
-        ifAccessTokenMatches expectedAccessToken: String
+        ifAccessTokenMatches expectedAccessToken: String,
+        accessMode: CredentialAccessMode
     ) throws -> Bool {
+        accessModes.append(accessMode)
         guard live?.accessToken == expectedAccessToken else { return false }
         live = credentials
         return true
     }
 
-    func storedClaudeOAuthCredentials(for profileID: UUID) throws -> ClaudeOAuthCredentials? {
+    func storedClaudeOAuthCredentials(
+        for profileID: UUID,
+        accessMode: CredentialAccessMode
+    ) throws -> ClaudeOAuthCredentials? {
+        accessModes.append(accessMode)
         if let storedError {
             throw storedError
         }
         return stored[profileID]
     }
 
-    func updateStoredClaudeOAuthCredentials(_ credentials: ClaudeOAuthCredentials, for profileID: UUID) throws {
+    func updateStoredClaudeOAuthCredentials(
+        _ credentials: ClaudeOAuthCredentials,
+        for profileID: UUID,
+        accessMode: CredentialAccessMode
+    ) throws {
+        accessModes.append(accessMode)
         stored[profileID] = credentials
     }
 
     func replaceStoredClaudeOAuthCredentials(
         _ credentials: ClaudeOAuthCredentials,
         for profileID: UUID,
-        ifAccessTokenMatches expectedAccessToken: String
+        ifAccessTokenMatches expectedAccessToken: String,
+        accessMode: CredentialAccessMode
     ) throws -> Bool {
+        accessModes.append(accessMode)
         guard stored[profileID]?.accessToken == expectedAccessToken else { return false }
         stored[profileID] = credentials
         return true

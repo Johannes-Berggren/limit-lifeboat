@@ -3,18 +3,36 @@ import Security
 
 public enum ClaudeCodeCredentialsKeychainError: Error, LocalizedError {
     case credentialAccessUnavailable(underlying: Error)
+    case missingLiveItem
     case keychainError(OSStatus)
 
     public var errorDescription: String? {
         switch self {
         case .credentialAccessUnavailable(let underlying):
             return underlying.localizedDescription
+        case .missingLiveItem:
+            return "Claude Code is not logged in. Run `claude /login` before switching accounts."
         case .keychainError(let status):
             if CredentialStoreError.isCodeSigningStatus(status) {
                 return CredentialStoreError.keychainError(status).localizedDescription
             }
             let detail = SecCopyErrorMessageString(status, nil) as String? ?? "unknown Keychain error"
             return "Could not access Claude Code credentials (Keychain status \(status): \(detail))."
+        }
+    }
+
+    public var isKeychainAccessDenied: Bool {
+        switch self {
+        case .credentialAccessUnavailable:
+            return true
+        case .missingLiveItem:
+            return false
+        case .keychainError(let status):
+            return status == errSecInteractionNotAllowed
+                || status == errSecInteractionRequired
+                || status == errSecAuthFailed
+                || status == errSecUserCanceled
+                || CredentialStoreError.isCodeSigningStatus(status)
         }
     }
 }
@@ -24,15 +42,30 @@ public enum ClaudeCodeCredentialsKeychainError: Error, LocalizedError {
 /// in-memory source.
 public protocol ClaudeCLICredentialSource: Sendable {
     /// The full keychain item JSON, or nil when no item exists (logged out).
-    func readLiveItemJSON() throws -> Data?
-    func writeLiveItemJSON(_ data: Data) throws
-    func deleteLiveItem() throws
+    func readLiveItemJSON(accessMode: CredentialAccessMode) throws -> Data?
+    func writeLiveItemJSON(_ data: Data, accessMode: CredentialAccessMode) throws
+    func deleteLiveItem(accessMode: CredentialAccessMode) throws
+}
+
+public extension ClaudeCLICredentialSource {
+    func readLiveItemJSON() throws -> Data? {
+        try readLiveItemJSON(accessMode: CredentialAccess.currentMode)
+    }
+
+    func writeLiveItemJSON(_ data: Data) throws {
+        try writeLiveItemJSON(data, accessMode: CredentialAccess.currentMode)
+    }
+
+    func deleteLiveItem() throws {
+        try deleteLiveItem(accessMode: CredentialAccess.currentMode)
+    }
 }
 
 /// Reads and writes the "Claude Code-credentials" generic password directly
 /// through Security.framework. Existing items keep their ACL because updates
-/// modify only kSecValueData. A newly-created item explicitly trusts both this
-/// app and /usr/bin/security so the Claude Code CLI remains interoperable.
+/// modify only kSecValueData. This app deliberately never creates the live
+/// item: Claude Code must remain its owner so its access-control list is not
+/// replaced with one that makes the CLI repeatedly request authorization.
 public struct ClaudeCodeCredentialsKeychain: ClaudeCLICredentialSource {
     public static let serviceName = "Claude Code-credentials"
 
@@ -50,10 +83,10 @@ public struct ClaudeCodeCredentialsKeychain: ClaudeCLICredentialSource {
         self.validateAccess = validateAccess
     }
 
-    public func readLiveItemJSON() throws -> Data? {
+    public func readLiveItemJSON(accessMode: CredentialAccessMode) throws -> Data? {
         try validateCredentialAccess()
 
-        var query = baseQuery()
+        var query = baseQuery(accessMode: accessMode)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 
@@ -72,91 +105,37 @@ public struct ClaudeCodeCredentialsKeychain: ClaudeCLICredentialSource {
         return data
     }
 
-    public func writeLiveItemJSON(_ data: Data) throws {
+    public func writeLiveItemJSON(_ data: Data, accessMode: CredentialAccessMode) throws {
         try validateCredentialAccess()
 
         let status = SecItemUpdate(
-            baseQuery() as CFDictionary,
+            baseQuery(accessMode: accessMode) as CFDictionary,
             [kSecValueData as String: data] as CFDictionary
         )
         if status == errSecSuccess {
             return
         }
-        guard status == errSecItemNotFound else {
-            throw ClaudeCodeCredentialsKeychainError.keychainError(status)
+        if status == errSecItemNotFound {
+            throw ClaudeCodeCredentialsKeychainError.missingLiveItem
         }
-
-        try addSharedItem(data)
+        throw ClaudeCodeCredentialsKeychainError.keychainError(status)
     }
 
-    public func deleteLiveItem() throws {
+    public func deleteLiveItem(accessMode: CredentialAccessMode) throws {
         try validateCredentialAccess()
 
-        let status = SecItemDelete(baseQuery() as CFDictionary)
+        let status = SecItemDelete(baseQuery(accessMode: accessMode) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw ClaudeCodeCredentialsKeychainError.keychainError(status)
         }
     }
 
-    private func addSharedItem(_ data: Data) throws {
-        let access = try makeSharedAccess()
-        var query = baseQuery()
-        query[kSecValueData as String] = data
-        query[kSecAttrAccess as String] = access
-
-        let status = SecItemAdd(query as CFDictionary, nil)
-        if status == errSecSuccess {
-            return
-        }
-
-        // Another process may have created the item after our update missed
-        // it. Retry as a data-only update so its ACL remains untouched.
-        if status == errSecDuplicateItem {
-            let retryStatus = SecItemUpdate(
-                baseQuery() as CFDictionary,
-                [kSecValueData as String: data] as CFDictionary
-            )
-            guard retryStatus == errSecSuccess else {
-                throw ClaudeCodeCredentialsKeychainError.keychainError(retryStatus)
-            }
-            return
-        }
-
-        throw ClaudeCodeCredentialsKeychainError.keychainError(status)
-    }
-
-    private func makeSharedAccess() throws -> SecAccess {
-        var currentApplication: SecTrustedApplication?
-        var status = SecTrustedApplicationCreateFromPath(nil, &currentApplication)
-        guard status == errSecSuccess, let currentApplication else {
-            throw ClaudeCodeCredentialsKeychainError.keychainError(status)
-        }
-
-        var securityTool: SecTrustedApplication?
-        status = "/usr/bin/security".withCString {
-            SecTrustedApplicationCreateFromPath($0, &securityTool)
-        }
-        guard status == errSecSuccess, let securityTool else {
-            throw ClaudeCodeCredentialsKeychainError.keychainError(status)
-        }
-
-        var access: SecAccess?
-        status = SecAccessCreate(
-            serviceName as CFString,
-            [currentApplication, securityTool] as CFArray,
-            &access
-        )
-        guard status == errSecSuccess, let access else {
-            throw ClaudeCodeCredentialsKeychainError.keychainError(status)
-        }
-        return access
-    }
-
-    private func baseQuery() -> [String: Any] {
+    private func baseQuery(accessMode: CredentialAccessMode) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: serviceName,
-            kSecAttrAccount as String: accountName
+            kSecAttrAccount as String: accountName,
+            kSecUseAuthenticationContext as String: CredentialAccess.authenticationContext(for: accessMode)
         ]
     }
 
