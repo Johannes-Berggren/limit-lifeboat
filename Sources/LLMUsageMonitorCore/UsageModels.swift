@@ -25,7 +25,7 @@ public enum UsageWindowKind: String, Codable, Sendable {
 /// One rate-limit window a subscription reports (e.g. the ~5h session window
 /// and the weekly window are two separate windows on the same account). A
 /// snapshot carries all of them; the snapshot's scalar fields mirror the
-/// most-constrained one for the menu bar and legacy call sites.
+/// most-constrained one for alerting and legacy call sites.
 public struct UsageWindow: Codable, Equatable, Sendable, Identifiable {
     /// Stable per-account key so per-window alert dedupe and SwiftUI diffing
     /// survive across refreshes, e.g. "session", "weekly-all", "weekly-fable",
@@ -81,7 +81,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
     public var accountID: UUID
     public var provider: Provider
     /// Every rate-limit window the provider reported. The scalar fields below
-    /// mirror the most-constrained window for the menu bar and legacy readers.
+    /// mirror the most-constrained window for alerting and legacy readers.
     public var windows: [UsageWindow]
     public var includedRemaining: Double?
     public var includedLimit: Double?
@@ -201,21 +201,22 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         window(ofKind: .weekly) ?? window(ofKind: .weeklyScoped)
     }
 
-    /// The window closest to (or past) its limit — the one the menu bar and
-    /// alerts should lead with.
+    /// The window closest to (or past) its limit — used by alerting and
+    /// switching policies that must consider every reported quota.
     public var mostConstrainedWindow: UsageWindow? {
         orderedDisplayWindows.max { $0.usedPercent < $1.usedPercent }
     }
 
-    /// The most-constrained window the popover actually surfaces: session,
-    /// all-models weekly, or a model-scoped weekly only when it is at risk.
-    /// Healthy scoped weeklies are hidden in the card, so they must not
-    /// silently drive the menu-bar/summary number.
-    public var surfacedConstrainedWindow: UsageWindow? {
-        orderedDisplayWindows
-            .filter { $0.kind != .weeklyScoped
-                || $0.riskLevel == .warning || $0.riskLevel == .depleted }
-            .max { $0.usedPercent < $1.usedPercent }
+    /// The two primary limits used by the compact menu-bar and popover
+    /// summaries. A model-scoped weekly is deliberately never a fallback for
+    /// the all-model weekly slot; scoped limits remain visible in account
+    /// cards and continue to participate in alerts and switching advice.
+    public var primaryLimitWindows: [UsageWindow] {
+        [window(ofKind: .session), window(ofKind: .weekly)].compactMap { $0 }
+    }
+
+    public var primaryConstrainedWindow: UsageWindow? {
+        primaryLimitWindows.max { $0.usedPercent < $1.usedPercent }
     }
 
     public func isStale(asOf now: Date = Date(), maxAge: TimeInterval = UsageThresholds.standard.staleAfter) -> Bool {

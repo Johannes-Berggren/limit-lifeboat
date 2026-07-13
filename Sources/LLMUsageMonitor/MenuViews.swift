@@ -63,8 +63,7 @@ struct MenuRootView: View {
 
             TopUsageSummaryView(
                 profiles: state.profiles,
-                snapshots: state.snapshots,
-                preferredFraction: { state.preferredUsedFraction(for: $0) }
+                snapshots: state.snapshots
             )
 
             if let update = state.availableUpdate {
@@ -128,7 +127,10 @@ struct MenuRootView: View {
     }
 
     private func providerSection(_ provider: Provider) -> some View {
-        let profiles = state.profiles.filter { $0.provider == provider }
+        let providerProfiles = state.profiles.filter { $0.provider == provider }
+        // The repository order stays stable within each group; only lift the
+        // active terminal account above its inactive siblings.
+        let profiles = AccountProfileOrdering.activeFirst(providerProfiles)
         // Highlight the advised switch target only while the active account
         // is actually constrained — a permanent highlight would be noise.
         let activeSnapshot = profiles.first(where: \.isActiveCLI).flatMap { state.snapshots[$0.id] }
@@ -268,7 +270,10 @@ struct AccountRowView: View {
             statusStrip
         }
         .padding(DS.Spacing.cardPadding)
-        .cardSurface(tint: DS.providerAccent(profile.provider))
+        .cardSurface(
+            tint: DS.providerAccent(profile.provider),
+            isEmphasized: profile.isActiveCLI
+        )
         .alert("Rename \(profile.label)", isPresented: $showsRenameAlert) {
             TextField("Account name", text: $renameText)
             Button("Rename") { rename(renameText) }
@@ -470,8 +475,6 @@ struct AccountRowView: View {
 struct TopUsageSummaryView: View {
     let profiles: [AccountProfile]
     let snapshots: [UUID: UsageSnapshot]
-    /// Mirrors the menu-bar number so the tile and the title always agree.
-    let preferredFraction: (UsageSnapshot) -> Double?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -551,11 +554,7 @@ struct TopUsageSummaryView: View {
     }
 
     private func summaryValue(for snapshot: UsageSnapshot) -> String {
-        if snapshot.billingUsageMode == .overLimitPayAsYouGo {
-            return "PAYG"
-        }
-
-        guard let usedFraction = preferredFraction(snapshot) else {
+        guard let usedFraction = snapshot.primaryConstrainedWindow?.usedFraction else {
             return "–"
         }
 
@@ -570,7 +569,7 @@ struct TopUsageSummaryView: View {
             parts.append("S \(Int(session.usedPercent.rounded()))%")
             helpParts.append("\(session.label): \(Int(session.usedPercent.rounded()))% used")
         }
-        if let weekly = snapshot.primaryWeeklyWindow {
+        if let weekly = snapshot.window(ofKind: .weekly) {
             parts.append("W \(Int(weekly.usedPercent.rounded()))%")
             helpParts.append("\(weekly.label): \(Int(weekly.usedPercent.rounded()))% used")
         }

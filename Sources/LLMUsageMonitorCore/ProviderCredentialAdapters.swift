@@ -2,10 +2,10 @@ import Foundation
 
 protocol ProviderCredentialAdapter {
     var provider: Provider { get }
-    func observe() throws -> LiveCredentialObservation
-    func captureSnapshot() throws -> CredentialSnapshot
-    func currentIdentity() -> AccountIdentity?
-    func validateActiveLogin() -> Bool
+    func observe(accessMode: CredentialAccessMode) throws -> LiveCredentialObservation
+    func captureSnapshot(accessMode: CredentialAccessMode) throws -> CredentialSnapshot
+    func currentIdentity(accessMode: CredentialAccessMode) -> AccountIdentity?
+    func validateActiveLogin(accessMode: CredentialAccessMode) -> Bool
 }
 
 struct CodexCredentialAdapter: ProviderCredentialAdapter {
@@ -14,7 +14,7 @@ struct CodexCredentialAdapter: ProviderCredentialAdapter {
     let homeDirectory: URL
     let fileManager: FileManager
 
-    func captureSnapshot() throws -> CredentialSnapshot {
+    func captureSnapshot(accessMode: CredentialAccessMode) throws -> CredentialSnapshot {
         let relativePath = ".codex/auth.json"
         let authURL = resolve(relativePath)
         guard fileManager.fileExists(atPath: authURL.path) else {
@@ -49,7 +49,7 @@ struct CodexCredentialAdapter: ProviderCredentialAdapter {
         )
     }
 
-    func observe() throws -> LiveCredentialObservation {
+    func observe(accessMode: CredentialAccessMode) throws -> LiveCredentialObservation {
         let authURL = resolve(".codex/auth.json")
         guard fileManager.fileExists(atPath: authURL.path) else {
             return LiveCredentialObservation(provider: provider, isLoggedIn: false, identity: nil, credentialFingerprint: nil, snapshot: nil)
@@ -68,12 +68,12 @@ struct CodexCredentialAdapter: ProviderCredentialAdapter {
         )
     }
 
-    func currentIdentity() -> AccountIdentity? {
-        (try? observe())?.identity
+    func currentIdentity(accessMode: CredentialAccessMode) -> AccountIdentity? {
+        (try? observe(accessMode: accessMode))?.identity
     }
 
-    func validateActiveLogin() -> Bool {
-        (try? observe().isLoggedIn) == true
+    func validateActiveLogin(accessMode: CredentialAccessMode) -> Bool {
+        (try? observe(accessMode: accessMode).isLoggedIn) == true
     }
 
     private func resolve(_ relativePath: String) -> URL {
@@ -95,8 +95,8 @@ struct ClaudeCredentialAdapter: ProviderCredentialAdapter {
     let fileManager: FileManager
     let credentialSource: ClaudeCLICredentialSource
 
-    func captureSnapshot() throws -> CredentialSnapshot {
-        try makeSnapshot(liveItem: credentialSource.readLiveItemJSON())
+    func captureSnapshot(accessMode: CredentialAccessMode) throws -> CredentialSnapshot {
+        try makeSnapshot(liveItem: credentialSource.readLiveItemJSON(accessMode: accessMode))
     }
 
     private func makeSnapshot(liveItem: Data?) throws -> CredentialSnapshot {
@@ -145,8 +145,8 @@ struct ClaudeCredentialAdapter: ProviderCredentialAdapter {
         return CredentialSnapshot(provider: provider, items: items)
     }
 
-    func observe() throws -> LiveCredentialObservation {
-        let live = try credentialSource.readLiveItemJSON()
+    func observe(accessMode: CredentialAccessMode) throws -> LiveCredentialObservation {
+        let live = try credentialSource.readLiveItemJSON(accessMode: accessMode)
         let snapshot: CredentialSnapshot
         do {
             snapshot = try makeSnapshot(liveItem: live)
@@ -168,12 +168,12 @@ struct ClaudeCredentialAdapter: ProviderCredentialAdapter {
         )
     }
 
-    func currentIdentity() -> AccountIdentity? {
-        (try? observe())?.identity
+    func currentIdentity(accessMode: CredentialAccessMode) -> AccountIdentity? {
+        (try? observe(accessMode: accessMode))?.identity
     }
 
-    func validateActiveLogin() -> Bool {
-        (try? observe().isLoggedIn) == true
+    func validateActiveLogin(accessMode: CredentialAccessMode) -> Bool {
+        (try? observe(accessMode: accessMode).isLoggedIn) == true
     }
 
     private func readConfigAuthFields() throws -> [String: Any] {

@@ -51,7 +51,7 @@ final class AccountRowPresentationTests: XCTestCase {
             adviceReason: nil
         )
 
-        XCTAssertEqual(presentation.gauges.visible.map(\.id), ["session", "weekly-risk", "weekly-ok"])
+        XCTAssertEqual(presentation.gauges.visible.map(\.id), ["session", "weekly-ok", "weekly-risk"])
     }
 
     func testAdviceHighlightsAndLabelsSwitch() {

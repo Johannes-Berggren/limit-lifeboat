@@ -24,6 +24,10 @@ final class AppState: ObservableObject {
     /// retryable affordance in the row instead of silently aging into
     /// staleness. Absent = never refreshed / nothing to say.
     @Published private(set) var refreshStates: [UUID: AccountRefreshState] = [:]
+    /// Cached so SwiftUI body evaluation and switch-advice projection never
+    /// perform a Keychain query. The cache is populated non-interactively at
+    /// launch and updated at every credential mutation boundary.
+    @Published private(set) var storedSnapshotStatuses: [UUID: StoredSnapshotStatus] = [:]
 
     let settings: SettingsStore
 
@@ -79,6 +83,7 @@ final class AppState: ObservableObject {
         self.profiles = try repository.loadProfiles()
         self.snapshots = try repository.loadUsageSnapshots()
         self.historyStore = try? UsageHistoryStore(applicationSupportDirectory: repository.applicationSupportDirectory)
+        refreshStoredSnapshotStatuses()
         updateMenuBarSummary()
         // History can be tens of thousands of lines; load it off the launch
         // path. Appends before this finishes are safe — the store lazily
@@ -110,17 +115,6 @@ final class AppState: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // @Published emits on willSet, so rebuild the title on the next
-        // runloop turn — reading the property inside the sink directly would
-        // still see the old preference.
-        self.settings.$menuBarWindowPreference
-            .dropFirst()
-            .removeDuplicates()
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in
-                self?.updateMenuBarSummary()
-            }
-            .store(in: &cancellables)
     }
 
     deinit {
@@ -425,9 +419,21 @@ final class AppState: ObservableObject {
         var storedFingerprints: [UUID: String] = [:]
         var profilesWithStoredCredentials: Set<UUID> = []
         for profile in profiles where profile.provider == provider {
-            if let fingerprint = try cliSwitcher.storedCredentialFingerprint(for: profile.id) {
-                storedFingerprints[profile.id] = fingerprint
-                profilesWithStoredCredentials.insert(profile.id)
+            do {
+                if let fingerprint = try cliSwitcher.storedCredentialFingerprint(for: profile.id) {
+                    storedFingerprints[profile.id] = fingerprint
+                    if try cliSwitcher.hasRestorableSnapshot(for: profile) {
+                        profilesWithStoredCredentials.insert(profile.id)
+                        storedSnapshotStatuses[profile.id] = .present
+                    } else {
+                        storedSnapshotStatuses[profile.id] = .absent
+                    }
+                } else {
+                    storedSnapshotStatuses[profile.id] = .absent
+                }
+            } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
+                storedSnapshotStatuses[profile.id] = .locked
+                throw error
             }
         }
         var action = syncPlanner.plan(
@@ -510,8 +516,13 @@ final class AppState: ObservableObject {
         if let active,
            observation.isLoggedIn,
            observation.snapshot != nil {
-            _ = try cliSwitcher.storeObservation(observation, for: active)
-            objectWillChange.send()
+            do {
+                _ = try cliSwitcher.storeObservation(observation, for: active)
+                storedSnapshotStatuses[active.id] = .present
+            } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
+                storedSnapshotStatuses[active.id] = .locked
+                throw error
+            }
         }
         let newActiveID = active?.id
         let isExternalOrigin = origin == .fileEvent
@@ -539,8 +550,24 @@ final class AppState: ObservableObject {
             guard first.stabilityKey == second.stabilityKey else { return }
             _ = try reconcileLiveCredentials(provider: provider, origin: origin, observation: second)
         } catch {
+            if isCredentialAccessDenied(error) {
+                if let active = activeProfile(for: provider) {
+                    refreshStates[active.id] = .keychainLocked
+                }
+                return
+            }
             statusMessage = "Could not reconcile \(provider.displayName) credentials: \(error.localizedDescription)"
         }
+    }
+
+    private func isCredentialAccessDenied(_ error: Error) -> Bool {
+        if let error = error as? CredentialStoreError {
+            return error.isKeychainAccessDenied
+        }
+        if let error = error as? ClaudeCodeCredentialsKeychainError {
+            return error.isKeychainAccessDenied
+        }
+        return false
     }
 
     private func defaultLabel(for identity: AccountIdentity, provider: Provider) -> String {
@@ -592,26 +619,34 @@ final class AppState: ObservableObject {
         let hasMultipleCodex = profiles.filter { $0.provider == .codex }.count > 1
 
         for profile in profiles where profile.provider == .codex {
-            if profile.isActiveCLI {
-                // The in-memory activation time does not survive an app
-                // restart; when it is missing for a multi-account setup, anchor
-                // it now so a pre-launch event is never mistaken for this
-                // account's — a single fresh `codex` run then populates it.
-                if hasMultipleCodex, codexActiveSince[profile.id] == nil {
-                    codexActiveSince[profile.id] = now
-                }
-                let gate = hasMultipleCodex ? codexActiveSince[profile.id] : nil
-                if let snapshot = codexLocalUsageReader.readUsage(for: profile, producedAfter: gate, now: now) {
-                    applySnapshot(snapshot, for: profile)
-                } else if hasMultipleCodex {
-                    clearCodexSnapshot(for: profile.id)
-                }
-            }
-            // A gated-out active read (no genuine post-activation event yet) or
-            // an inactive account keeps its captured / last-known snapshot;
-            // there is no per-account Codex usage source to poll.
-            enrichCodexAccountInfo(for: profile)
+            refreshCodexUsage(for: profile, now: now, hasMultipleCodex: hasMultipleCodex)
         }
+    }
+
+    private func refreshCodexUsage(
+        for profile: AccountProfile,
+        now: Date = Date(),
+        hasMultipleCodex: Bool? = nil
+    ) {
+        let hasMultipleCodex = hasMultipleCodex
+            ?? (profiles.filter { $0.provider == .codex }.count > 1)
+        if profile.isActiveCLI {
+            // The in-memory activation time does not survive an app restart;
+            // anchor it before accepting account-blind session events.
+            if hasMultipleCodex, codexActiveSince[profile.id] == nil {
+                codexActiveSince[profile.id] = now
+            }
+            let gate = hasMultipleCodex ? codexActiveSince[profile.id] : nil
+            if let snapshot = codexLocalUsageReader.readUsage(for: profile, producedAfter: gate, now: now) {
+                applySnapshot(snapshot, for: profile)
+            } else if hasMultipleCodex {
+                clearCodexSnapshot(for: profile.id)
+            }
+        }
+        // A gated-out active read (no genuine post-activation event yet) or an
+        // inactive account keeps its last-known snapshot. Enrichment remains
+        // account-specific so row-level Retry never touches sibling accounts.
+        enrichCodexAccountInfo(for: profile)
     }
 
     /// Drops an active Codex account's reading when it can't be attributed to
@@ -748,6 +783,7 @@ final class AppState: ObservableObject {
         let count = profiles.filter { $0.provider == provider }.count
         let profile = AccountProfile(provider: provider, label: "\(provider.displayName) \(count + 1)")
         profiles.append(profile)
+        storedSnapshotStatuses[profile.id] = .absent
         persistProfiles()
         statusMessage = "Added \(profile.label). Log into it in the terminal and it links automatically."
     }
@@ -784,7 +820,12 @@ final class AppState: ObservableObject {
         }
 
         do {
-            try cliSwitcher.deleteStoredSnapshot(for: profile.id)
+            try CredentialAccess.userInitiated(
+                reason: "remove saved credentials for \(profile.label)"
+            ) {
+                try cliSwitcher.deleteStoredSnapshot(for: profile.id)
+            }
+            storedSnapshotStatuses[profile.id] = .absent
         } catch {
             statusMessage = "Could not delete stored credentials for \(profile.label): \(error.localizedDescription)"
         }
@@ -794,6 +835,7 @@ final class AppState: ObservableObject {
         profiles.remove(at: index)
         snapshots[profile.id] = nil
         refreshStates[profile.id] = nil
+        storedSnapshotStatuses[profile.id] = nil
         try? historyStore?.removeAccount(profile.id)
         burnRateEstimates[profile.id] = nil
         usageAlertController.forgetProfile(profile.id)
@@ -810,6 +852,15 @@ final class AppState: ObservableObject {
     /// text instead of modals. Returns whether the switch happened.
     @discardableResult
     func switchCLI(to profile: AccountProfile, interactive: Bool = true) -> Bool {
+        if interactive, CredentialAccess.currentMode != .userInitiated {
+            return CredentialAccess.userInitiated(
+                reason: "switch the CLI to \(profile.label)"
+            ) {
+                storedSnapshotStatuses[profile.id] = readStoredSnapshotStatus(for: profile)
+                return switchCLI(to: profile, interactive: true)
+            }
+        }
+
         guard hasStoredSnapshot(for: profile) else {
             reportSwitchProblem(
                 interactive: interactive,
@@ -880,7 +931,9 @@ final class AppState: ObservableObject {
                     details: "The live credentials do not identify \(profile.label). Outside changes were preserved and backups are at: \(result.backupURLs.map(\.path).joined(separator: ", "))"
                 )
                 if interactive {
-                    Task { await refreshAll() }
+                    Task {
+                        await CredentialAccess.nonInteractive { await refreshAll() }
+                    }
                 }
                 return false
             }
@@ -893,7 +946,9 @@ final class AppState: ObservableObject {
             statusMessage = "Switched \(profile.provider.displayName) CLI to \(profile.label)."
             if interactive {
                 lastManualSwitchAt[profile.provider] = Date()
-                Task { await refreshAll() }
+                Task {
+                    await CredentialAccess.nonInteractive { await refreshAll() }
+                }
             }
             return true
         } catch {
@@ -903,7 +958,7 @@ final class AppState: ObservableObject {
                 // path, and tell the user how to restore it. The current login
                 // was already captured above, so nothing is lost.
                 try? cliSwitcher.deleteStoredSnapshot(for: profile.id)
-                objectWillChange.send()
+                storedSnapshotStatuses[profile.id] = .absent
                 statusMessage = "Cleared unreadable credentials for \(profile.label)."
                 reportSwitchProblem(
                     interactive: interactive,
@@ -927,6 +982,15 @@ final class AppState: ObservableObject {
     }
 
     func captureCLISnapshot(for profile: AccountProfile) {
+        if CredentialAccess.currentMode != .userInitiated {
+            CredentialAccess.userInitiated(
+                reason: "save CLI credentials for \(profile.label)"
+            ) {
+                captureCLISnapshot(for: profile)
+            }
+            return
+        }
+
         guard profile.isActiveCLI else {
             showError(
                 message: "Capture cancelled",
@@ -941,7 +1005,7 @@ final class AppState: ObservableObject {
             }
             _ = try reconcileLiveCredentials(provider: profile.provider, origin: .manualCapture, observation: observation)
             statusMessage = "Captured \(profile.provider.displayName) CLI credentials for \(profile.label)."
-            objectWillChange.send()
+            storedSnapshotStatuses[profile.id] = .present
         } catch {
             statusMessage = "Capture failed for \(profile.label): \(error.localizedDescription)"
             showError(message: "Capture failed", details: error.localizedDescription)
@@ -958,8 +1022,20 @@ final class AppState: ObservableObject {
     }
 
     func storedSnapshotStatus(for profile: AccountProfile) -> StoredSnapshotStatus {
+        storedSnapshotStatuses[profile.id] ?? .absent
+    }
+
+    private func refreshStoredSnapshotStatuses() {
+        var statuses: [UUID: StoredSnapshotStatus] = [:]
+        for profile in profiles {
+            statuses[profile.id] = readStoredSnapshotStatus(for: profile)
+        }
+        storedSnapshotStatuses = statuses
+    }
+
+    private func readStoredSnapshotStatus(for profile: AccountProfile) -> StoredSnapshotStatus {
         do {
-            return try cliSwitcher.hasStoredSnapshot(for: profile) ? .present : .absent
+            return try cliSwitcher.hasRestorableSnapshot(for: profile) ? .present : .absent
         } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
             return .locked
         } catch {
@@ -973,7 +1049,53 @@ final class AppState: ObservableObject {
 
     /// Row-level "try again" for an account whose last refresh failed.
     func retryRefresh(for profile: AccountProfile) {
-        Task { await refreshAll() }
+        Task {
+            await CredentialAccess.userInitiated(
+                reason: "access saved credentials for \(profile.label)"
+            ) {
+                await retryRefreshInteractively(for: profile)
+            }
+            updateSwitchAdvice()
+            updateMenuBarSummary()
+        }
+    }
+
+    private func retryRefreshInteractively(for profile: AccountProfile) async {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        defer { isRefreshing = false }
+
+        let storedStatus = readStoredSnapshotStatus(for: profile)
+        storedSnapshotStatuses[profile.id] = storedStatus
+        guard storedStatus != .locked else {
+            refreshStates[profile.id] = .keychainLocked
+            return
+        }
+
+        switch profile.provider {
+        case .claude:
+            lastClaudeRefreshAttempt = Date()
+            refreshStates[profile.id] = .refreshing
+            do {
+                let snapshot = try await claudeUsageService.fetchSnapshot(
+                    for: profile,
+                    isActiveCLI: profile.isActiveCLI
+                )
+                applySnapshot(snapshot, for: profile)
+                await enrichAccountInfoIfMissing(for: profile)
+            } catch {
+                let fetchError = (error as? ClaudeAccountUsageFetchError) ?? .transport(error)
+                let outcome = RefreshOutcomePolicy.outcome(for: fetchError, isActiveCLI: profile.isActiveCLI)
+                if outcome.attemptTUIFallback {
+                    await refreshActiveClaudeCodeUsage(onFailure: outcome.state, for: profile)
+                } else {
+                    refreshStates[profile.id] = outcome.state
+                }
+            }
+        case .codex:
+            refreshCodexUsage(for: profile)
+            refreshStates[profile.id] = .ok
+        }
     }
 
     func validateActiveLogin(provider: Provider) -> Bool {
@@ -988,6 +1110,15 @@ final class AppState: ObservableObject {
     }
 
     func beginCLILogin(for profile: AccountProfile) {
+        if CredentialAccess.currentMode != .userInitiated {
+            CredentialAccess.userInitiated(
+                reason: "prepare \(profile.label) for CLI login"
+            ) {
+                beginCLILogin(for: profile)
+            }
+            return
+        }
+
         let initialObservation = try? cliSwitcher.stableLiveObservation(provider: profile.provider)
 
         // Codex accounts share the single `~/.codex/auth.json`, so a bare
@@ -1111,7 +1242,7 @@ final class AppState: ObservableObject {
                 observation: current,
                 preferredLoginProfileID: profileID
             )
-            await refreshAll()
+            await CredentialAccess.nonInteractive { await refreshAll() }
             return profiles.first(where: { $0.id == profileID })?.isActiveCLI == true
         } catch {
             statusMessage = "Login finished, but the account could not be saved: \(error.localizedDescription)"
@@ -1193,18 +1324,7 @@ final class AppState: ObservableObject {
     private func updateMenuBarSummary() {
         menuBarSummary = MenuBarSummaryProjector.project(
             profiles: profiles,
-            snapshots: snapshots,
-            preference: settings.menuBarWindowPreference
-        )
-    }
-
-    /// The fraction behind the menu-bar number, honoring the Settings choice.
-    /// A pinned window that is missing falls back to most-constrained — a
-    /// wrong-but-plausible steady number would hide real risk.
-    func preferredUsedFraction(for snapshot: UsageSnapshot) -> Double? {
-        MenuBarSummaryProjector.preferredUsedFraction(
-            for: snapshot,
-            preference: settings.menuBarWindowPreference
+            snapshots: snapshots
         )
     }
 }

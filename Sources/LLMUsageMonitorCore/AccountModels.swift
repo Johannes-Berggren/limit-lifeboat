@@ -1,5 +1,13 @@
 import Foundation
 
+public enum AccountProfileOrdering {
+    /// Keeps repository order stable within each group while lifting the
+    /// active terminal account above inactive accounts.
+    public static func activeFirst(_ profiles: [AccountProfile]) -> [AccountProfile] {
+        profiles.filter(\.isActiveCLI) + profiles.filter { !$0.isActiveCLI }
+    }
+}
+
 public struct AccountIdentity: Codable, Hashable, Sendable {
     public var email: String?
     public var displayName: String?

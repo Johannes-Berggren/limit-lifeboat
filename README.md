@@ -34,14 +34,21 @@ usage-based overage.
   target account's credentials, and verifies the CLI now reports the right
   account. If another app changes the credentials during the switch, its
   change wins and this app asks you to retry. Unrelated Claude/Codex and MCP
-  settings are preserved. Backups live in
+  settings are preserved. A legacy Claude snapshot without an OAuth token is
+  never offered as a switch target, so it cannot log out the current terminal
+  session. Backups live in
   `~/Library/Application Support/LLMUsageMonitor/Backups/`.
-- The menu bar shows the active accounts at a glance
-  (`Claude 42%  Codex 87%`), turning orange near 80% used and red when
-  depleted, with local notifications on those threshold changes. When an
-  account appears to be past its included usage and burning credits or
-  pay-as-you-go, it shows `PAYG` instead — the exact thing this app helps
-  you avoid, and each account row explains the billing mode it detected.
+- The menu bar shows both primary limits for each active account at a glance
+  (`Claude S 42% W 18% · Codex S 87% W 51%`). Model-scoped limits such as
+  Fable stay in the popover and never drive the menu-bar value or warning
+  color. When an account appears to be burning credits or pay-as-you-go, the
+  primary limits remain visible and `PAYG` is appended.
+- **Background checks never ask for a Keychain password.** If macOS requires
+  authorization, the account keeps its last reading and shows a retryable
+  "Keychain access needed" state. Only a deliberate Retry, login, capture,
+  remove, or account switch may present the authorization dialog. Background
+  refreshes never rewrite Claude Code's live login, and the app never creates
+  Claude Code's Keychain item; Claude Code remains the owner of its ACL.
 
 Add, rename, or remove accounts from the popover (the `+` button per
 provider and the `…` menu per account). Browser, Claude Desktop, ChatGPT
@@ -71,6 +78,13 @@ and launch it. The app lives in the menu bar (no Dock icon).
 swift test
 ./scripts/package-app.sh
 open dist/LLMUsageMonitor.app
+```
+
+The `/usr/bin/security` interoperability test is opt-in because macOS may show
+a real authorization dialog for that subprocess:
+
+```bash
+RUN_KEYCHAIN_INTEROP_TESTS=1 swift test --filter testSecurityToolInteroperability
 ```
 
 Local packaging automatically uses the first available Apple Development

@@ -151,8 +151,9 @@ struct StatusBanner: View {
 }
 
 extension View {
-    func cardSurface(tint: Color? = nil) -> some View {
+    func cardSurface(tint: Color? = nil, isEmphasized: Bool = false) -> some View {
         modifier(CardSurfaceModifier(tint: tint))
+            .modifier(ActiveCardEmphasisModifier(isEmphasized: isEmphasized))
     }
 
     @ViewBuilder
@@ -168,6 +169,27 @@ extension View {
                 .controlSize(.small)
                 .tint(tint)
         }
+    }
+}
+
+private struct ActiveCardEmphasisModifier: ViewModifier {
+    let isEmphasized: Bool
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous)
+        content
+            .overlay {
+                if isEmphasized {
+                    shape
+                        .strokeBorder(Color.green.opacity(0.72), lineWidth: 1.5)
+                        .allowsHitTesting(false)
+                }
+            }
+            .shadow(
+                color: isEmphasized ? Color.green.opacity(0.16) : .clear,
+                radius: isEmphasized ? 5 : 0,
+                y: isEmphasized ? 1 : 0
+            )
     }
 }
 

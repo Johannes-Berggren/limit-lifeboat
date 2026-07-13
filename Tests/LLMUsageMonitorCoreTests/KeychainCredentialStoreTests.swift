@@ -3,6 +3,26 @@ import XCTest
 @testable import LLMUsageMonitorCore
 
 final class KeychainCredentialStoreTests: XCTestCase {
+    func testCredentialAccessDefaultsToNonInteractiveContext() {
+        XCTAssertEqual(CredentialAccess.currentMode, .nonInteractive)
+        XCTAssertTrue(
+            CredentialAccess.authenticationContext(for: .nonInteractive).interactionNotAllowed
+        )
+    }
+
+    func testUserInitiatedCredentialAccessReusesInteractiveContext() {
+        CredentialAccess.userInitiated(reason: "test credentials") {
+            let first = CredentialAccess.authenticationContext(for: .userInitiated)
+            let second = CredentialAccess.authenticationContext(for: .userInitiated)
+
+            XCTAssertEqual(CredentialAccess.currentMode, .userInitiated)
+            XCTAssertFalse(first.interactionNotAllowed)
+            XCTAssertTrue(first === second)
+            XCTAssertEqual(first.localizedReason, "test credentials")
+        }
+        XCTAssertEqual(CredentialAccess.currentMode, .nonInteractive)
+    }
+
     func testStaleCodeIdentityErrorsTellUserToRelaunch() {
         for status in [errSecCSStaticCodeNotFound, errSecCSStaticCodeChanged] {
             let error = CredentialStoreError.keychainError(status)

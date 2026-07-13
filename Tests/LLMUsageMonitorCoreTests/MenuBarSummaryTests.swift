@@ -2,7 +2,7 @@ import XCTest
 @testable import LLMUsageMonitorCore
 
 final class MenuBarSummaryTests: XCTestCase {
-    func testProjectsActiveAccountsAndHonorsWindowPreference() {
+    func testProjectsBothPrimaryLimitsForActiveAccount() {
         let now = Date(timeIntervalSince1970: 10_000)
         let profile = AccountProfile(provider: .claude, label: "Primary", isActiveCLI: true)
         let snapshot = UsageSnapshotFactory.snapshot(
@@ -23,24 +23,100 @@ final class MenuBarSummaryTests: XCTestCase {
             message: "test"
         )
 
-        let session = MenuBarSummaryProjector.project(
+        let summary = MenuBarSummaryProjector.project(
             profiles: [profile],
             snapshots: [profile.id: snapshot],
-            preference: .session,
-            now: now
-        )
-        let constrained = MenuBarSummaryProjector.project(
-            profiles: [profile],
-            snapshots: [profile.id: snapshot],
-            preference: .mostConstrained,
             now: now
         )
 
-        XCTAssertEqual(session.claudeValue, "25%")
-        XCTAssertEqual(constrained.claudeValue, "85%")
-        XCTAssertEqual(constrained.codexValue, "–")
-        XCTAssertEqual(constrained.riskLevel, .warning)
-        XCTAssertTrue(constrained.accessibilityText.contains("Primary"))
+        XCTAssertEqual(summary.claudeValue, "S 25% W 85%")
+        XCTAssertEqual(summary.codexValue, "–")
+        XCTAssertEqual(summary.riskLevel, .warning)
+        XCTAssertTrue(summary.accessibilityText.contains("Primary"))
+        XCTAssertTrue(summary.accessibilityText.contains("session 25 percent"))
+        XCTAssertTrue(summary.accessibilityText.contains("weekly 85 percent"))
+    }
+
+    func testScopedWeeklyNeverFillsOrInfluencesMenuBar() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let profile = AccountProfile(provider: .claude, label: "Primary", isActiveCLI: true)
+        let snapshot = UsageSnapshotFactory.snapshot(
+            accountID: profile.id,
+            provider: .claude,
+            windows: [
+                UsageSnapshotFactory.window(
+                    descriptor: UsageWindowDescriptor(id: "session", kind: .session, label: "Session"),
+                    usedPercent: 25
+                ),
+                UsageSnapshotFactory.window(
+                    descriptor: UsageWindowDescriptor(id: "weekly-fable", kind: .weeklyScoped, label: "Weekly (Fable)"),
+                    usedPercent: 100
+                )
+            ],
+            source: "test",
+            lastRefreshed: now,
+            message: "test"
+        )
+
+        let summary = MenuBarSummaryProjector.project(
+            profiles: [profile],
+            snapshots: [profile.id: snapshot],
+            now: now
+        )
+
+        XCTAssertEqual(summary.claudeValue, "S 25% W –")
+        XCTAssertEqual(summary.riskLevel, .healthy)
+        XCTAssertFalse(summary.accessibilityText.contains("Fable"))
+        XCTAssertFalse(summary.accessibilityText.contains("100 percent"))
+    }
+
+    func testPayAsYouGoAppendsWithoutReplacingPrimaryLimits() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let profile = AccountProfile(provider: .claude, label: "Primary", isActiveCLI: true)
+        let snapshot = UsageSnapshotFactory.snapshot(
+            accountID: profile.id,
+            provider: .claude,
+            windows: [
+                UsageSnapshotFactory.window(
+                    descriptor: UsageWindowDescriptor(id: "session", kind: .session, label: "Session"),
+                    usedPercent: 100
+                ),
+                UsageSnapshotFactory.window(
+                    descriptor: UsageWindowDescriptor(id: "weekly", kind: .weekly, label: "Weekly"),
+                    usedPercent: 82
+                )
+            ],
+            source: "test",
+            lastRefreshed: now,
+            message: "test",
+            payAsYouGoState: .enabledActive
+        )
+
+        let summary = MenuBarSummaryProjector.project(
+            profiles: [profile],
+            snapshots: [profile.id: snapshot],
+            now: now
+        )
+
+        XCTAssertEqual(summary.claudeValue, "S 100% W 82% PAYG")
+        XCTAssertEqual(summary.riskLevel, .depleted)
+        XCTAssertTrue(summary.accessibilityText.contains("pay as you go"))
+    }
+
+    func testMissingSnapshotAndMissingActiveAccountHaveDistinctValues() {
+        let profile = AccountProfile(provider: .claude, label: "Primary", isActiveCLI: true)
+
+        let missingSnapshot = MenuBarSummaryProjector.project(
+            profiles: [profile],
+            snapshots: [:]
+        )
+        let noActive = MenuBarSummaryProjector.project(
+            profiles: [AccountProfile(provider: .claude, label: "Inactive")],
+            snapshots: [:]
+        )
+
+        XCTAssertEqual(missingSnapshot.claudeValue, "S ? W ?")
+        XCTAssertEqual(noActive.claudeValue, "–")
     }
 
     func testStaleHealthyReadingIsMarkedStale() {
@@ -63,11 +139,10 @@ final class MenuBarSummaryTests: XCTestCase {
         let summary = MenuBarSummaryProjector.project(
             profiles: [profile],
             snapshots: [profile.id: snapshot],
-            preference: .mostConstrained,
             now: now
         )
 
-        XCTAssertEqual(summary.codexValue, "20%*")
+        XCTAssertEqual(summary.codexValue, "S 20% W –*")
         XCTAssertEqual(summary.riskLevel, .stale)
     }
 }

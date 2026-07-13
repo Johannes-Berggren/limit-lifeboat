@@ -32,9 +32,14 @@ final class CredentialRestoreTransaction {
 
     func restore(
         _ snapshot: CredentialSnapshot,
-        expectedLiveFingerprint: String?? = nil
+        expectedLiveFingerprint: String?? = nil,
+        accessMode: CredentialAccessMode = CredentialAccess.currentMode
     ) throws -> RestoreResult {
-        try validateExpectedLiveFingerprint(expectedLiveFingerprint, provider: snapshot.provider)
+        try validateExpectedLiveFingerprint(
+            expectedLiveFingerprint,
+            provider: snapshot.provider,
+            accessMode: accessMode
+        )
         var normalizedItems = try snapshot.items.map { try normalized($0, provider: snapshot.provider) }
         if snapshot.provider == .claude {
             appendMissingClaudeRemovalPatch(
@@ -93,7 +98,7 @@ final class CredentialRestoreTransaction {
             // write happens — treating it as "absent" would merge into {}
             // (dropping mcpOAuth) or skip the logout below.
             do {
-                liveKeychainBackup = try claudeCredentialSource.readLiveItemJSON()
+                liveKeychainBackup = try claudeCredentialSource.readLiveItemJSON(accessMode: accessMode)
             } catch {
                 throw CLISwitcherError.backupFailed(path: CLISwitcher.claudeKeychainItemPath, underlying: error)
             }
@@ -115,7 +120,11 @@ final class CredentialRestoreTransaction {
         // account. Recheck the provider-owned fingerprint after all backups and
         // immediately before the first mutation; per-destination byte checks
         // cover changes from this point onward.
-        try validateExpectedLiveFingerprint(expectedLiveFingerprint, provider: snapshot.provider)
+        try validateExpectedLiveFingerprint(
+            expectedLiveFingerprint,
+            provider: snapshot.provider,
+            accessMode: accessMode
+        )
 
         // Phase 2: write all items; on failure roll back from the backups.
         // The keychain merge goes last so a file failure never leaves the CLI
@@ -154,30 +163,13 @@ final class CredentialRestoreTransaction {
                 writtenFiles[destination.path] = try Data(contentsOf: destination)
             }
             for item in keychainItems {
-                let current = try claudeCredentialSource.readLiveItemJSON()
+                let current = try claudeCredentialSource.readLiveItemJSON(accessMode: accessMode)
                 guard current == liveKeychainBackup else {
                     throw CLISwitcherError.credentialConflict(CLISwitcher.claudeKeychainItemPath)
                 }
                 let merged = mergeClaudeAiOauth(item.contents, intoItemJSON: liveKeychainBackup)
-                try claudeCredentialSource.writeLiveItemJSON(merged)
+                try claudeCredentialSource.writeLiveItemJSON(merged, accessMode: accessMode)
                 writtenKeychain = merged
-            }
-            if snapshot.provider == .claude, keychainItems.isEmpty,
-               let liveKeychainBackup,
-               var liveObject = try? JSONSerialization.jsonObject(with: liveKeychainBackup) as? [String: Any],
-               liveObject["claudeAiOauth"] != nil {
-                // Legacy snapshot without a captured token: strip the
-                // previous account's claudeAiOauth so the CLI is honestly
-                // logged out instead of silently staying on the old account.
-                // Every sibling key (especially mcpOAuth) stays in place.
-                liveObject.removeValue(forKey: "claudeAiOauth")
-                let loggedOut = try JSONSerialization.data(withJSONObject: liveObject, options: [.sortedKeys])
-                let current = try claudeCredentialSource.readLiveItemJSON()
-                guard current == liveKeychainBackup else {
-                    throw CLISwitcherError.credentialConflict(CLISwitcher.claudeKeychainItemPath)
-                }
-                try claudeCredentialSource.writeLiveItemJSON(loggedOut)
-                writtenKeychain = loggedOut
             }
         } catch {
             var rollbackConflicts: [String] = []
@@ -203,11 +195,11 @@ final class CredentialRestoreTransaction {
             }
             if let writtenKeychain {
                 do {
-                    if try claudeCredentialSource.readLiveItemJSON() == writtenKeychain {
+                    if try claudeCredentialSource.readLiveItemJSON(accessMode: accessMode) == writtenKeychain {
                         if let liveKeychainBackup {
-                            try claudeCredentialSource.writeLiveItemJSON(liveKeychainBackup)
+                            try claudeCredentialSource.writeLiveItemJSON(liveKeychainBackup, accessMode: accessMode)
                         } else {
-                            try claudeCredentialSource.deleteLiveItem()
+                            try claudeCredentialSource.deleteLiveItem(accessMode: accessMode)
                         }
                     } else {
                         rollbackConflicts.append(CLISwitcher.claudeKeychainItemPath)
@@ -225,18 +217,25 @@ final class CredentialRestoreTransaction {
         return RestoreResult(touchedPaths: touched, backupURLs: backups)
     }
 
-    private func validateExpectedLiveFingerprint(_ expected: String??, provider: Provider) throws {
+    private func validateExpectedLiveFingerprint(
+        _ expected: String??,
+        provider: Provider,
+        accessMode: CredentialAccessMode
+    ) throws {
         guard let expected else { return }
         let observation: LiveCredentialObservation
         switch provider {
         case .codex:
-            observation = try CodexCredentialAdapter(homeDirectory: homeDirectory, fileManager: fileManager).observe()
+            observation = try CodexCredentialAdapter(
+                homeDirectory: homeDirectory,
+                fileManager: fileManager
+            ).observe(accessMode: accessMode)
         case .claude:
             observation = try ClaudeCredentialAdapter(
                 homeDirectory: homeDirectory,
                 fileManager: fileManager,
                 credentialSource: claudeCredentialSource
-            ).observe()
+            ).observe(accessMode: accessMode)
         }
         guard observation.credentialFingerprint == expected else {
             throw CLISwitcherError.credentialConflict("live \(provider.displayName) credentials")

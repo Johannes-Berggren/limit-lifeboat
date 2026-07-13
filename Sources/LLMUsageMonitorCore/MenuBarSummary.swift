@@ -1,12 +1,5 @@
 import Foundation
 
-/// Which quota window the compact summary should prioritize.
-public enum MenuBarWindowPreference: String, CaseIterable, Sendable {
-    case mostConstrained
-    case session
-    case weekly
-}
-
 /// Platform-neutral menu-bar content. Keeping its derivation in Core makes
 /// active-account, staleness, and accessibility policy directly testable.
 public struct MenuBarSummary: Equatable, Sendable {
@@ -34,30 +27,14 @@ public enum MenuBarSummaryProjector {
     public static func project(
         profiles: [AccountProfile],
         snapshots: [UUID: UsageSnapshot],
-        preference: MenuBarWindowPreference,
         now: Date = Date()
     ) -> MenuBarSummary {
         MenuBarSummary(
-            claudeValue: providerValue(.claude, profiles: profiles, snapshots: snapshots, preference: preference, now: now),
-            codexValue: providerValue(.codex, profiles: profiles, snapshots: snapshots, preference: preference, now: now),
+            claudeValue: providerValue(.claude, profiles: profiles, snapshots: snapshots, now: now),
+            codexValue: providerValue(.codex, profiles: profiles, snapshots: snapshots, now: now),
             accessibilityText: accessibilitySummary(profiles: profiles, snapshots: snapshots, now: now),
             riskLevel: highestRisk(profiles: profiles, snapshots: snapshots, now: now)
         )
-    }
-
-    public static func preferredUsedFraction(
-        for snapshot: UsageSnapshot,
-        preference: MenuBarWindowPreference
-    ) -> Double? {
-        let mostConstrained = snapshot.mostConstrainedWindow?.usedFraction ?? snapshot.usedFraction
-        switch preference {
-        case .mostConstrained:
-            return snapshot.surfacedConstrainedWindow?.usedFraction ?? mostConstrained
-        case .session:
-            return snapshot.window(ofKind: .session)?.usedFraction ?? mostConstrained
-        case .weekly:
-            return snapshot.primaryWeeklyWindow?.usedFraction ?? mostConstrained
-        }
     }
 
     private static func activeProfile(_ provider: Provider, profiles: [AccountProfile]) -> AccountProfile? {
@@ -68,23 +45,30 @@ public enum MenuBarSummaryProjector {
         _ provider: Provider,
         profiles: [AccountProfile],
         snapshots: [UUID: UsageSnapshot],
-        preference: MenuBarWindowPreference,
         now: Date
     ) -> String {
         guard let profile = activeProfile(provider, profiles: profiles) else {
             return "–"
         }
         guard let snapshot = snapshots[profile.id] else {
-            return "?"
+            return "S ? W ?"
         }
-        let staleMark = snapshot.isStale(asOf: now) ? "*" : ""
+
+        let session = percentValue(snapshot.window(ofKind: .session))
+        let weekly = percentValue(snapshot.window(ofKind: .weekly))
+        var value = "S \(session) W \(weekly)"
         if snapshot.billingUsageMode == .overLimitPayAsYouGo {
-            return "PAYG\(staleMark)"
+            value += " PAYG"
         }
-        guard let used = preferredUsedFraction(for: snapshot, preference: preference) else {
-            return "?"
+        if snapshot.isStale(asOf: now) {
+            value += "*"
         }
-        return "\(Int((used * 100).rounded()))%\(staleMark)"
+        return value
+    }
+
+    private static func percentValue(_ window: UsageWindow?) -> String {
+        guard let window else { return "–" }
+        return "\(Int(window.usedPercent.rounded()))%"
     }
 
     private static func highestRisk(
@@ -95,12 +79,14 @@ public enum MenuBarSummaryProjector {
         let activeSnapshots = Provider.allCases
             .compactMap { activeProfile($0, profiles: profiles) }
             .compactMap { snapshots[$0.id] }
-        let snapshotRisk = activeSnapshots.map(\.riskLevel).min() ?? .unknown
-        let thresholdRisk = activeSnapshots
-            .compactMap(\.usedFraction)
-            .map(UsageThresholds.standard.riskLevel(usedFraction:))
+        if activeSnapshots.contains(where: { $0.billingUsageMode == .overLimitPayAsYouGo }) {
+            return .depleted
+        }
+
+        let risk = activeSnapshots
+            .flatMap(\.primaryLimitWindows)
+            .map { min($0.riskLevel, UsageThresholds.standard.riskLevel(usedPercent: $0.usedPercent)) }
             .min() ?? .unknown
-        let risk = min(snapshotRisk, thresholdRisk)
         if risk == .healthy || risk == .unknown,
            !activeSnapshots.isEmpty,
            activeSnapshots.allSatisfy({ $0.isStale(asOf: now) }) {
@@ -140,17 +126,13 @@ public enum MenuBarSummaryProjector {
                 mode = "usage mode unknown"
             }
 
-            let windows = snapshot.orderedDisplayWindows
-                .map { "\($0.label) \(Int($0.usedPercent.rounded())) percent used" }
-                .joined(separator: ", ")
-            var entry: String
-            if !windows.isEmpty {
-                entry = "\(provider.displayName) active account \(profile.label): \(windows), \(mode)"
-            } else if let used = snapshot.usedFraction {
-                entry = "\(provider.displayName) active account \(profile.label) \(Int((used * 100).rounded())) percent used, \(mode)"
-            } else {
-                entry = "\(provider.displayName) active account \(profile.label) \(mode)"
-            }
+            let session = snapshot.window(ofKind: .session)
+                .map { "session \(Int($0.usedPercent.rounded())) percent used" }
+                ?? "session limit unavailable"
+            let weekly = snapshot.window(ofKind: .weekly)
+                .map { "weekly \(Int($0.usedPercent.rounded())) percent used" }
+                ?? "weekly limit unavailable"
+            var entry = "\(provider.displayName) active account \(profile.label): \(session), \(weekly), \(mode)"
             if snapshot.isStale(asOf: now) {
                 entry += ", last checked \(snapshot.lastRefreshed.formatted(.relative(presentation: .named)))"
             }
