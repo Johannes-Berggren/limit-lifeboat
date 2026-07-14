@@ -2,23 +2,23 @@
 import PackageDescription
 
 let package = Package(
-    name: "LLMUsageMonitor",
+    name: "LimitLifeboat",
     platforms: [
         .macOS(.v14)
     ],
     products: [
-        .library(name: "LLMUsageMonitorCore", targets: ["LLMUsageMonitorCore"]),
-        .executable(name: "LLMUsageMonitor", targets: ["LLMUsageMonitor"])
+        .library(name: "LimitLifeboatCore", targets: ["LimitLifeboatCore"]),
+        .executable(name: "LimitLifeboat", targets: ["LimitLifeboat"])
     ],
     targets: [
-        .target(name: "LLMUsageMonitorCore"),
+        .target(name: "LimitLifeboatCore"),
         .executableTarget(
-            name: "LLMUsageMonitor",
-            dependencies: ["LLMUsageMonitorCore"]
+            name: "LimitLifeboat",
+            dependencies: ["LimitLifeboatCore"]
         ),
         .testTarget(
-            name: "LLMUsageMonitorCoreTests",
-            dependencies: ["LLMUsageMonitorCore"]
+            name: "LimitLifeboatCoreTests",
+            dependencies: ["LimitLifeboatCore"]
         )
     ]
 )
