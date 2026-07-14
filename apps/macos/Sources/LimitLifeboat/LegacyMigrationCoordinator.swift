@@ -81,7 +81,7 @@ final class LegacyMigrationCoordinator {
         let consent = NSAlert()
         consent.alertStyle = .informational
         consent.messageText = "Copy your accounts to Limit Lifeboat?"
-        consent.informativeText = "Found \(inspection.profileCount) saved account\(inspection.profileCount == 1 ? "" : "s") from LLM Usage Monitor. Limit Lifeboat can copy profiles, usage history, backups, preferences, and app-owned credential snapshots. macOS may ask you to approve Keychain access. The old data remains available as a rollback copy."
+        consent.informativeText = "Found \(inspection.profileCount) saved account\(inspection.profileCount == 1 ? "" : "s") from LLM Usage Monitor. Limit Lifeboat can copy profiles, usage history, preferences, and app-owned credential snapshots. Old plaintext backup files are left only in the untouched legacy data. macOS may ask you to approve Keychain access."
         consent.addButton(withTitle: "Migrate")
         consent.addButton(withTitle: "Start Fresh")
         consent.addButton(withTitle: "Quit")

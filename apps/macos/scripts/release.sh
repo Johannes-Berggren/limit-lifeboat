@@ -230,7 +230,7 @@ grep -Fq "certificate leaf[subject.OU] = \"$TEAM_ID\"" <<< "$DESIGNATED_REQUIREM
   || fail "App designated requirement does not bind Apple Team $TEAM_ID"
 
 SIGNED_ENTITLEMENTS="$WORK_DIR/signed-entitlements.plist"
-codesign --display --entitlements :- "$APP_DIR" > "$SIGNED_ENTITLEMENTS"
+codesign --display --entitlements - --xml "$APP_DIR" > "$SIGNED_ENTITLEMENTS"
 plutil -lint "$SIGNED_ENTITLEMENTS" >/dev/null
 assert_release_entitlements "$SIGNED_ENTITLEMENTS"
 

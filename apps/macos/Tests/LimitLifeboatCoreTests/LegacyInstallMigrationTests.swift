@@ -125,9 +125,11 @@ final class LegacyInstallMigrationTests: XCTestCase {
         XCTAssertEqual(try decode([AccountProfile].self, at: destination.appendingPathComponent("profiles.json")), profiles)
         XCTAssertEqual(try decode([UsageSnapshot].self, at: destination.appendingPathComponent("usage-snapshots.json")), snapshots)
         XCTAssertEqual(try decodeHistory(at: destination.appendingPathComponent("usage-history.jsonl")), history)
-        XCTAssertEqual(
-            try Data(contentsOf: destination.appendingPathComponent("Backups/claude/session.json")),
-            backupBytes
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: destination.appendingPathComponent("Backups/claude/session.json").path
+            ),
+            "Persistent plaintext backups must not be adopted by Limit Lifeboat"
         )
         XCTAssertTrue(FileManager.default.fileExists(atPath: destination.appendingPathComponent(".migration-v1-complete").path))
         XCTAssertFalse(
