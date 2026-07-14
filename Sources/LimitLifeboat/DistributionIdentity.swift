@@ -3,5 +3,5 @@
 /// Apple Developer Membership details; release.sh refuses to ship while it is
 /// unconfigured or when TEAM_ID differs.
 enum DistributionIdentity {
-    static let appleTeamIdentifier = "UNCONFIGURED"
+    static let appleTeamIdentifier = "3DQ7YC2YH2"
 }
