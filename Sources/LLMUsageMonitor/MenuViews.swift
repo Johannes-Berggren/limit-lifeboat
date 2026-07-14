@@ -727,41 +727,41 @@ struct UsageGauge: View {
     var estimate: BurnRateEstimate? = nil
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: DS.Spacing.xs) {
-                Text(window.label)
-                    .font(.caption2.weight(.medium))
-                    .lineLimit(1)
-                    .help(window.label)
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: DS.Spacing.xs) {
+                    Text(window.label)
+                        .font(.caption2.weight(.medium))
+                        .lineLimit(1)
+                        .help(window.label)
 
-                Spacer(minLength: 0)
+                    Spacer(minLength: 0)
 
-                if case .depletesAt = estimate {
-                    Image(systemName: "clock.badge.exclamationmark")
-                        .font(.caption2)
-                        .foregroundStyle(DS.riskColor(.warning))
+                    if case .depletesAt = estimate {
+                        Image(systemName: "clock.badge.exclamationmark")
+                            .font(.caption2)
+                            .foregroundStyle(DS.riskColor(.warning))
+                    }
+
+                    Text(usageValue)
+                        .font(.caption2.weight(.bold))
+                        .monospacedDigit()
+                        .contentTransition(.numericText())
+                        .animation(.default, value: usageValue)
                 }
 
-                Text(usageValue)
-                    .font(.caption2.weight(.bold))
-                    .monospacedDigit()
-                    .contentTransition(.numericText())
-                    .animation(.default, value: usageValue)
-            }
-
-            GeometryReader { proxy in
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(Color.primary.opacity(0.09))
-                    Capsule()
-                        .fill(riskColor.gradient)
-                        .frame(width: fillWidth(in: proxy.size.width))
+                GeometryReader { proxy in
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(Color.primary.opacity(0.09))
+                        Capsule()
+                            .fill(riskColor.gradient)
+                            .frame(width: fillWidth(in: proxy.size.width))
+                    }
+                    .animation(.spring(duration: 0.5, bounce: 0.15), value: window.usedFraction)
                 }
-                .animation(.spring(duration: 0.5, bounce: 0.15), value: window.usedFraction)
-            }
-            .frame(height: 6)
+                .frame(height: 6)
 
-            TimelineView(.periodic(from: .now, by: 60)) { context in
                 if let resetText = UsageResetTiming.compactText(
                     resetDate: window.resetDate,
                     resetDescription: window.resetDescription,
@@ -774,11 +774,11 @@ struct UsageGauge: View {
                         .monospacedDigit()
                 }
             }
+            .help(gaugeHelp)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(window.label)
+            .accessibilityValue(accessibilityValue(now: context.date))
         }
-        .help(gaugeHelp)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(window.label)
-        .accessibilityValue(accessibilityValue)
     }
 
     private var resetHelp: String? {
@@ -800,11 +800,12 @@ struct UsageGauge: View {
         "\(Int(window.usedPercent.rounded()))%"
     }
 
-    private var accessibilityValue: String {
+    private func accessibilityValue(now: Date) -> String {
         var parts = ["\(usageValue) used"]
         if let resetText = UsageResetTiming.compactText(
             resetDate: window.resetDate,
-            resetDescription: window.resetDescription
+            resetDescription: window.resetDescription,
+            now: now
         ) {
             parts.append(resetText)
         }
