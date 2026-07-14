@@ -7,10 +7,28 @@ on:
 
 jobs:
   test:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
-      - name: Build
-        run: swift build -c release
+      - uses: actions/checkout@v7
       - name: Test
         run: swift test
+      - name: Package arm64 app
+        env:
+          SIGN_IDENTITY: "-"
+        run: ./scripts/package-app.sh
+      - name: Validate packaged app
+        run: |
+          set -euo pipefail
+          app="dist/Limit Lifeboat.app"
+          executable="$app/Contents/MacOS/LimitLifeboat"
+          info="$app/Contents/Info.plist"
+
+          test -x "$executable"
+          test "$(lipo -archs "$executable")" = "arm64"
+          test "$(xcrun vtool -show-build "$executable" | awk '$1 == "minos" { print $2; exit }')" = "14.0"
+          test "$(plutil -extract CFBundleIdentifier raw -o - "$info")" = "com.limitlifeboat.app"
+          test "$(plutil -extract CFBundleExecutable raw -o - "$info")" = "LimitLifeboat"
+          test "$(plutil -extract CFBundleShortVersionString raw -o - "$info")" = "$(tr -d '[:space:]' < VERSION)"
+          test "$(plutil -extract LSMinimumSystemVersion raw -o - "$info")" = "14.0"
+          plutil -lint Packaging/LimitLifeboat.entitlements
+          codesign --verify --all-architectures --strict --verbose=2 "$app"

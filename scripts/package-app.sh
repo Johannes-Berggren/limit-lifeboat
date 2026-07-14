@@ -1,35 +1,52 @@
 #!/usr/bin/env bash
-# Builds and assembles dist/LLMUsageMonitor.app. Dev builds use SIGN_IDENTITY
-# when provided, otherwise the first Apple Development identity, and fall back
-# to ad-hoc signing. scripts/release.sh re-signs for distribution (set
-# SKIP_ADHOC_SIGN=1 to leave the bundle unsigned for that step).
+# Builds and assembles dist/Limit Lifeboat.app for Apple Silicon. Development
+# builds use SIGN_IDENTITY when provided, otherwise the first Apple Development
+# identity, and fall back to ad-hoc signing. scripts/release.sh re-signs for
+# distribution (set SKIP_ADHOC_SIGN=1 to leave the bundle unsigned for that
+# step).
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIGURATION="${CONFIGURATION:-release}"
-APP_NAME="LLMUsageMonitor"
-APP_DIR="$ROOT_DIR/dist/$APP_NAME.app"
+ARCHITECTURE="${ARCHITECTURE:-arm64}"
+PRODUCT_NAME="Limit Lifeboat"
+EXECUTABLE_NAME="LimitLifeboat"
+BUNDLE_ID="com.limitlifeboat.app"
+APP_DIR="$ROOT_DIR/dist/$PRODUCT_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
-BUILD_BIN="$ROOT_DIR/.build/$CONFIGURATION/$APP_NAME"
-APP_EXECUTABLE="$MACOS_DIR/$APP_NAME"
+APP_EXECUTABLE="$MACOS_DIR/$EXECUTABLE_NAME"
 PROCESS_HELPER="$ROOT_DIR/scripts/manage-workspace-app.sh"
+ENTITLEMENTS="$ROOT_DIR/Packaging/LimitLifeboat.entitlements"
 
 VERSION="${VERSION:-$(tr -d '[:space:]' < "$ROOT_DIR/VERSION")}"
 BUILD_NUMBER="$(git -C "$ROOT_DIR" rev-list --count HEAD 2>/dev/null || echo 1)"
 
+if [[ "$ARCHITECTURE" != "arm64" ]]; then
+  echo "Unsupported architecture '$ARCHITECTURE'; Limit Lifeboat is distributed for arm64 only." >&2
+  exit 1
+fi
+
+plutil -lint "$ENTITLEMENTS" >/dev/null
 "$PROCESS_HELPER" check "$APP_EXECUTABLE"
 
 cd "$ROOT_DIR"
-swift build -c "$CONFIGURATION"
+swift build -c "$CONFIGURATION" --arch "$ARCHITECTURE"
+BUILD_DIR="$(swift build -c "$CONFIGURATION" --arch "$ARCHITECTURE" --show-bin-path)"
+BUILD_BIN="$BUILD_DIR/$EXECUTABLE_NAME"
+
+if [[ ! -x "$BUILD_BIN" ]]; then
+  echo "Expected executable was not produced at $BUILD_BIN" >&2
+  exit 1
+fi
 
 # Check again immediately before replacement so a copy launched during the
 # build cannot be orphaned by the rm below.
 "$PROCESS_HELPER" check "$APP_EXECUTABLE"
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
-cp "$BUILD_BIN" "$MACOS_DIR/$APP_NAME"
+cp "$BUILD_BIN" "$APP_EXECUTABLE"
 cp "$ROOT_DIR/Packaging/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
 
 cat > "$CONTENTS_DIR/Info.plist" <<PLIST
@@ -40,17 +57,17 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleDisplayName</key>
-  <string>LLM Usage Monitor</string>
+  <string>Limit Lifeboat</string>
   <key>CFBundleExecutable</key>
-  <string>LLMUsageMonitor</string>
+  <string>$EXECUTABLE_NAME</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundleIdentifier</key>
-  <string>com.johannesberggren.LLMUsageMonitor</string>
+  <string>$BUNDLE_ID</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>LLM Usage Monitor</string>
+  <string>$PRODUCT_NAME</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
@@ -64,7 +81,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <key>LSUIElement</key>
   <true/>
   <key>NSAppleEventsUsageDescription</key>
-  <string>LLM Usage Monitor can open Terminal to help you run official CLI login commands.</string>
+  <string>Limit Lifeboat can open Terminal to help you run official CLI login commands.</string>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSPrincipalClass</key>
@@ -72,6 +89,13 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+
+plutil -lint "$CONTENTS_DIR/Info.plist" >/dev/null
+
+if [[ "$(lipo -archs "$APP_EXECUTABLE")" != "arm64" ]]; then
+  echo "Packaged executable must contain only arm64 code: $(lipo -archs "$APP_EXECUTABLE")" >&2
+  exit 1
+fi
 
 if [[ "${SKIP_ADHOC_SIGN:-0}" != "1" ]]; then
   RESOLVED_SIGN_IDENTITY="${SIGN_IDENTITY:-}"
@@ -87,7 +111,7 @@ if [[ "${SKIP_ADHOC_SIGN:-0}" != "1" ]]; then
   fi
 
   codesign --force --sign "$RESOLVED_SIGN_IDENTITY" \
-    --entitlements "$ROOT_DIR/Packaging/$APP_NAME.entitlements" \
+    --entitlements "$ENTITLEMENTS" \
     "$APP_DIR"
 fi
 
