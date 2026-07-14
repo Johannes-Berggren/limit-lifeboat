@@ -97,14 +97,14 @@ public enum LegacyMigrationError: Error, LocalizedError, Equatable {
 /// LLM Usage Monitor identity to Limit Lifeboat. The journal contains only
 /// phases and account UUIDs; credential bytes remain in Keychain.
 public final class LegacyInstallMigrator {
-    /// These are the only files the legacy app owns in Application Support.
-    /// Unknown files are deliberately left behind instead of being swept into
-    /// the new identity.
+    /// These are the legacy files that are safe to adopt. Persistent plaintext
+    /// `Backups` are deliberately left in the untouched legacy tree now that
+    /// switching uses transaction-local rollback material. Unknown files are
+    /// likewise left behind instead of being swept into the new identity.
     private static let knownApplicationSupportItems = [
         "profiles.json",
         "usage-snapshots.json",
         "usage-history.jsonl",
-        "Backups",
     ]
 
     public static let allowedDefaultsKeys = [

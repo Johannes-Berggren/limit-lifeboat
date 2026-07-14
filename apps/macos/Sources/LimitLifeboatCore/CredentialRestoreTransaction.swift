@@ -2,6 +2,15 @@ import Foundation
 
 struct CredentialRestoreHooks {
     var beforeDestinationCheck: ((URL) throws -> Void)?
+    var afterDestinationWrite: ((URL) throws -> Void)?
+
+    init(
+        beforeDestinationCheck: ((URL) throws -> Void)? = nil,
+        afterDestinationWrite: ((URL) throws -> Void)? = nil
+    ) {
+        self.beforeDestinationCheck = beforeDestinationCheck
+        self.afterDestinationWrite = afterDestinationWrite
+    }
 
     static let none = CredentialRestoreHooks()
 }
@@ -169,20 +178,30 @@ final class CredentialRestoreTransaction {
                     throw CLISwitcherError.credentialConflict(destination.path)
                 }
                 try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+                let written: Data
                 switch item.kind {
                 case .fullFile:
                     try item.contents.write(to: destination, options: [.atomic])
+                    written = item.contents
                 case .jsonFields:
-                    try mergeJSONFields(item.contents, ownedKeys: item.ownedJSONKeys, into: destination)
+                    written = try mergeJSONFields(
+                        item.contents,
+                        ownedKeys: item.ownedJSONKeys,
+                        into: destination
+                    )
                 case .keychainJSONFields:
-                    break
+                    preconditionFailure("Keychain items are restored after files")
                 }
+                // Register the exact mutation before any later operation can
+                // throw. Permission changes, injected checks, and validation
+                // must all be able to roll this write back safely.
+                touched.append(destination)
+                writtenFiles[destination.path] = written
+                try hooks.afterDestinationWrite?(destination)
                 try fileManager.setAttributes(
                     [.posixPermissions: item.posixPermissions ?? 0o600],
                     ofItemAtPath: destination.path
                 )
-                touched.append(destination)
-                writtenFiles[destination.path] = try Data(contentsOf: destination)
             }
             for item in keychainItems {
                 let current = try claudeCredentialSource.readLiveItemJSON(accessMode: accessMode)
@@ -279,7 +298,7 @@ final class CredentialRestoreTransaction {
         }
     }
 
-    private func mergeJSONFields(_ fieldsData: Data, ownedKeys: [String]?, into url: URL) throws {
+    private func mergeJSONFields(_ fieldsData: Data, ownedKeys: [String]?, into url: URL) throws -> Data {
         guard let fields = try JSONSerialization.jsonObject(with: fieldsData) as? [String: Any] else {
             throw CLISwitcherError.invalidJSON(url.path)
         }
@@ -299,6 +318,7 @@ final class CredentialRestoreTransaction {
         }
         let data = try JSONSerialization.data(withJSONObject: destinationObject, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: url, options: [.atomic])
+        return data
     }
 
     /// Converts snapshots from older builds that captured whole auth files into

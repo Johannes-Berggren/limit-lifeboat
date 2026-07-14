@@ -191,11 +191,18 @@ public final class CLISwitcher {
                         reason: error.localizedDescription
                     )
                 }
-                let identityMatches = profile.identity.map { expected in
-                    observation.identity.map(expected.matches) == true
-                } ?? false
-                let fingerprintMatches = observation.credentialFingerprint == targetFingerprint
-                guard observation.isLoggedIn, identityMatches || fingerprintMatches else {
+                let targetMatches: Bool
+                if let expectedIdentity = profile.identity {
+                    targetMatches = observation.identity.map(expectedIdentity.matches) == true
+                } else {
+                    // Legacy and manually created profiles may not have an
+                    // identity yet. Their captured credential bytes are the
+                    // strongest target signal available. A labeled profile,
+                    // however, must never let this fallback override an
+                    // observed identity mismatch.
+                    targetMatches = observation.credentialFingerprint == targetFingerprint
+                }
+                guard observation.isLoggedIn, targetMatches else {
                     throw CLISwitcherError.restoreValidationFailed(
                         provider: profile.provider,
                         reason: "The live credentials did not identify \(profile.label)."

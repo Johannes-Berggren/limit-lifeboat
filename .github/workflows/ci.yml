@@ -31,6 +31,10 @@ jobs:
           executable="$app/Contents/MacOS/LimitLifeboat"
           info="$app/Contents/Info.plist"
           bundled_license="$app/Contents/Resources/LICENSE.txt"
+          source_entitlements="apps/macos/Packaging/LimitLifeboat.entitlements"
+          signed_entitlements="$(mktemp)"
+          trap 'rm -f "$signed_entitlements"' EXIT
+          expected_entitlements='{"com.apple.security.automation.apple-events":true}'
 
           test -x "$executable"
           test "$(lipo -archs "$executable")" = "arm64"
@@ -43,8 +47,12 @@ jobs:
           grep -Fq 'static let appleTeamIdentifier = "3DQ7YC2YH2"' \
             apps/macos/Sources/LimitLifeboat/DistributionIdentity.swift
           cmp -s LICENSE "$bundled_license"
-          plutil -lint apps/macos/Packaging/LimitLifeboat.entitlements
+          plutil -lint "$source_entitlements"
+          test "$(plutil -convert json -o - "$source_entitlements")" = "$expected_entitlements"
           codesign --verify --all-architectures --strict --verbose=2 "$app"
+          codesign --display --entitlements - --xml "$app" > "$signed_entitlements"
+          plutil -lint "$signed_entitlements"
+          test "$(plutil -convert json -o - "$signed_entitlements")" = "$expected_entitlements"
 
   site:
     name: Marketing site

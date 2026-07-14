@@ -283,6 +283,46 @@ final class CLISwitcherTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.backups.path), [])
     }
 
+    func testFailureImmediatelyAfterFileWriteRollsBackAndCleansRollbackMaterial() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let authURL = fixture.home.appendingPathComponent(".codex/auth.json")
+        try FileManager.default.createDirectory(
+            at: authURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let original = Data(#"{"tokens":{"access_token":"original"}}"#.utf8)
+        try original.write(to: authURL)
+
+        let transaction = CredentialRestoreTransaction(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            fileManager: .default,
+            claudeCredentialSource: FakeClaudeCLICredentialSource(),
+            hooks: CredentialRestoreHooks(afterDestinationWrite: { _ in
+                throw InjectedRestoreFailure.afterWrite
+            })
+        )
+        let snapshot = CredentialSnapshot(provider: .codex, items: [
+            CredentialSnapshotItem(
+                relativePath: ".codex/auth.json",
+                kind: .fullFile,
+                contents: Data(#"{"tokens":{"access_token":"target"}}"#.utf8),
+                posixPermissions: 0o600
+            )
+        ])
+
+        XCTAssertThrowsError(
+            try transaction.restore(snapshot, validateRestoredCredentials: {})
+        ) { error in
+            guard case InjectedRestoreFailure.afterWrite = error else {
+                return XCTFail("Expected injected post-write failure, got \(error)")
+            }
+        }
+        XCTAssertEqual(try Data(contentsOf: authURL), original)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.backups.path), [])
+    }
+
     func testSwitcherValidatesTargetBeforeCommit() throws {
         let fixture = try TemporaryFixture()
         defer { fixture.cleanup() }
@@ -318,6 +358,57 @@ final class CLISwitcherTests: XCTestCase {
             }
         }
         XCTAssertEqual(try Data(contentsOf: authURL), original)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.backups.path), [])
+    }
+
+    func testLabeledProfileRejectsSnapshotThatRestoresDifferentIdentity() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let authURL = fixture.home.appendingPathComponent(".codex/auth.json")
+        try FileManager.default.createDirectory(
+            at: authURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+
+        let store = MemoryCredentialStore()
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: store,
+            claudeCLICredentialSource: FakeClaudeCLICredentialSource()
+        )
+        let profile = AccountProfile(
+            provider: .codex,
+            label: "Expected account",
+            identity: AccountIdentity(
+                email: "expected@example.com",
+                accountID: "acct-expected",
+                source: .codexIDToken
+            )
+        )
+
+        let mismatchedAuth = codexAuth(
+            email: "different@example.com",
+            accountID: "acct-different",
+            accessToken: "different-token"
+        )
+        try mismatchedAuth.write(to: authURL)
+        let mismatchedSnapshot = try switcher.captureSnapshot(provider: .codex)
+        try store.save(snapshot: mismatchedSnapshot, for: profile.id)
+
+        let originalAuth = codexAuth(
+            email: "original@example.com",
+            accountID: "acct-original",
+            accessToken: "original-token"
+        )
+        try originalAuth.write(to: authURL)
+
+        XCTAssertThrowsError(try switcher.restoreSnapshot(for: profile)) { error in
+            guard case CLISwitcherError.restoreValidationFailed = error else {
+                return XCTFail("Expected restoreValidationFailed, got \(error)")
+            }
+        }
+        XCTAssertEqual(try Data(contentsOf: authURL), originalAuth)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.backups.path), [])
     }
 
@@ -878,11 +969,28 @@ final class CLISwitcherTests: XCTestCase {
         return tokens?["access_token"] as? String
     }
 
+    private func codexAuth(email: String, accountID: String, accessToken: String) -> Data {
+        let payload = #"{"email":"\#(email)"}"#
+        let encodedPayload = Data(payload.utf8)
+            .base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let idToken = "header.\(encodedPayload).signature"
+        return Data(
+            #"{"auth_mode":"chatgpt","tokens":{"access_token":"\#(accessToken)","id_token":"\#(idToken)","account_id":"\#(accountID)"}}"#.utf8
+        )
+    }
+
     private func fakeClaudeSource(accessToken: String = "tok-a") -> FakeClaudeCLICredentialSource {
         let source = FakeClaudeCLICredentialSource()
         source.itemJSON = Data(#"{"claudeAiOauth":{"accessToken":"\#(accessToken)","expiresAt":1783458000000},"mcpOAuth":{"serverX":{"accessToken":"mcp"}}}"#.utf8)
         return source
     }
+}
+
+private enum InjectedRestoreFailure: Error {
+    case afterWrite
 }
 
 /// In-memory stand-in for the login-keychain item so tests never touch the
