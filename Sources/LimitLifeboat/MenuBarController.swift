@@ -17,7 +17,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         super.init()
         popover.behavior = .transient
         popover.delegate = self
-        popover.contentSize = NSSize(width: 480, height: 620)
+        popover.contentSize = NSSize(width: DS.Popover.width, height: DS.Popover.height)
         popover.contentViewController = NSHostingController(
             rootView: MenuRootView(state: state, settings: state.settings)
         )
@@ -62,42 +62,81 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         }
 
         var image = NSImage(
-            systemSymbolName: imageName(for: summary.riskLevel),
+            systemSymbolName: "lifepreserver.fill",
             accessibilityDescription: summary.accessibilityText
         )
-        // Depleted and warning both get color so the two most important states
-        // read at a glance; everything else follows the menu-bar tint. A
-        // monochrome warning glyph (the old behavior) was effectively invisible.
-        if let paletteColor = paletteColor(for: summary.riskLevel) {
-            image = image?.withSymbolConfiguration(
-                NSImage.SymbolConfiguration(paletteColors: [paletteColor])
-            )
-            image?.isTemplate = false
-        } else {
-            image?.isTemplate = true
-        }
+        // Keep the lifebuoy blue as a stable product mark. Each adjacent quota
+        // value carries its own state color, so one exhausted scoped limit does
+        // not recolor or obscure the other active limits.
+        image = image?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(paletteColors: [.systemBlue])
+        )
+        image?.isTemplate = false
         button.image = image
-        button.toolTip = summary.accessibilityText
+        button.toolTip = "Limit Lifeboat\n\(summary.accessibilityText)"
+        button.setAccessibilityLabel("Limit Lifeboat. \(summary.accessibilityText)")
         button.contentTintColor = nil
-        button.attributedTitle = attributedTitle(claude: summary.claudeValue, codex: summary.codexValue)
+        button.attributedTitle = attributedTitle(summary: summary)
     }
 
-    private func attributedTitle(claude: String, codex: String) -> NSAttributedString {
-        let labelAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium),
+    private func attributedTitle(summary: MenuBarSummary) -> NSAttributedString {
+        let providerAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 9, weight: .semibold),
+            .foregroundColor: NSColor.secondaryLabelColor,
+            .kern: 0.55
+        ]
+        let limitLabelAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 10, weight: .medium),
             .foregroundColor: NSColor.secondaryLabelColor
         ]
-        let valueAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold),
-            .foregroundColor: NSColor.labelColor
+        let separatorAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 10, weight: .regular),
+            .foregroundColor: NSColor.tertiaryLabelColor
         ]
 
+        guard !summary.activeProviderLimits.isEmpty else {
+            let title = NSMutableAttributedString(string: " LIMIT ", attributes: providerAttributes)
+            title.append(valueString(summary.compactValue, riskLevel: summary.riskLevel))
+            return title
+        }
+
         let title = NSMutableAttributedString()
-        title.append(NSAttributedString(string: " Claude ", attributes: labelAttributes))
-        title.append(NSAttributedString(string: claude, attributes: valueAttributes))
-        title.append(NSAttributedString(string: " · Codex ", attributes: labelAttributes))
-        title.append(NSAttributedString(string: codex, attributes: valueAttributes))
+        for (providerIndex, group) in summary.activeProviderLimits.enumerated() {
+            if providerIndex > 0 {
+                title.append(NSAttributedString(string: "  ·  ", attributes: separatorAttributes))
+            }
+            title.append(NSAttributedString(
+                string: " \(group.provider.displayName.uppercased()) ",
+                attributes: providerAttributes
+            ))
+
+            if group.limits.isEmpty {
+                title.append(valueString("?", riskLevel: .unknown))
+                continue
+            }
+
+            for (limitIndex, limit) in group.limits.enumerated() {
+                if limitIndex > 0 {
+                    title.append(NSAttributedString(string: "  ", attributes: separatorAttributes))
+                }
+                title.append(NSAttributedString(
+                    string: "\(limit.label) ",
+                    attributes: limitLabelAttributes
+                ))
+                title.append(valueString("\(limit.usedPercent)%", riskLevel: limit.riskLevel))
+            }
+        }
         return title
+    }
+
+    private func valueString(_ value: String, riskLevel: RiskLevel) -> NSAttributedString {
+        NSAttributedString(
+            string: value,
+            attributes: [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold),
+                .foregroundColor: paletteColor(for: riskLevel) ?? NSColor.labelColor
+            ]
+        )
     }
 
     /// The status-item glyph tint for a risk level, or nil to stay monochrome
@@ -108,23 +147,12 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
             return .systemRed
         case .warning:
             return .systemOrange
-        case .healthy, .stale, .unknown:
-            return nil
-        }
-    }
-
-    private func imageName(for riskLevel: RiskLevel) -> String {
-        switch riskLevel {
-        case .depleted:
-            return "exclamationmark.octagon.fill"
-        case .warning:
-            return "exclamationmark.triangle.fill"
         case .healthy:
-            return "gauge.with.dots.needle.67percent"
+            return .systemBlue
         case .stale:
-            return "clock.badge.exclamationmark"
+            return .systemYellow
         case .unknown:
-            return "gauge.with.dots.needle.33percent"
+            return nil
         }
     }
 

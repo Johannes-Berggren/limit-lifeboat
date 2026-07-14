@@ -77,95 +77,112 @@ struct SettingsView: View {
     @State private var launchAtLoginMessage: String?
     @State private var isCheckingForUpdates = false
     @State private var upToDateMessage: String?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: DS.Spacing.xs) {
-                Label("Limit Lifeboat", systemImage: "gauge.with.dots.needle.67percent")
-                    .font(.title3.weight(.semibold))
-                Text("Choose how usage is refreshed, shown, and acted on.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, DS.Spacing.xl)
-            .padding(.top, DS.Spacing.lg)
-            .padding(.bottom, DS.Spacing.sm)
+        ZStack {
+            CalmWindowBackground()
 
-            Form {
-                Section("General") {
-                    Picker("Refresh usage every", selection: $settings.refreshIntervalMinutes) {
-                        ForEach(SettingsStore.refreshIntervalOptions, id: \.self) { minutes in
-                            Text("\(minutes) minutes").tag(minutes)
-                        }
-                    }
-
-                    Toggle("Launch at login", isOn: $launchAtLogin)
-                        .onChange(of: launchAtLogin) { _, newValue in
-                            applyLaunchAtLogin(newValue)
-                        }
-                        .disabled(!LaunchAtLogin.isSupported)
-                    if let launchAtLoginMessage {
-                        StatusBanner(
-                            text: launchAtLoginMessage,
-                            systemImage: "exclamationmark.triangle.fill",
-                            color: .red
-                        )
-                    }
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: DS.Spacing.xs) {
+                    Label("Limit Lifeboat", systemImage: "gauge.with.dots.needle.67percent")
+                        .font(.title2.weight(.semibold))
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(.primary, .tint)
+                    Text("Choose how usage is refreshed, shown, and acted on.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                 }
+                .padding(.horizontal, DS.Spacing.xl)
+                .padding(.top, DS.Spacing.xl)
+                .padding(.bottom, DS.Spacing.sm)
 
-                Section("Appearance") {
-                    Toggle("Show organization names", isOn: $settings.showOrganizationNames)
-                }
-
-                Section("Notifications") {
-                    Toggle("Warn when included usage nears its limit", isOn: $settings.usageAlertsEnabled)
-                    Toggle("Alert when an account's quota is likely back", isOn: $settings.resetAlertsEnabled)
-                }
-
-                Section("Switching") {
-                    Toggle("Switch CLI automatically when the active account is depleted", isOn: $settings.autoSwitchEnabled)
-                    Label(
-                        "Chooses the saved account with the most remaining quota and sends a notification. It only runs when another account clearly has more headroom.",
-                        systemImage: "info.circle"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-
-                Section("Updates") {
-                    LabeledContent("Version", value: AppInfo.version)
-                    if let update = state.availableUpdate {
-                        Button("Download version \(update.version)…") {
-                            state.openAvailableUpdate()
+                Form {
+                    Section("General") {
+                        Picker("Refresh usage every", selection: $settings.refreshIntervalMinutes) {
+                            ForEach(SettingsStore.refreshIntervalOptions, id: \.self) { minutes in
+                                Text("\(minutes) minutes").tag(minutes)
+                            }
                         }
-                    } else {
-                        Button(isCheckingForUpdates ? "Checking…" : "Check for Updates") {
-                            checkForUpdates()
-                        }
-                        .disabled(isCheckingForUpdates)
-                        if let upToDateMessage {
+
+                        Toggle("Launch at login", isOn: $launchAtLogin)
+                            .onChange(of: launchAtLogin) { _, newValue in
+                                applyLaunchAtLogin(newValue)
+                            }
+                            .disabled(!LaunchAtLogin.isSupported)
+                        if let launchAtLoginMessage {
                             StatusBanner(
-                                text: upToDateMessage,
-                                systemImage: "checkmark.circle.fill",
-                                color: .green
+                                text: launchAtLoginMessage,
+                                systemImage: "exclamationmark.triangle.fill",
+                                color: DS.danger
                             )
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                        }
+                    }
+
+                    Section("Appearance") {
+                        Toggle("Show organization names", isOn: $settings.showOrganizationNames)
+                    }
+
+                    Section("Notifications") {
+                        Toggle("Warn when included usage nears its limit", isOn: $settings.usageAlertsEnabled)
+                        Toggle("Alert when an account's quota is likely back", isOn: $settings.resetAlertsEnabled)
+                    }
+
+                    Section("Switching") {
+                        Toggle("Switch CLI automatically when the active account is depleted", isOn: $settings.autoSwitchEnabled)
+                        Label(
+                            "Chooses the saved account with the most remaining quota and sends a notification. It only runs when another account clearly has more headroom.",
+                            systemImage: "info.circle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+
+                    Section("Updates") {
+                        LabeledContent("Version", value: AppInfo.version)
+                        if let update = state.availableUpdate {
+                            Button("Download version \(update.version)…") {
+                                state.openAvailableUpdate()
+                            }
+                        } else {
+                            Button(isCheckingForUpdates ? "Checking…" : "Check for Updates") {
+                                checkForUpdates()
+                            }
+                            .disabled(isCheckingForUpdates)
+                            if let upToDateMessage {
+                                StatusBanner(
+                                    text: upToDateMessage,
+                                    systemImage: "checkmark.circle.fill",
+                                    color: DS.success
+                                )
+                                .transition(.opacity.combined(with: .move(edge: .top)))
+                            }
                         }
                     }
                 }
+                .formStyle(.grouped)
+                .scrollContentBackground(.hidden)
             }
-            .formStyle(.grouped)
         }
-        .frame(width: 480)
+        .frame(width: 520)
         .fixedSize(horizontal: false, vertical: true)
+        .tint(DS.accent)
+        .animation(reduceMotion ? nil : DS.Motion.standard, value: launchAtLoginMessage)
+        .animation(reduceMotion ? nil : DS.Motion.standard, value: upToDateMessage)
     }
 
     private func applyLaunchAtLogin(_ enabled: Bool) {
         do {
             try LaunchAtLogin.set(enabled: enabled)
-            launchAtLoginMessage = nil
+            withAnimation(reduceMotion ? nil : DS.Motion.quick) {
+                launchAtLoginMessage = nil
+            }
         } catch {
             launchAtLogin = LaunchAtLogin.isEnabled
-            launchAtLoginMessage = "Could not update the login item: \(error.localizedDescription)"
+            withAnimation(reduceMotion ? nil : DS.Motion.quick) {
+                launchAtLoginMessage = "Could not update the login item: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -174,7 +191,9 @@ struct SettingsView: View {
         upToDateMessage = nil
         Task {
             let found = await state.checkForUpdatesNow()
-            upToDateMessage = found ? nil : "You're up to date."
+            withAnimation(reduceMotion ? nil : DS.Motion.quick) {
+                upToDateMessage = found ? nil : "You're up to date."
+            }
             isCheckingForUpdates = false
         }
     }

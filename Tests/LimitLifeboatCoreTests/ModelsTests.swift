@@ -13,6 +13,34 @@ final class ModelsTests: XCTestCase {
         )
     }
 
+    func testRecommendedAccountFollowsActiveAndKeepsRemainingOrder() {
+        let inactiveOne = AccountProfile(provider: .claude, label: "Inactive One")
+        let active = AccountProfile(provider: .claude, label: "Active", isActiveCLI: true)
+        let recommended = AccountProfile(provider: .claude, label: "Recommended")
+        let inactiveTwo = AccountProfile(provider: .claude, label: "Inactive Two")
+
+        XCTAssertEqual(
+            AccountProfileOrdering.activeThenRecommended(
+                [inactiveOne, recommended, active, inactiveTwo],
+                recommendedID: recommended.id
+            ).map(\.id),
+            [active.id, recommended.id, inactiveOne.id, inactiveTwo.id]
+        )
+    }
+
+    func testMissingRecommendationFallsBackToActiveFirst() {
+        let inactive = AccountProfile(provider: .codex, label: "Inactive")
+        let active = AccountProfile(provider: .codex, label: "Active", isActiveCLI: true)
+
+        XCTAssertEqual(
+            AccountProfileOrdering.activeThenRecommended(
+                [inactive, active],
+                recommendedID: UUID()
+            ).map(\.id),
+            [active.id, inactive.id]
+        )
+    }
+
     func testProviderLoginCommandsMatchCurrentCLIs() {
         XCTAssertEqual(Provider.claude.loginCommand, "claude auth login")
         XCTAssertEqual(Provider.codex.loginCommand, "codex login")

@@ -207,6 +207,33 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         orderedDisplayWindows.max { $0.usedPercent < $1.usedPercent }
     }
 
+    /// The quota that best answers "how much usable capacity do I have right
+    /// now?" for compact UI. A session limit leads while the primary quotas
+    /// are healthy. Once a session or all-model weekly limit reaches the
+    /// warning band, the one closest to exhaustion takes over. Model-scoped
+    /// limits remain visible and actionable, but do not replace a primary
+    /// quota in the menu bar merely because one model is exhausted.
+    public var mostRelevantWindow: UsageWindow? {
+        let session = window(ofKind: .session)
+        let weekly = window(ofKind: .weekly)
+            ?? stableMostUsed(in: orderedDisplayWindows.filter { $0.kind == .weeklyScoped })
+        let primary = [session, weekly].compactMap { $0 }
+        let urgent = primary.filter {
+            $0.usedFraction >= UsageThresholds.standard.warningUsedFraction
+        }
+
+        if let urgentWinner = stableMostUsed(in: urgent) {
+            return urgentWinner
+        }
+        if let session {
+            return session
+        }
+        if let weekly {
+            return weekly
+        }
+        return stableMostUsed(in: orderedDisplayWindows)
+    }
+
     /// The two primary limits used by the compact menu-bar and popover
     /// summaries. A model-scoped weekly is deliberately never a fallback for
     /// the all-model weekly slot; scoped limits remain visible in account
@@ -217,6 +244,13 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
 
     public var primaryConstrainedWindow: UsageWindow? {
         primaryLimitWindows.max { $0.usedPercent < $1.usedPercent }
+    }
+
+    private func stableMostUsed(in windows: [UsageWindow]) -> UsageWindow? {
+        windows.reduce(nil as UsageWindow?) { current, candidate in
+            guard let current else { return candidate }
+            return candidate.usedPercent > current.usedPercent ? candidate : current
+        }
     }
 
     public func isStale(asOf now: Date = Date(), maxAge: TimeInterval = UsageThresholds.standard.staleAfter) -> Bool {

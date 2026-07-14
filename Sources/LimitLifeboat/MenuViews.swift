@@ -4,105 +4,121 @@ import SwiftUI
 struct MenuRootView: View {
     @ObservedObject var state: AppState
     @ObservedObject var settings: SettingsStore
+    @State private var expandedAccounts: [Provider: UUID] = [:]
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
+        ZStack {
+            CalmWindowBackground()
 
-            Divider()
+            VStack(alignment: .leading, spacing: 0) {
+                header
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: DS.Spacing.lg) {
-                    providerSection(.claude)
-                    providerSection(.codex)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: DS.Spacing.xl) {
+                        providerSection(.claude)
+                        providerSection(.codex)
+                    }
+                    .padding(.horizontal, DS.Spacing.xl)
+                    .padding(.vertical, DS.Spacing.md)
                 }
-                .padding(.horizontal, DS.Spacing.md)
-                .padding(.vertical, DS.Spacing.md)
+
+                footer
             }
-            .background(AmbientUsageBackground())
-
-            Divider()
-
-            footer
         }
-        .frame(minWidth: 460, minHeight: 560)
+        .frame(width: DS.Popover.width, height: DS.Popover.height)
+        .tint(DS.accent)
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: DS.Spacing.md) {
-            HStack(spacing: DS.Spacing.sm) {
+        HStack(alignment: .center, spacing: DS.Spacing.md) {
+            ZStack {
+                Circle()
+                    .fill(DS.accent.opacity(0.11))
+                Image(systemName: "lifepreserver.fill")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(DS.accent)
+                    .symbolRenderingMode(.hierarchical)
+            }
+            .frame(width: 34, height: 34)
+            .accessibilityHidden(true)
+
+            TimelineView(.periodic(from: .now, by: 30)) { context in
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("LLM Usage")
-                        .font(.headline)
-                    Text(lastRefreshText)
-                        .font(.caption2)
+                    Text("Limit Lifeboat")
+                        .font(.system(size: 17, weight: .semibold))
+                    Text("LLM usage · \(headerDetail(now: context.date))")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
+                        .contentTransition(.opacity)
+                        .lineLimit(1)
                 }
-
-                Spacer()
-
-                Button {
-                    Task { await state.refreshAll() }
-                } label: {
-                    Group {
-                        if state.isRefreshing {
-                            ProgressView()
-                                .controlSize(.small)
-                        } else {
-                            Image(systemName: "arrow.clockwise")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .frame(width: 24, height: 24)
-                }
-                .buttonStyle(.borderless)
-                .help("Refresh usage (⌘R)")
-                .accessibilityLabel("Refresh usage")
-                .keyboardShortcut("r", modifiers: .command)
-                .disabled(state.isRefreshing)
             }
 
-            TopUsageSummaryView(
-                profiles: state.profiles,
-                snapshots: state.snapshots
-            )
+            Spacer()
 
             if let update = state.availableUpdate {
                 Button {
                     state.openAvailableUpdate()
                 } label: {
-                    Label("Version \(update.version) is available — download", systemImage: "arrow.down.circle")
-                        .font(.caption.weight(.semibold))
+                    Label("Update", systemImage: "arrow.down.circle.fill")
+                        .font(.caption.weight(.medium))
                 }
-                .buttonStyle(.link)
-            } else if let stage = state.refreshStage {
-                Label(stage, systemImage: "arrow.triangle.2.circlepath")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                .buttonStyle(.borderless)
+                .foregroundStyle(DS.accent)
+                .help("Download Limit Lifeboat \(update.version)")
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }
+
+            Button {
+                Task { await state.refreshAll() }
+            } label: {
+                Group {
+                    if state.isRefreshing {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(width: 26, height: 26)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .help("Refresh usage (⌘R)")
+            .accessibilityLabel("Refresh usage")
+            .keyboardShortcut("r", modifiers: .command)
+            .disabled(state.isRefreshing)
         }
-        .padding(DS.Spacing.md)
+        .padding(.horizontal, DS.Spacing.xl)
+        .padding(.top, DS.Spacing.lg)
+        .padding(.bottom, DS.Spacing.sm)
+        .animation(reduceMotion ? nil : DS.Motion.quick, value: state.isRefreshing)
+        .animation(reduceMotion ? nil : DS.Motion.quick, value: state.availableUpdate)
     }
 
     private var footer: some View {
         HStack(spacing: DS.Spacing.sm) {
-            if !state.statusMessage.isEmpty {
-                Label(state.statusMessage, systemImage: "info.circle")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+            Group {
+                if state.statusMessage.isEmpty {
+                    Text("Usage data updates automatically.")
+                } else {
+                    Label(state.statusMessage, systemImage: "info.circle")
+                }
             }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(2)
+            .contentTransition(.opacity)
 
-            Spacer()
-
-            Text("v\(AppInfo.version)")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+            Spacer(minLength: DS.Spacing.md)
 
             Button {
                 state.openSettings()
             } label: {
                 Image(systemName: "gearshape")
+                    .frame(width: 20, height: 20)
             }
             .buttonStyle(.borderless)
             .help("Settings (⌘,)")
@@ -114,56 +130,90 @@ struct MenuRootView: View {
             .buttonStyle(.borderless)
             .keyboardShortcut("q")
         }
-        .padding(.horizontal, DS.Spacing.md)
-        .padding(.vertical, DS.Spacing.sm)
+        .padding(.horizontal, DS.Spacing.xl)
+        .padding(.vertical, DS.Spacing.md)
         .background(.bar)
+        .animation(reduceMotion ? nil : DS.Motion.quick, value: state.statusMessage)
     }
 
-    private var lastRefreshText: String {
+    private func headerDetail(now: Date) -> String {
+        if let stage = state.refreshStage {
+            return stage
+        }
         let latest = state.snapshots.values.map(\.lastRefreshed).max()
         guard let latest else {
             return "Not refreshed yet"
         }
-        return "Updated \(latest.formatted(date: .omitted, time: .shortened))"
+        if abs(now.timeIntervalSince(latest)) < 30 {
+            return "Updated just now"
+        }
+        return "Updated \(latest.formatted(.relative(presentation: .named, unitsStyle: .wide)))"
+    }
+
+    private func expansionBinding(for profile: AccountProfile) -> Binding<Bool> {
+        Binding(
+            get: { expandedAccounts[profile.provider] == profile.id },
+            set: { isExpanded in
+                if isExpanded {
+                    expandedAccounts[profile.provider] = profile.id
+                } else if expandedAccounts[profile.provider] == profile.id {
+                    expandedAccounts[profile.provider] = nil
+                }
+            }
+        )
     }
 
     private func providerSection(_ provider: Provider) -> some View {
         let providerProfiles = state.profiles.filter { $0.provider == provider }
-        // The repository order stays stable within each group; only lift the
-        // active terminal account above its inactive siblings.
-        let profiles = AccountProfileOrdering.activeFirst(providerProfiles)
-        // Highlight the advised switch target only while the active account
-        // is actually constrained — a permanent highlight would be noise.
-        let activeSnapshot = profiles.first(where: \.isActiveCLI).flatMap { state.snapshots[$0.id] }
+        let activeSnapshot = providerProfiles.first(where: \.isActiveCLI).flatMap { state.snapshots[$0.id] }
         let activeAtRisk = activeSnapshot.map { $0.riskLevel == .warning || $0.riskLevel == .depleted } ?? false
         let advisedID = activeAtRisk ? state.switchAdvice[provider]?.bestCandidateID : nil
+        let profiles = AccountProfileOrdering.activeThenRecommended(
+            providerProfiles,
+            recommendedID: advisedID
+        )
+        let activeProfile = profiles.first(where: \.isActiveCLI)
 
-        return VStack(alignment: .leading, spacing: DS.Spacing.sm) {
+        return VStack(alignment: .leading, spacing: DS.Spacing.md) {
             HStack {
                 ProviderLabel(text: provider.displayName, provider: provider)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.system(size: 14, weight: .semibold))
 
                 Text("\(profiles.count) \(profiles.count == 1 ? "account" : "accounts")")
-                    .font(.caption2)
+                    .font(.caption)
                     .foregroundStyle(.tertiary)
 
                 Spacer()
 
-                Button {
-                    state.addProfile(provider: provider)
-                } label: {
-                    Label("Add", systemImage: "plus")
-                        .labelStyle(.iconOnly)
+                if !profiles.isEmpty {
+                    Button {
+                        state.addProfile(provider: provider)
+                    } label: {
+                        Image(systemName: "plus")
+                            .frame(width: 20, height: 20)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Add a \(provider.displayName) account")
                 }
-                .buttonStyle(.borderless)
-                .help("Add a \(provider.displayName) account")
             }
 
             if profiles.isEmpty {
                 emptyProviderCard(provider)
             } else {
-                ForEach(profiles) { profile in
+                ForEach(Array(profiles.enumerated()), id: \.element.id) { index, profile in
                     let storedStatus = state.storedSnapshotStatus(for: profile)
+
+                    if index == 1,
+                       profile.id == advisedID,
+                       let activeProfile {
+                        SwitchHandoffButton(
+                            from: activeProfile,
+                            to: profile,
+                            reason: state.switchAdvice[provider]?.reason,
+                            action: { await state.switchCLI(to: profile) }
+                        )
+                    }
+
                     AccountRowView(
                         profile: profile,
                         snapshot: state.snapshots[profile.id],
@@ -174,6 +224,7 @@ struct MenuRootView: View {
                         estimates: state.burnRateEstimates[profile.id] ?? [:],
                         adviceReason: advisedID == profile.id ? state.switchAdvice[provider]?.reason : nil,
                         showOrganizationName: settings.showOrganizationNames,
+                        isExpanded: expansionBinding(for: profile),
                         historyRecords: { state.historyRecords(for: profile) },
                         switchCLI: {
                             Task { await state.switchCLI(to: profile) }
@@ -188,50 +239,93 @@ struct MenuRootView: View {
                 }
             }
         }
+        .animation(reduceMotion ? nil : DS.Motion.standard, value: profiles.map(\.id))
     }
 
     private func emptyProviderCard(_ provider: Provider) -> some View {
-        VStack(alignment: .leading, spacing: DS.Spacing.sm) {
-            Text("No accounts yet")
-                .font(.system(size: 13, weight: .semibold))
-            Text("Run \(provider.loginCommand) in your terminal — the account is registered here automatically on the next refresh.")
-                .font(.caption)
+        HStack(spacing: DS.Spacing.md) {
+            Image(systemName: "person.crop.circle.badge.plus")
+                .font(.system(size: 18))
                 .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("No accounts connected")
+                    .font(.system(size: 13, weight: .medium))
+                Text("Connect through Terminal to start tracking usage.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
             Button {
                 state.copyLoginCommand(for: provider)
             } label: {
-                Label("Copy login command & open Terminal", systemImage: "terminal")
+                Text("Connect")
             }
-            .compactGlassButton(tint: DS.providerAccent(provider))
+            .compactGlassButton()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(DS.Spacing.md)
-        .cardSurface(tint: DS.providerAccent(provider))
+        .padding(DS.Spacing.cardPadding)
+        .cardSurface()
+        .help("Runs \(provider.loginCommand) in Terminal")
     }
 }
 
-private struct AmbientUsageBackground: View {
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+private struct SwitchHandoffButton: View {
+    let from: AccountProfile
+    let to: AccountProfile
+    let reason: String?
+    let action: () async -> Bool
+
+    @State private var isSwitching = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        if !reduceTransparency {
-            ZStack {
-                RadialGradient(
-                    colors: [.purple.opacity(0.055), .clear],
-                    center: .topLeading,
-                    startRadius: 10,
-                    endRadius: 260
-                )
-                RadialGradient(
-                    colors: [.blue.opacity(0.045), .clear],
-                    center: .bottomTrailing,
-                    startRadius: 20,
-                    endRadius: 280
-                )
+        HStack(spacing: DS.Spacing.sm) {
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 1)
+
+            Button {
+                Task {
+                    isSwitching = true
+                    _ = await action()
+                    isSwitching = false
+                }
+            } label: {
+                HStack(spacing: DS.Spacing.tight) {
+                    if isSwitching {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.down")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    Text(isSwitching ? "Switching…" : "Switch to \(to.label)")
+                        .font(.caption.weight(.medium))
+                        .lineLimit(1)
+                }
+                .foregroundStyle(DS.accent)
+                .padding(.horizontal, DS.Spacing.md)
+                .padding(.vertical, DS.Spacing.tight)
+                .background(DS.accent.opacity(0.08), in: Capsule())
+                .overlay {
+                    Capsule().strokeBorder(DS.accent.opacity(0.16), lineWidth: 0.5)
+                }
             }
-            .allowsHitTesting(false)
+            .buttonStyle(.plain)
+            .disabled(isSwitching)
+            .help(reason ?? "Switch the CLI from \(from.label) to \(to.label)")
+            .accessibilityLabel("Switch \(from.provider.displayName) CLI from \(from.label) to \(to.label)")
+
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 1)
         }
+        .padding(.vertical, -2)
+        .transition(.opacity.combined(with: .scale(scale: 0.97)))
+        .animation(reduceMotion ? nil : DS.Motion.standard, value: isSwitching)
     }
 }
 
@@ -244,6 +338,7 @@ struct AccountRowView: View {
     /// Non-nil exactly when this account is the advised switch target.
     var adviceReason: String? = nil
     var showOrganizationName: Bool = true
+    @Binding var isExpanded: Bool
     let historyRecords: () -> [UsageHistoryRecord]
     let switchCLI: () -> Void
     let openDashboard: () -> Void
@@ -257,6 +352,8 @@ struct AccountRowView: View {
     @State private var renameText = ""
     @State private var showsBillingDetails = false
     @State private var showsHistory = false
+    @State private var isHovered = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var presentation: AccountRowPresentation {
         AccountRowPresentation(
@@ -270,16 +367,30 @@ struct AccountRowView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: DS.Spacing.sm) {
+        VStack(alignment: .leading, spacing: DS.Spacing.md) {
             header
-            gauges
+            featuredGauge
+            atAGlanceGauges
+
+            if isExpanded {
+                expandedDetails
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
             statusStrip
         }
         .padding(DS.Spacing.cardPadding)
         .cardSurface(
-            tint: DS.providerAccent(profile.provider),
-            isEmphasized: profile.isActiveCLI
+            tint: profile.isActiveCLI ? DS.accent : nil,
+            isEmphasized: profile.isActiveCLI,
+            isHovered: isHovered
         )
+        .onHover { isHovered = $0 }
+        .animation(reduceMotion ? nil : DS.Motion.standard, value: isExpanded)
+        .animation(reduceMotion ? nil : DS.Motion.quick, value: isHovered)
+        .accessibilityAction(named: isExpanded ? "Collapse usage details" : "Expand usage details") {
+            isExpanded.toggle()
+        }
         .alert("Rename \(profile.label)", isPresented: $showsRenameAlert) {
             TextField("Account name", text: $renameText)
             Button("Rename") { rename(renameText) }
@@ -310,7 +421,7 @@ struct AccountRowView: View {
                     .layoutPriority(1)
 
                 if profile.isActiveCLI {
-                    Badge(text: "Active", systemImage: "terminal.fill", color: .green)
+                    Badge(text: "Active", color: DS.accent)
                         .help("This account is the current terminal login")
                 }
 
@@ -326,11 +437,25 @@ struct AccountRowView: View {
 
                 Spacer(minLength: 0)
 
-                if !profile.isActiveCLI && presentation.highlightsSwitch && hasStoredSnapshot {
-                    switchButton
-                }
-
                 actionsMenu
+
+                if hasExpandableDetails {
+                    Button {
+                        withAnimation(reduceMotion ? nil : DS.Motion.standard) {
+                            isExpanded.toggle()
+                        }
+                    } label: {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                            .rotationEffect(.degrees(isExpanded ? 180 : 0))
+                            .frame(width: 18, height: 18)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(isExpanded ? "Hide usage details" : "Show all usage limits")
+                    .accessibilityLabel(isExpanded ? "Hide usage details" : "Show all usage limits")
+                }
             }
 
             Text(presentation.identityText)
@@ -344,7 +469,7 @@ struct AccountRowView: View {
 
     private var actionsMenu: some View {
         Menu {
-            if !profile.isActiveCLI && (!presentation.highlightsSwitch || !hasStoredSnapshot) {
+            if !profile.isActiveCLI {
                 Button("Switch CLI to This Account", systemImage: "arrow.triangle.2.circlepath") {
                     switchCLI()
                 }
@@ -366,7 +491,8 @@ struct AccountRowView: View {
             }
             Button("Remove…", role: .destructive) { remove() }
         } label: {
-            Image(systemName: "ellipsis.circle")
+            Image(systemName: "ellipsis")
+                .frame(width: 20, height: 18)
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
@@ -376,38 +502,72 @@ struct AccountRowView: View {
         .popover(isPresented: $showsBillingDetails, arrowEdge: .bottom) {
             BillingStatusView(snapshot: snapshot, planLabel: profile.planLabel)
                 .padding(DS.Spacing.md)
-                .frame(width: 300)
+                .frame(width: 320)
         }
     }
 
-    // MARK: Row 2 — compact window gauges
+    @ViewBuilder
+    private var featuredGauge: some View {
+        let groups = presentation.gauges
+        if let featured = groups.featured {
+            UsageGauge(
+                window: featured,
+                estimate: estimates[featured.id],
+                isFeatured: true
+            )
+        } else {
+            Label("Usage unavailable", systemImage: "gauge.with.dots.needle.33percent")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+    }
 
     @ViewBuilder
-    private var gauges: some View {
-        let groups = presentation.gauges
-
-        if !groups.visible.isEmpty {
-            LazyVGrid(columns: gaugeColumns, alignment: .leading, spacing: DS.Spacing.sm) {
-                ForEach(groups.visible) { window in
+    private var atAGlanceGauges: some View {
+        let windows = presentation.gauges.atAGlanceAdditional
+        if !windows.isEmpty {
+            LazyVGrid(columns: compactGaugeColumns, alignment: .leading, spacing: DS.Spacing.md) {
+                ForEach(windows) { window in
                     UsageGauge(window: window, estimate: estimates[window.id])
                 }
             }
+            .transition(.opacity.combined(with: .move(edge: .top)))
         }
+    }
 
-        // When an inactive account's windows have all rolled over, the gauges
-        // above are the last reading from *before* the reset — flag them so the
-        // stale bars don't contradict the green "quota restored" note below.
-        if groups.showsPreResetNote, let last = snapshot?.lastRefreshed {
-            Label(
-                "Last reading before reset — checked \(last.formatted(.relative(presentation: .named)))",
-                systemImage: "clock.arrow.circlepath"
-            )
-            .font(.caption2)
-            .foregroundStyle(.tertiary)
-        }
+    private var hasExpandableDetails: Bool {
+        !presentation.gauges.disclosedAdditional.isEmpty
+            || presentation.gauges.showsPreResetNote
+            || presentation.gauges.needsSessionCaptureNote
+    }
 
-        if groups.needsSessionCaptureNote {
-            HStack(spacing: DS.Spacing.sm) {
+    @ViewBuilder
+    private var expandedDetails: some View {
+        let groups = presentation.gauges
+
+        VStack(alignment: .leading, spacing: DS.Spacing.md) {
+            if !groups.disclosedAdditional.isEmpty {
+                Rectangle()
+                    .fill(Color.primary.opacity(0.07))
+                    .frame(height: 1)
+
+                LazyVGrid(columns: gaugeColumns, alignment: .leading, spacing: DS.Spacing.md) {
+                    ForEach(groups.disclosedAdditional) { window in
+                        UsageGauge(window: window, estimate: estimates[window.id])
+                    }
+                }
+            }
+
+            if groups.showsPreResetNote, let last = snapshot?.lastRefreshed {
+                Label(
+                    "Last reading before reset — checked \(last.formatted(.relative(presentation: .named)))",
+                    systemImage: "clock.arrow.circlepath"
+                )
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            }
+
+            if groups.needsSessionCaptureNote {
                 Label("Session not captured", systemImage: "clock.badge.questionmark")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
@@ -417,7 +577,11 @@ struct AccountRowView: View {
     }
 
     private var gaugeColumns: [GridItem] {
-        [GridItem(.adaptive(minimum: 118), spacing: DS.Spacing.md, alignment: .top)]
+        [GridItem(.adaptive(minimum: 220), spacing: DS.Spacing.lg, alignment: .top)]
+    }
+
+    private var compactGaugeColumns: [GridItem] {
+        [GridItem(.adaptive(minimum: 180), spacing: DS.Spacing.lg, alignment: .top)]
     }
 
     // MARK: Actionable status strip (omitted for ordinary accounts)
@@ -461,149 +625,15 @@ struct AccountRowView: View {
 
             }
             .lineLimit(2)
-            .padding(.horizontal, DS.Spacing.sm)
-            .padding(.vertical, DS.Spacing.tight)
+            .padding(.horizontal, DS.Spacing.md)
+            .padding(.vertical, DS.Spacing.sm)
             .background(
                 (problem.map { DS.presentationColor($0.tone) }
                     ?? note.map { DS.presentationColor($0.tone) }
-                    ?? Color.secondary).opacity(0.08),
+                    ?? Color.secondary).opacity(0.065),
                 in: RoundedRectangle(cornerRadius: DS.Radius.small, style: .continuous)
             )
-        }
-    }
-
-    @ViewBuilder
-    private var switchButton: some View {
-        Button {
-            switchCLI()
-        } label: {
-            Label(presentation.switchTitle == "Best" ? "Best switch" : presentation.switchTitle,
-                  systemImage: "arrow.triangle.2.circlepath")
-                .font(.caption.weight(.medium))
-        }
-        .compactGlassButton(tint: presentation.highlightsSwitch ? .green : nil)
-        .disabled(!hasStoredSnapshot)
-        .help(presentation.switchHelp)
-    }
-}
-
-struct TopUsageSummaryView: View {
-    let profiles: [AccountProfile]
-    let snapshots: [UUID: UsageSnapshot]
-
-    var body: some View {
-        HStack(spacing: 0) {
-            summarySegment(provider: .claude)
-
-            Rectangle()
-                .fill(Color.primary.opacity(0.10))
-                .frame(width: 1, height: 34)
-                .padding(.horizontal, DS.Spacing.xs)
-
-            summarySegment(provider: .codex)
-        }
-        .padding(.vertical, DS.Spacing.xs)
-        .fixedSize(horizontal: false, vertical: true)
-        .background(
-            Color.primary.opacity(0.035),
-            in: RoundedRectangle(cornerRadius: DS.Radius.medium, style: .continuous)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: DS.Radius.medium, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.07), lineWidth: 0.5)
-        }
-    }
-
-    private func summarySegment(provider: Provider) -> some View {
-        let active = profiles.first { $0.provider == provider && $0.isActiveCLI }
-        let snapshot = active.flatMap { snapshots[$0.id] }
-
-        return HStack(spacing: DS.Spacing.sm) {
-            Image(systemName: DS.providerSymbol(provider))
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(DS.providerAccent(provider))
-                .frame(width: 18, height: 18)
-
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: DS.Spacing.xs) {
-                    Text(provider.displayName)
-                        .font(.caption.weight(.semibold))
-                    Text(snapshot.map(summaryValue) ?? "–")
-                        .font(.caption.monospacedDigit().weight(.bold))
-                        .foregroundStyle(snapshot.map { DS.billingColor($0.billingUsageMode) } ?? .secondary)
-                        .contentTransition(.numericText())
-                        .animation(.default, value: snapshot.map(summaryValue) ?? "–")
-                }
-
-                Text(summaryDetail(active: active, snapshot: snapshot))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .help(summaryHelp(active: active, snapshot: snapshot))
-            }
-
-            Spacer(minLength: 0)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, DS.Spacing.sm)
-    }
-
-    private func summaryDetail(active: AccountProfile?, snapshot: UsageSnapshot?) -> String {
-        guard let active else { return "No active CLI account" }
-        if let snapshot, let caption = windowsCaption(for: snapshot) {
-            return "\(active.label)  ·  \(caption.text)"
-        }
-        if let snapshot, let billing = noteworthyBillingBadge(for: snapshot.billingUsageMode) {
-            return "\(active.label)  ·  \(billing.text)"
-        }
-        return "\(active.label)  ·  No snapshot"
-    }
-
-    private func summaryHelp(active: AccountProfile?, snapshot: UsageSnapshot?) -> String {
-        guard let active else { return "No active CLI account detected" }
-        var lines = ["Active terminal account: \(active.label)"]
-        if let snapshot, let caption = windowsCaption(for: snapshot) {
-            lines.append(caption.help)
-        }
-        return lines.joined(separator: "\n")
-    }
-
-    private func summaryValue(for snapshot: UsageSnapshot) -> String {
-        guard let usedFraction = snapshot.primaryConstrainedWindow?.usedFraction else {
-            return "–"
-        }
-
-        return "\(Int((usedFraction * 100).rounded()))%"
-    }
-
-    /// "S 53% · W 8%" — both windows at a glance under the big number.
-    private func windowsCaption(for snapshot: UsageSnapshot) -> (text: String, help: String)? {
-        var parts: [String] = []
-        var helpParts: [String] = []
-        if let session = snapshot.window(ofKind: .session) {
-            parts.append("S \(Int(session.usedPercent.rounded()))%")
-            helpParts.append("\(session.label): \(Int(session.usedPercent.rounded()))% used")
-        }
-        if let weekly = snapshot.window(ofKind: .weekly) {
-            parts.append("W \(Int(weekly.usedPercent.rounded()))%")
-            helpParts.append("\(weekly.label): \(Int(weekly.usedPercent.rounded()))% used")
-        }
-        guard !parts.isEmpty else {
-            return nil
-        }
-        return (parts.joined(separator: " · "), helpParts.joined(separator: "\n"))
-    }
-
-    private func noteworthyBillingBadge(for mode: BillingUsageMode) -> (text: String, color: Color)? {
-        switch mode {
-        case .overLimitPayAsYouGo:
-            return ("Pay-as-you-go", .red)
-        case .payAsYouGoVisible:
-            return ("Credits visible", .orange)
-        case .needsLogin:
-            return ("Needs login", DS.staleAmber)
-        case .includedSubscription, .includedSubscriptionNearLimit, .unknown:
-            return nil
+            .transition(.opacity.combined(with: .move(edge: .top)))
         }
     }
 }
@@ -613,31 +643,35 @@ struct TopUsageSummaryView: View {
 struct BillingStatusView: View {
     let snapshot: UsageSnapshot?
     var planLabel: String? = nil
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: DS.Spacing.sm) {
             Label(title, systemImage: icon)
-                .font(.caption.weight(.semibold))
+                .font(.subheadline.weight(.medium))
                 .foregroundStyle(color)
                 .symbolRenderingMode(.hierarchical)
-                .lineLimit(1)
+                .fixedSize(horizontal: false, vertical: true)
             Text(detail)
-                .font(.caption2)
+                .font(.caption)
                 .foregroundStyle(.secondary)
-                .lineLimit(4)
+                .fixedSize(horizontal: false, vertical: true)
             if let planLabel, !planLabel.isEmpty {
-                Text("Plan: \(planLabel)")
+                Label("\(planLabel) plan", systemImage: "person.text.rectangle")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.tertiary)
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
+        .padding(DS.Spacing.lg)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            color.opacity(0.10),
-            in: RoundedRectangle(cornerRadius: DS.Radius.small, style: .continuous)
+            reduceTransparency ? Color(nsColor: .controlBackgroundColor) : color.opacity(0.055),
+            in: RoundedRectangle(cornerRadius: DS.Radius.medium, style: .continuous)
         )
+        .overlay {
+            RoundedRectangle(cornerRadius: DS.Radius.medium, style: .continuous)
+                .strokeBorder(color.opacity(0.12), lineWidth: 0.5)
+        }
     }
 
     private var mode: BillingUsageMode {
@@ -731,18 +765,19 @@ struct BillingStatusView: View {
     }
 }
 
-/// A compact quota column. Reset and burn-rate details stay available in the
-/// tooltip so three independent windows can remain legible on one card row.
+/// A compact quota gauge used for both the featured limit and disclosed detail.
 struct UsageGauge: View {
     let window: UsageWindow
     var estimate: BurnRateEstimate? = nil
+    var isFeatured = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 60)) { context in
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: isFeatured ? 5 : 4) {
                 HStack(spacing: DS.Spacing.xs) {
                     Text(window.label)
-                        .font(.caption2.weight(.medium))
+                        .font(isFeatured ? .caption.weight(.medium) : .caption2.weight(.medium))
                         .lineLimit(1)
                         .help(window.label)
 
@@ -755,10 +790,16 @@ struct UsageGauge: View {
                     }
 
                     Text(usageValue)
-                        .font(.caption2.weight(.bold))
+                        .font(
+                            .system(
+                                size: isFeatured ? 12 : 11,
+                                weight: .semibold,
+                                design: .rounded
+                            )
+                        )
                         .monospacedDigit()
                         .contentTransition(.numericText())
-                        .animation(.default, value: usageValue)
+                        .animation(reduceMotion ? nil : DS.Motion.quick, value: usageValue)
                 }
 
                 GeometryReader { proxy in
@@ -766,12 +807,12 @@ struct UsageGauge: View {
                         Capsule()
                             .fill(Color.primary.opacity(0.09))
                         Capsule()
-                            .fill(riskColor.gradient)
+                            .fill(riskColor)
                             .frame(width: fillWidth(in: proxy.size.width))
                     }
-                    .animation(.spring(duration: 0.5, bounce: 0.15), value: window.usedFraction)
+                    .animation(reduceMotion ? nil : DS.Motion.progress, value: window.usedFraction)
                 }
-                .frame(height: 6)
+                .frame(height: isFeatured ? 7 : 5)
 
                 if let resetText = UsageResetTiming.compactText(
                     resetDate: window.resetDate,
@@ -919,8 +960,8 @@ struct AccountCardPreviewGallery: View {
             }
             .padding(10)
         }
-        .background(AmbientUsageBackground())
-        .frame(width: 480, height: 620)
+        .background(CalmWindowBackground())
+        .frame(width: DS.Popover.width, height: DS.Popover.height)
     }
 
     @ViewBuilder
@@ -970,6 +1011,7 @@ struct AccountCardPreviewGallery: View {
             snapshot: snapshot,
             hasStoredSnapshot: hasStoredSnapshot,
             estimates: estimates,
+            isExpanded: .constant(id == 6),
             historyRecords: { [] },
             switchCLI: {},
             openDashboard: {},
