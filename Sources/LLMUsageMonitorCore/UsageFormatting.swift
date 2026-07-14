@@ -56,3 +56,33 @@ public enum DurationPhrase {
         return "\(days)d"
     }
 }
+
+/// User-facing reset timing shared by quota gauges. A parsed date wins over
+/// provider text so relative copy stays current instead of freezing at the
+/// wording captured with the snapshot.
+public enum UsageResetTiming {
+    public static func compactText(
+        resetDate: Date?,
+        resetDescription: String?,
+        now: Date = Date()
+    ) -> String? {
+        if let resetDate {
+            guard resetDate > now else {
+                return "Reset passed"
+            }
+            return "Resets in \(DurationPhrase.short(resetDate.timeIntervalSince(now)))"
+        }
+
+        guard let resetDescription else {
+            return nil
+        }
+        let description = resetDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !description.isEmpty else {
+            return nil
+        }
+        if description.lowercased().hasPrefix("reset") {
+            return description.prefix(1).uppercased() + description.dropFirst()
+        }
+        return "Resets \(description)"
+    }
+}

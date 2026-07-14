@@ -18,7 +18,9 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         popover.behavior = .transient
         popover.delegate = self
         popover.contentSize = NSSize(width: 480, height: 620)
-        popover.contentViewController = NSHostingController(rootView: MenuRootView(state: state))
+        popover.contentViewController = NSHostingController(
+            rootView: MenuRootView(state: state, settings: state.settings)
+        )
 
         if let button = statusItem.button {
             button.imagePosition = .imageLeading

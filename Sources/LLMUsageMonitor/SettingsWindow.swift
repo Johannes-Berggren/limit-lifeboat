@@ -113,6 +113,10 @@ struct SettingsView: View {
                     }
                 }
 
+                Section("Appearance") {
+                    Toggle("Show organization names", isOn: $settings.showOrganizationNames)
+                }
+
                 Section("Notifications") {
                     Toggle("Warn when included usage nears its limit", isOn: $settings.usageAlertsEnabled)
                     Toggle("Alert when an account's quota is likely back", isOn: $settings.resetAlertsEnabled)

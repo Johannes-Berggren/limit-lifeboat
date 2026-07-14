@@ -74,9 +74,10 @@ public struct AccountRowPresentation: Equatable, Sendable {
         hasStoredSnapshot: Bool,
         refreshState: AccountRefreshState,
         adviceReason: String?,
+        showOrganizationName: Bool = true,
         now: Date = Date()
     ) {
-        self.identityText = Self.identityText(profile)
+        self.identityText = Self.identityText(profile, showOrganizationName: showOrganizationName)
         self.riskLevel = snapshot?.riskLevel ?? .unknown
         self.refreshProblem = Self.refreshProblem(
             state: refreshState,
@@ -106,13 +107,15 @@ public struct AccountRowPresentation: Equatable, Sendable {
         }
     }
 
-    private static func identityText(_ profile: AccountProfile) -> String {
+    private static func identityText(_ profile: AccountProfile, showOrganizationName: Bool) -> String {
         var parts: [String] = []
         if let identity = profile.identity {
             if let primary = identity.primaryLabel {
                 parts.append(primary)
             }
-            if let organization = identity.organization, !organization.isEmpty {
+            if showOrganizationName,
+               let organization = identity.organization,
+               !organization.isEmpty {
                 parts.append(organization)
             }
         }

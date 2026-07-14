@@ -55,9 +55,9 @@ provider and the `…` menu per account). Browser, Claude Desktop, ChatGPT
 Desktop, and CLI sessions are separate: switching affects the CLI only.
 
 Settings (the gear in the popover footer, or ⌘,) cover the refresh
-interval, launch at login, and both notification types. The app checks
-GitHub once a day for a newer release and links to the download when one
-exists — it never updates itself.
+interval, launch at login, organization-name visibility, and both notification
+types. The app checks GitHub once a day for a newer release and links to the
+download when one exists — it never updates itself.
 
 ### Dashboard fallback
 

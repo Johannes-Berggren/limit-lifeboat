@@ -2,6 +2,53 @@ import XCTest
 @testable import LLMUsageMonitorCore
 
 final class AccountRowPresentationTests: XCTestCase {
+    func testIdentityTextShowsOrganizationByDefault() {
+        let profile = AccountProfile(
+            provider: .claude,
+            label: "Work",
+            planLabel: "Team",
+            identity: AccountIdentity(
+                email: "person@example.com",
+                organization: "Acme",
+                source: .claudeCodeUsage
+            )
+        )
+
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: nil,
+            hasStoredSnapshot: true,
+            refreshState: .idle,
+            adviceReason: nil
+        )
+
+        XCTAssertEqual(presentation.identityText, "person@example.com • Acme • Team")
+    }
+
+    func testIdentityTextCanHideOrganizationWithoutHidingPrimaryIdentityOrPlan() {
+        let profile = AccountProfile(
+            provider: .claude,
+            label: "Work",
+            planLabel: "Team",
+            identity: AccountIdentity(
+                email: "person@example.com",
+                organization: "Acme",
+                source: .claudeCodeUsage
+            )
+        )
+
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: nil,
+            hasStoredSnapshot: true,
+            refreshState: .idle,
+            adviceReason: nil,
+            showOrganizationName: false
+        )
+
+        XCTAssertEqual(presentation.identityText, "person@example.com • Team")
+    }
+
     func testFailureTakesPrecedenceAndRemainsRetryable() {
         let profile = AccountProfile(provider: .claude, label: "Claude", isActiveCLI: true)
         let presentation = AccountRowPresentation(

@@ -366,6 +366,49 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(DurationPhrase.short(5 * 24 * 3_600), "5d")
     }
 
+    func testUsageResetTimingFormatsFutureDatesAcrossDurationTiers() {
+        let now = Date(timeIntervalSince1970: 1_783_000_000)
+
+        XCTAssertEqual(
+            UsageResetTiming.compactText(resetDate: now.addingTimeInterval(3 * 60), resetDescription: nil, now: now),
+            "Resets in 3m"
+        )
+        XCTAssertEqual(
+            UsageResetTiming.compactText(resetDate: now.addingTimeInterval(3 * 3_600), resetDescription: nil, now: now),
+            "Resets in 3h"
+        )
+        XCTAssertEqual(
+            UsageResetTiming.compactText(resetDate: now.addingTimeInterval(3 * 24 * 3_600), resetDescription: nil, now: now),
+            "Resets in 3d"
+        )
+    }
+
+    func testUsageResetTimingMarksElapsedDateAndPrefersItOverProviderText() {
+        let now = Date(timeIntervalSince1970: 1_783_000_000)
+
+        XCTAssertEqual(
+            UsageResetTiming.compactText(
+                resetDate: now.addingTimeInterval(-1),
+                resetDescription: "tomorrow",
+                now: now
+            ),
+            "Reset passed"
+        )
+    }
+
+    func testUsageResetTimingNormalizesProviderTextFallback() {
+        XCTAssertEqual(
+            UsageResetTiming.compactText(resetDate: nil, resetDescription: " in 5h "),
+            "Resets in 5h"
+        )
+        XCTAssertEqual(
+            UsageResetTiming.compactText(resetDate: nil, resetDescription: "resets Tuesday"),
+            "Resets Tuesday"
+        )
+        XCTAssertNil(UsageResetTiming.compactText(resetDate: nil, resetDescription: "  "))
+        XCTAssertNil(UsageResetTiming.compactText(resetDate: nil, resetDescription: nil))
+    }
+
     func testMostConstrainedWindowPicksHighestUsedPercent() {
         let snapshot = makeSnapshot(windows: [
             makeWindow(id: "session", kind: .session, usedPercent: 23),
