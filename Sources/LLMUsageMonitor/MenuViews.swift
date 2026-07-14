@@ -3,6 +3,7 @@ import SwiftUI
 
 struct MenuRootView: View {
     @ObservedObject var state: AppState
+    @ObservedObject var settings: SettingsStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -172,6 +173,7 @@ struct MenuRootView: View {
                             : (state.refreshStates[profile.id] ?? .idle),
                         estimates: state.burnRateEstimates[profile.id] ?? [:],
                         adviceReason: advisedID == profile.id ? state.switchAdvice[provider]?.reason : nil,
+                        showOrganizationName: settings.showOrganizationNames,
                         historyRecords: { state.historyRecords(for: profile) },
                         switchCLI: { state.switchCLI(to: profile) },
                         openDashboard: { state.openDashboard(for: profile) },
@@ -239,6 +241,7 @@ struct AccountRowView: View {
     let estimates: [String: BurnRateEstimate]
     /// Non-nil exactly when this account is the advised switch target.
     var adviceReason: String? = nil
+    var showOrganizationName: Bool = true
     let historyRecords: () -> [UsageHistoryRecord]
     let switchCLI: () -> Void
     let openDashboard: () -> Void
@@ -259,7 +262,8 @@ struct AccountRowView: View {
             snapshot: snapshot,
             hasStoredSnapshot: hasStoredSnapshot,
             refreshState: refreshState,
-            adviceReason: adviceReason
+            adviceReason: adviceReason,
+            showOrganizationName: showOrganizationName
         )
     }
 
@@ -756,11 +760,25 @@ struct UsageGauge: View {
                 .animation(.spring(duration: 0.5, bounce: 0.15), value: window.usedFraction)
             }
             .frame(height: 6)
+
+            TimelineView(.periodic(from: .now, by: 60)) { context in
+                if let resetText = UsageResetTiming.compactText(
+                    resetDate: window.resetDate,
+                    resetDescription: window.resetDescription,
+                    now: context.date
+                ) {
+                    Text(resetText)
+                        .font(.caption2)
+                        .foregroundStyle(window.resetHasElapsed(asOf: context.date) ? .secondary : .tertiary)
+                        .lineLimit(1)
+                        .monospacedDigit()
+                }
+            }
         }
         .help(gaugeHelp)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(window.label)
-        .accessibilityValue("\(usageValue) used")
+        .accessibilityValue(accessibilityValue)
     }
 
     private var resetHelp: String? {
@@ -780,6 +798,17 @@ struct UsageGauge: View {
 
     private var usageValue: String {
         "\(Int(window.usedPercent.rounded()))%"
+    }
+
+    private var accessibilityValue: String {
+        var parts = ["\(usageValue) used"]
+        if let resetText = UsageResetTiming.compactText(
+            resetDate: window.resetDate,
+            resetDescription: window.resetDescription
+        ) {
+            parts.append(resetText)
+        }
+        return parts.joined(separator: ", ")
     }
 
     private var gaugeHelp: String {

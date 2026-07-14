@@ -26,6 +26,12 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(resetAlertsEnabled, forKey: Keys.resetAlertsEnabled) }
     }
 
+    /// Controls the organization component of account-card subtitles. The
+    /// identity remains stored and available for account matching either way.
+    @Published var showOrganizationNames: Bool {
+        didSet { defaults.set(showOrganizationNames, forKey: Keys.showOrganizationNames) }
+    }
+
     var lastUpdateCheck: Date? {
         get { defaults.object(forKey: Keys.lastUpdateCheck) as? Date }
         set { defaults.set(newValue, forKey: Keys.lastUpdateCheck) }
@@ -42,6 +48,7 @@ final class SettingsStore: ObservableObject {
         self.usageAlertsEnabled = defaults.object(forKey: Keys.usageAlertsEnabled) as? Bool ?? true
         self.autoSwitchEnabled = defaults.object(forKey: Keys.autoSwitchEnabled) as? Bool ?? false
         self.resetAlertsEnabled = defaults.object(forKey: Keys.resetAlertsEnabled) as? Bool ?? true
+        self.showOrganizationNames = defaults.object(forKey: Keys.showOrganizationNames) as? Bool ?? true
     }
 
     private enum Keys {
@@ -49,6 +56,7 @@ final class SettingsStore: ObservableObject {
         static let usageAlertsEnabled = "usageAlertsEnabled"
         static let autoSwitchEnabled = "autoSwitchEnabled"
         static let resetAlertsEnabled = "resetAlertsEnabled"
+        static let showOrganizationNames = "showOrganizationNames"
         static let lastUpdateCheck = "lastUpdateCheck"
     }
 }
