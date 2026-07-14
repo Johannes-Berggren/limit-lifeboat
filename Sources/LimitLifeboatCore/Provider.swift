@@ -60,13 +60,18 @@ public enum Provider: String, Codable, CaseIterable, Identifiable, Sendable {
     /// exit non-zero (e.g. no session it recognizes, or a changed CLI exit
     /// code), and with `&&` that would short-circuit and never run
     /// `codex login` — leaving the terminal looking like it did nothing.
-    public func terminalLoginCommand(hasExistingSession: Bool) -> String {
+    public func terminalLoginCommand(
+        hasExistingSession: Bool,
+        exitWhenDone: Bool = false
+    ) -> String {
+        let command: String
         switch self {
         case .claude:
-            return loginCommand
+            command = loginCommand
         case .codex:
-            return hasExistingSession ? "\(commandName) logout; \(commandName) login" : loginCommand
+            command = hasExistingSession ? "\(commandName) logout; \(commandName) login" : loginCommand
         }
+        return exitWhenDone ? "\(command); exit" : command
     }
 }
 

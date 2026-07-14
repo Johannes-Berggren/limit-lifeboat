@@ -11,8 +11,10 @@ public enum AccountRefreshState: Equatable, Sendable {
     case ok
     /// A transient read failure (network, server, malformed) — retryable.
     case readFailed(reason: String)
-    /// The account has no usable captured credentials yet; the user must log in.
-    case needsLogin
+    /// The account has no usable captured credentials, or its saved refresh
+    /// token can no longer recover the session. The reason is safe to surface
+    /// to the user and must never contain credential material.
+    case needsLogin(reason: String)
     /// The Keychain is locked or access was denied — distinct from "no
     /// credentials" so the UI can prompt to grant access rather than hiding the
     /// account's Switch affordance.
@@ -26,6 +28,13 @@ public enum AccountRefreshState: Equatable, Sendable {
         case .readFailed, .needsLogin, .keychainLocked:
             return true
         }
+    }
+
+    public var requiresLogin: Bool {
+        if case .needsLogin = self {
+            return true
+        }
+        return false
     }
 }
 
@@ -51,18 +60,29 @@ public enum RefreshOutcomePolicy {
         case .noCredentials:
             // Expected until the account has been the active login once. No CLI
             // fallback — there is nothing to read.
-            return RefreshOutcome(state: .needsLogin, attemptTUIFallback: false)
+            return RefreshOutcome(
+                state: .needsLogin(reason: "No captured OAuth credentials are available for this account."),
+                attemptTUIFallback: false
+            )
         case .keychainLocked:
             return RefreshOutcome(state: .keychainLocked, attemptTUIFallback: false)
         case .unauthorized:
-            // The token is revoked/expired past what a refresh could fix. The
-            // active account can still try the local CLI probe; an inactive one
-            // needs to be logged into again.
+            // The API already tried one forced token refresh. A second
+            // rejection confirms that this saved login needs user recovery;
+            // retain the last reading instead of letting a CLI fallback hide
+            // the expired-login state.
             return RefreshOutcome(
-                state: isActiveCLI ? .refreshing : .needsLogin,
-                attemptTUIFallback: isActiveCLI
+                state: .needsLogin(reason: "The provider rejected this account's credentials."),
+                attemptTUIFallback: false
             )
         case .refreshFailed(let underlying):
+            if let oauthError = underlying as? ClaudeOAuthError,
+               oauthError.requiresLogin {
+                return RefreshOutcome(
+                    state: .needsLogin(reason: reason(oauthError)),
+                    attemptTUIFallback: false
+                )
+            }
             return RefreshOutcome(
                 state: .readFailed(reason: reason(underlying)),
                 attemptTUIFallback: isActiveCLI

@@ -64,10 +64,16 @@ artifacts are only published on the
   account's saved OAuth credentials, with Claude Code's local `/usage` view as
   a fallback. Codex usage is read from recent local Codex session data.
   Inactive accounts retain their last reading and show its age.
+- **Expired logins stay actionable.** Recoverable Claude credentials refresh
+  silently. Rejected logins retain their last reading and show a **Log In**
+  action without opening a background dialog; Retry and Switch can offer to
+  authenticate again.
 - **Switching is explicit.** Selecting **Switch CLI to this account** first
   captures the current login, backs up the files it will touch, restores the
   chosen snapshot, and verifies the result. A conflicting change from another
-  process wins and the app asks you to retry.
+  process wins and the app asks you to retry. Codex snapshots are force-
+  refreshed and identity-checked in isolation before the live login changes;
+  automatic switching skips targets that cannot be verified.
 - **Warnings are optional.** The app can notify you when an account is nearing
   a limit or when a previously depleted account is likely available again.
 - **Updates are user-controlled.** Limit Lifeboat checks GitHub at most once a

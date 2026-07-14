@@ -39,6 +39,7 @@ final class AppState: ObservableObject {
     private let codexLocalUsageReader = CodexLocalUsageReader()
     private let claudeCodeUsageReader = ClaudeCodeUsageReader()
     private let claudeUsageService: ClaudeAccountUsageService
+    private let codexAuthPreflightService = CodexAuthPreflightService()
     private let dashboardWindowManager = DashboardWindowManager()
     private let usageAlertController = UsageAlertController()
     private let resetAlertPlanner = ResetAlertPlanner()
@@ -281,7 +282,8 @@ final class AppState: ObservableObject {
                         profileID: profile.id,
                         label: profile.label,
                         isActiveCLI: profile.isActiveCLI,
-                        hasStoredCredentials: hasStoredSnapshot(for: profile),
+                        hasStoredCredentials: hasStoredSnapshot(for: profile)
+                            && !(refreshStates[profile.id]?.requiresLogin ?? false),
                         snapshot: snapshots[profile.id]
                     )
                 }
@@ -314,13 +316,16 @@ final class AppState: ObservableObject {
         lastAutoSwitchAttempt[provider] = now
 
         let previousLabel = activeProfile(for: provider)?.label
-        if switchCLI(to: target, interactive: false) {
-            usageAlertController.handleAutoSwitch(
-                fromLabel: previousLabel,
-                toLabel: target.label,
-                provider: provider,
-                reason: advice.reason
-            )
+        Task { [weak self] in
+            guard let self else { return }
+            if await self.switchCLI(to: target, interactive: false) {
+                self.usageAlertController.handleAutoSwitch(
+                    fromLabel: previousLabel,
+                    toLabel: target.label,
+                    provider: provider,
+                    reason: advice.reason
+                )
+            }
         }
     }
 
@@ -851,23 +856,56 @@ final class AppState: ObservableObject {
     /// skips confirmation dialogs and reports problems via status/notification
     /// text instead of modals. Returns whether the switch happened.
     @discardableResult
-    func switchCLI(to profile: AccountProfile, interactive: Bool = true) -> Bool {
+    func switchCLI(to profile: AccountProfile, interactive: Bool = true) async -> Bool {
         if interactive, CredentialAccess.currentMode != .userInitiated {
-            return CredentialAccess.userInitiated(
+            return await CredentialAccess.userInitiated(
                 reason: "switch the CLI to \(profile.label)"
             ) {
                 storedSnapshotStatuses[profile.id] = readStoredSnapshotStatus(for: profile)
-                return switchCLI(to: profile, interactive: true)
+                return await switchCLI(to: profile, interactive: true)
             }
         }
 
         guard hasStoredSnapshot(for: profile) else {
-            reportSwitchProblem(
-                interactive: interactive,
-                message: "No saved credentials for \(profile.label)",
-                details: "Log into this account once in the terminal (\(profile.provider.loginCommand)); the app captures its credentials automatically."
+            refreshStates[profile.id] = .needsLogin(
+                reason: "No saved credentials are available for this account."
+            )
+            handleLoginRequired(
+                for: profile,
+                reason: "No saved credentials are available. Log in once and the app will capture them automatically.",
+                interactive: interactive
             )
             return false
+        }
+
+        if case .needsLogin(let reason) = refreshStates[profile.id] {
+            handleLoginRequired(for: profile, reason: reason, interactive: interactive)
+            return false
+        }
+
+        switch await preflightSwitchTarget(profile) {
+        case .ready:
+            break
+        case .requiresLogin(let reason):
+            refreshStates[profile.id] = .needsLogin(reason: reason)
+            handleLoginRequired(for: profile, reason: reason, interactive: interactive)
+            updateSwitchAdvice()
+            return false
+        case .temporarilyUnavailable(let reason):
+            refreshStates[profile.id] = .readFailed(reason: reason)
+            updateSwitchAdvice()
+            if !interactive {
+                statusMessage = "Automatic switch skipped: \(profile.label) could not be verified. \(reason)"
+                return false
+            }
+            let alert = NSAlert()
+            alert.messageText = "Could not verify \(profile.label)"
+            alert.informativeText = "\(reason) You can switch anyway, but the CLI may ask you to log in."
+            alert.addButton(withTitle: "Switch Anyway")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else {
+                return false
+            }
         }
 
         if interactive, cliSwitcher.hasActiveProcesses(provider: profile.provider) {
@@ -883,13 +921,25 @@ final class AppState: ObservableObject {
 
         // Capture the currently active login first so nothing is lost.
         let outgoingObservation: LiveCredentialObservation
+        let liveAlreadyTargetsProfile: Bool
         do {
             outgoingObservation = try cliSwitcher.stableLiveObservation(provider: profile.provider)
-            _ = try reconcileLiveCredentials(
-                provider: profile.provider,
-                origin: interactive ? .manualSwitch : .automaticSwitch,
-                observation: outgoingObservation
-            )
+            let targetIdentity = profiles.first(where: { $0.id == profile.id })?.identity
+                ?? profile.identity
+            liveAlreadyTargetsProfile = targetIdentity.map { target in
+                outgoingObservation.identity.map(target.matches) == true
+            } ?? false
+
+            // The live login can change while an async preflight is running.
+            // If it already became the target, do not capture its older live
+            // credentials over the freshly refreshed target snapshot.
+            if !liveAlreadyTargetsProfile {
+                _ = try reconcileLiveCredentials(
+                    provider: profile.provider,
+                    origin: interactive ? .manualSwitch : .automaticSwitch,
+                    observation: outgoingObservation
+                )
+            }
         } catch {
             statusMessage = "Switch cancelled: \(error.localizedDescription)"
             reportSwitchProblem(
@@ -903,7 +953,8 @@ final class AppState: ObservableObject {
         // Snapshot the outgoing Codex account's usage while auth.json still
         // belongs to it — Codex has no inactive polling, so this is how it
         // keeps its own last-known reading once it goes inactive.
-        if profile.provider == .codex,
+        if !liveAlreadyTargetsProfile,
+           profile.provider == .codex,
            let outgoing = activeProfile(for: .codex),
            outgoing.id != profile.id,
            var snapshot = codexLocalUsageReader.readUsage(for: outgoing) {
@@ -944,6 +995,7 @@ final class AppState: ObservableObject {
             )
 
             statusMessage = "Switched \(profile.provider.displayName) CLI to \(profile.label)."
+            refreshStates[profile.id] = .ok
             if interactive {
                 lastManualSwitchAt[profile.provider] = Date()
                 Task {
@@ -970,6 +1022,116 @@ final class AppState: ObservableObject {
                 reportSwitchProblem(interactive: interactive, message: "Switch failed", details: error.localizedDescription)
             }
             return false
+        }
+    }
+
+    private enum SwitchPreflightResult {
+        case ready
+        case requiresLogin(reason: String)
+        case temporarilyUnavailable(reason: String)
+    }
+
+    private func preflightSwitchTarget(_ profile: AccountProfile) async -> SwitchPreflightResult {
+        switch profile.provider {
+        case .claude:
+            do {
+                let snapshot = try await claudeUsageService.fetchSnapshot(
+                    for: profile,
+                    isActiveCLI: profile.isActiveCLI,
+                    accessMode: CredentialAccess.currentMode
+                )
+                applySnapshot(snapshot, for: profile)
+                return .ready
+            } catch {
+                let fetchError = (error as? ClaudeAccountUsageFetchError) ?? .transport(error)
+                let outcome = RefreshOutcomePolicy.outcome(for: fetchError, isActiveCLI: profile.isActiveCLI)
+                if case .needsLogin(let reason) = outcome.state {
+                    return .requiresLogin(reason: reason)
+                }
+                if case .keychainLocked = outcome.state {
+                    return .temporarilyUnavailable(reason: "Keychain access is required to verify this account.")
+                }
+                return .temporarilyUnavailable(reason: error.localizedDescription)
+            }
+        case .codex:
+            return await preflightCodexSwitchTarget(profile)
+        }
+    }
+
+    private func preflightCodexSwitchTarget(_ profile: AccountProfile) async -> SwitchPreflightResult {
+        guard let executablePath = cliSwitcher.resolveExecutablePath(command: Provider.codex.commandName) else {
+            return .temporarilyUnavailable(reason: "The Codex executable could not be found.")
+        }
+
+        for _ in 0..<2 {
+            do {
+                guard let fingerprint = try cliSwitcher.storedCredentialFingerprint(for: profile.id),
+                      let authJSON = try cliSwitcher.storedCodexAuthJSON(for: profile.id) else {
+                    return .requiresLogin(reason: "The saved Codex account has no usable ChatGPT credentials.")
+                }
+                let result = await codexAuthPreflightService.preflight(
+                    authJSON: authJSON,
+                    executableURL: URL(fileURLWithPath: executablePath),
+                    expectedIdentity: profile.identity
+                )
+                switch result {
+                case .requiresLogin(let reason):
+                    return .requiresLogin(reason: reason)
+                case .temporarilyUnavailable(let reason):
+                    return .temporarilyUnavailable(reason: reason)
+                case .ready(let updatedAuthJSON):
+                    if try cliSwitcher.replaceStoredCodexAuthJSON(
+                        updatedAuthJSON,
+                        for: profile.id,
+                        ifSnapshotFingerprintMatches: fingerprint
+                    ) {
+                        storedSnapshotStatuses[profile.id] = .present
+                        if let info = CodexIdentityReader.accountInfo(fromAuthJSON: updatedAuthJSON) {
+                            accountInfoFetched.insert(profile.id)
+                            if AccountProfileUpdater.enrich(
+                                profiles: &profiles,
+                                profileID: profile.id,
+                                enrichment: AccountProfileEnrichment(
+                                    planLabel: info.planLabel,
+                                    identity: info.identity
+                                )
+                            ) {
+                                persistProfiles()
+                            }
+                        }
+                        return .ready
+                    }
+                    // A concurrent capture won. Re-read and preflight that
+                    // newer snapshot once instead of overwriting it.
+                }
+            } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
+                storedSnapshotStatuses[profile.id] = .locked
+                return .temporarilyUnavailable(reason: "Keychain access is required to verify this account.")
+            } catch {
+                return .temporarilyUnavailable(reason: error.localizedDescription)
+            }
+        }
+        return .temporarilyUnavailable(
+            reason: "The saved Codex credentials changed while they were being verified. Try again."
+        )
+    }
+
+    private func handleLoginRequired(
+        for profile: AccountProfile,
+        reason: String,
+        interactive: Bool
+    ) {
+        guard interactive else {
+            statusMessage = "Automatic switch skipped: \(profile.label) needs login."
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Sign in to \(profile.label) again?"
+        alert.informativeText = reason
+        alert.addButton(withTitle: "Log In Again")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn {
+            beginCLILogin(for: profile)
         }
     }
 
@@ -1093,8 +1255,24 @@ final class AppState: ObservableObject {
                 }
             }
         case .codex:
-            refreshCodexUsage(for: profile)
-            refreshStates[profile.id] = .ok
+            if profile.isActiveCLI {
+                refreshCodexUsage(for: profile)
+                refreshStates[profile.id] = .ok
+            } else {
+                switch await preflightCodexSwitchTarget(profile) {
+                case .ready:
+                    refreshCodexUsage(for: profile)
+                    refreshStates[profile.id] = .ok
+                case .requiresLogin(let reason):
+                    refreshStates[profile.id] = .needsLogin(reason: reason)
+                case .temporarilyUnavailable(let reason):
+                    refreshStates[profile.id] = .readFailed(reason: reason)
+                }
+            }
+        }
+
+        if case .needsLogin(let reason) = refreshStates[profile.id] {
+            handleLoginRequired(for: profile, reason: reason, interactive: true)
         }
     }
 
@@ -1142,11 +1320,20 @@ final class AppState: ObservableObject {
                 return
             }
         }
-        let command = terminalLoginCommand(for: profile.provider, hasExistingSession: hasExistingSession)
+        let command = terminalLoginCommand(
+            for: profile.provider,
+            hasExistingSession: hasExistingSession,
+            exitWhenDone: false
+        )
+        let launchedCommand = terminalLoginCommand(
+            for: profile.provider,
+            hasExistingSession: hasExistingSession,
+            exitWhenDone: true
+        )
 
         // Preferred path: drive Terminal via AppleScript (reuses a window when
         // the user has granted Automation permission).
-        let appleScriptError = terminalLauncher.runViaAutomation(command)
+        let appleScriptError = terminalLauncher.runViaAutomation(launchedCommand)
         if appleScriptError == nil {
             statusMessage = "Started login for \(profile.label). The account links automatically after login."
             watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialObservation: initialObservation)
@@ -1158,7 +1345,7 @@ final class AppState: ObservableObject {
         // fall back to a bare Terminal that ran nothing. Instead run the
         // command by opening an executable `.command` file, which needs no
         // Apple Events permission.
-        if terminalLauncher.runViaCommandFile(command) {
+        if terminalLauncher.runViaCommandFile(launchedCommand) {
             statusMessage = "Opened Terminal to log in \(profile.label). The account links automatically after login."
             watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialObservation: initialObservation)
             return
@@ -1178,8 +1365,15 @@ final class AppState: ObservableObject {
     /// executable resolves even when Terminal's default PATH does not include
     /// it (e.g. codex provided by Conductor's bundle). Falls back to the bare
     /// command name when the executable cannot be resolved.
-    private func terminalLoginCommand(for provider: Provider, hasExistingSession: Bool) -> String {
-        let base = provider.terminalLoginCommand(hasExistingSession: hasExistingSession)
+    private func terminalLoginCommand(
+        for provider: Provider,
+        hasExistingSession: Bool,
+        exitWhenDone: Bool
+    ) -> String {
+        let base = provider.terminalLoginCommand(
+            hasExistingSession: hasExistingSession,
+            exitWhenDone: exitWhenDone
+        )
         var pathDirs = ["$HOME/.npm-global/bin", "/opt/homebrew/bin", "/usr/local/bin"]
         if let resolved = cliSwitcher.resolveExecutablePath(command: provider.commandName) {
             let dir = (resolved as NSString).deletingLastPathComponent
@@ -1242,6 +1436,7 @@ final class AppState: ObservableObject {
                 observation: current,
                 preferredLoginProfileID: profileID
             )
+            refreshStates[profileID] = .ok
             await CredentialAccess.nonInteractive { await refreshAll() }
             return profiles.first(where: { $0.id == profileID })?.isActiveCLI == true
         } catch {

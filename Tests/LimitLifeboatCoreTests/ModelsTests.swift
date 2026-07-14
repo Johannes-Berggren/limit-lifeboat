@@ -31,6 +31,22 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(Provider.claude.terminalLoginCommand(hasExistingSession: true), "claude auth login")
     }
 
+    func testAutoLaunchedLoginCommandsExitCleanly() {
+        XCTAssertEqual(
+            Provider.claude.terminalLoginCommand(hasExistingSession: false, exitWhenDone: true),
+            "claude auth login; exit"
+        )
+        XCTAssertEqual(
+            Provider.codex.terminalLoginCommand(hasExistingSession: true, exitWhenDone: true),
+            "codex logout; codex login; exit"
+        )
+        XCTAssertEqual(
+            Provider.codex.terminalLoginCommand(hasExistingSession: false),
+            "codex login",
+            "The clipboard-safe command must not exit an existing shell"
+        )
+    }
+
     func testIdentitiesMatchOnAccountID() {
         let left = AccountIdentity(email: "left@example.com", accountID: "acct-1", source: .codexIDToken)
         let right = AccountIdentity(email: "right@example.com", accountID: "acct-1", source: .dashboard)
