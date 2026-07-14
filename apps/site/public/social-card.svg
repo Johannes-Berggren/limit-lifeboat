@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <linearGradient id="bg" x1="80" y1="30" x2="1130" y2="610" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FBFAFF"/>
+      <stop offset="1" stop-color="#F2FAFD"/>
+    </linearGradient>
+    <linearGradient id="brand" x1="80" y1="75" x2="265" y2="265" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5233B5"/>
+      <stop offset="1" stop-color="#1F8CC2"/>
+    </linearGradient>
+    <radialGradient id="violet" cx="0" cy="0" r="1" gradientTransform="translate(165 185) rotate(45) scale(450)">
+      <stop stop-color="#7658DA" stop-opacity=".26"/>
+      <stop offset="1" stop-color="#7658DA" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="cyan" cx="0" cy="0" r="1" gradientTransform="translate(1075 510) rotate(-135) scale(470)">
+      <stop stop-color="#28A2CF" stop-opacity=".24"/>
+      <stop offset="1" stop-color="#28A2CF" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="-30" y="-30" width="300" height="300" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#312679" flood-opacity=".2"/>
+    </filter>
+    <pattern id="grid" width="56" height="56" patternUnits="userSpaceOnUse">
+      <path d="M56 0H0v56" fill="none" stroke="#302663" stroke-opacity=".035"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="630" rx="34" fill="url(#bg)"/>
+  <rect width="1200" height="630" rx="34" fill="url(#violet)"/>
+  <rect width="1200" height="630" rx="34" fill="url(#cyan)"/>
+  <rect width="1200" height="630" rx="34" fill="url(#grid)"/>
+  <g transform="translate(92 101)" filter="url(#shadow)">
+    <rect width="158" height="158" rx="45" fill="url(#brand)"/>
+    <rect x="2" y="2" width="154" height="154" rx="43" fill="none" stroke="#fff" stroke-opacity=".4" stroke-width="3"/>
+    <circle cx="79" cy="79" r="41" fill="none" stroke="#fff" stroke-width="18"/>
+    <path d="m49 49 13 13m34 34 13 13m0-60L96 62M62 96l-13 13" stroke="#3677BE" stroke-width="18"/>
+    <path d="M60 92a25 25 0 0 1 40-24M79 79l18-15" fill="none" stroke="#fff" stroke-width="8" stroke-linecap="round"/>
+    <circle cx="79" cy="79" r="7" fill="#fff"/>
+  </g>
+  <text x="292" y="149" fill="#141423" font-family="-apple-system,BlinkMacSystemFont,Arial,sans-serif" font-size="35" font-weight="700" letter-spacing="-1">Limit Lifeboat</text>
+  <text x="92" y="366" fill="#0A0916" font-family="-apple-system,BlinkMacSystemFont,Arial,sans-serif" font-size="70" font-weight="750" letter-spacing="-3">Keep every AI coding</text>
+  <text x="92" y="446" fill="#5233B5" font-family="-apple-system,BlinkMacSystemFont,Arial,sans-serif" font-size="70" font-weight="750" letter-spacing="-3">account afloat.</text>
+  <text x="95" y="519" fill="#626277" font-family="-apple-system,BlinkMacSystemFont,Arial,sans-serif" font-size="26">Claude + ChatGPT/Codex usage, warnings, and safe CLI switching.</text>
+  <g transform="translate(902 91)">
+    <rect width="207" height="48" rx="24" fill="#fff" fill-opacity=".72" stroke="#302663" stroke-opacity=".1"/>
+    <circle cx="27" cy="24" r="5" fill="#18A14C"/>
+    <text x="44" y="31" fill="#4F4E63" font-family="-apple-system,BlinkMacSystemFont,Arial,sans-serif" font-size="18" font-weight="600">Native for macOS</text>
+  </g>
+</svg>

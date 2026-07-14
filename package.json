@@ -1,0 +1,16 @@
+{
+  "name": "limit-lifeboat",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/site"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "site:dev": "npm run dev --workspace=@limit-lifeboat/site",
+    "site:check": "npm run check --workspace=@limit-lifeboat/site",
+    "site:build": "npm run build --workspace=@limit-lifeboat/site"
+  }
+}

@@ -1,0 +1,123 @@
+---
+import BrandMark from "../components/BrandMark.astro";
+import { navigation, product } from "../config";
+import "../styles/global.css";
+
+interface Props {
+  title?: string;
+  description?: string;
+  image?: string;
+  noindex?: boolean;
+  pageType?: "website" | "article";
+  structuredData?: Record<string, unknown> | Record<string, unknown>[];
+}
+
+const {
+  title = product.name,
+  description = product.shortDescription,
+  image = "/og-card.png",
+  noindex = false,
+  pageType = "website",
+  structuredData,
+} = Astro.props;
+
+const pageTitle = title === product.name ? title : `${title} — ${product.name}`;
+const canonicalURL = new URL(Astro.url.pathname, product.siteUrl);
+const socialImageURL = new URL(image, product.siteUrl);
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="generator" content={Astro.generator} />
+    <title>{pageTitle}</title>
+    <meta name="description" content={description} />
+    <meta name="theme-color" content="#f7f7fb" />
+    <meta name="color-scheme" content="light" />
+    <meta name="robots" content={noindex ? "noindex, nofollow" : "index, follow"} />
+    <link rel="canonical" href={canonicalURL} />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <meta property="og:type" content={pageType} />
+    <meta property="og:site_name" content={product.name} />
+    <meta property="og:title" content={pageTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonicalURL} />
+    <meta property="og:image" content={socialImageURL} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content={`${product.name} — ${product.headline}`} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={pageTitle} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={socialImageURL} />
+    {
+      structuredData && (
+        <script
+          type="application/ld+json"
+          is:inline
+          set:html={JSON.stringify(structuredData)}
+        />
+      )
+    }
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="site-header">
+      <div class="container nav-shell">
+        <a class="brand" href="/" aria-label={`${product.name} home`}>
+          <BrandMark size={38} />
+          <span>{product.name}</span>
+        </a>
+        <nav class="primary-nav" aria-label="Primary navigation">
+          {
+            navigation.map((item) => (
+              <a href={item.href}>{item.label}</a>
+            ))
+          }
+          <a href="/support">Support</a>
+        </nav>
+        <a class="button button--small button--primary nav-cta" href={product.links.latestRelease}>
+          Download
+          <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16">
+            <path d="M8 2v8m0 0 3-3m-3 3L5 7M3 13h10" />
+          </svg>
+        </a>
+      </div>
+    </header>
+    <main id="main-content">
+      <slot />
+    </main>
+    <footer class="site-footer">
+      <div class="container footer-grid">
+        <div class="footer-brand">
+          <a class="brand" href="/">
+            <BrandMark size={34} />
+            <span>{product.name}</span>
+          </a>
+          <p>A clear view of every AI coding account, right from your menu bar.</p>
+        </div>
+        <div>
+          <p class="footer-label">Product</p>
+          <a href="/#features">Features</a>
+          <a href="/#setup">How it works</a>
+          <a href={product.links.latestRelease}>Download</a>
+        </div>
+        <div>
+          <p class="footer-label">Resources</p>
+          <a href="/support">Support</a>
+          <a href="/privacy">Privacy</a>
+          <a href={product.links.repository}>GitHub</a>
+        </div>
+      </div>
+      <div class="container footer-bottom">
+        <span>© {new Date().getFullYear()} Limit Lifeboat</span>
+        <span>Free and open source under the <a href={product.links.license}>MIT License</a>.</span>
+      </div>
+    </footer>
+  </body>
+</html>

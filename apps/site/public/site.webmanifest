@@ -1,0 +1,21 @@
+{
+  "name": "Limit Lifeboat",
+  "short_name": "Limit Lifeboat",
+  "description": "See AI coding account usage and safely switch CLI accounts from the macOS menu bar.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f8f8fc",
+  "theme_color": "#5233b5",
+  "icons": [
+    {
+      "src": "/web-app-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/web-app-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

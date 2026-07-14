@@ -5,30 +5,100 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
-  test:
+  native:
+    name: Native app
     runs-on: macos-26
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - name: Test
-        run: swift test
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - name: Test Swift package
+        run: swift test --package-path apps/macos
       - name: Package arm64 app
         env:
           SIGN_IDENTITY: "-"
-        run: ./scripts/package-app.sh
+        run: apps/macos/scripts/package-app.sh
       - name: Validate packaged app
         run: |
           set -euo pipefail
-          app="dist/Limit Lifeboat.app"
+          app="apps/macos/dist/Limit Lifeboat.app"
           executable="$app/Contents/MacOS/LimitLifeboat"
           info="$app/Contents/Info.plist"
+          bundled_license="$app/Contents/Resources/LICENSE.txt"
+          source_entitlements="apps/macos/Packaging/LimitLifeboat.entitlements"
+          signed_entitlements="$(mktemp)"
+          trap 'rm -f "$signed_entitlements"' EXIT
+          expected_entitlements='{"com.apple.security.automation.apple-events":true}'
 
           test -x "$executable"
           test "$(lipo -archs "$executable")" = "arm64"
           test "$(xcrun vtool -show-build "$executable" | awk '$1 == "minos" { print $2; exit }')" = "14.0"
           test "$(plutil -extract CFBundleIdentifier raw -o - "$info")" = "com.limitlifeboat.app"
           test "$(plutil -extract CFBundleExecutable raw -o - "$info")" = "LimitLifeboat"
-          test "$(plutil -extract CFBundleShortVersionString raw -o - "$info")" = "$(tr -d '[:space:]' < VERSION)"
+          test "$(plutil -extract CFBundleShortVersionString raw -o - "$info")" = "$(tr -d '[:space:]' < apps/macos/VERSION)"
+          test "$(plutil -extract CFBundleVersion raw -o - "$info")" = "$(git rev-list --count HEAD)"
           test "$(plutil -extract LSMinimumSystemVersion raw -o - "$info")" = "14.0"
-          plutil -lint Packaging/LimitLifeboat.entitlements
+          grep -Fq 'static let appleTeamIdentifier = "3DQ7YC2YH2"' \
+            apps/macos/Sources/LimitLifeboat/DistributionIdentity.swift
+          cmp -s LICENSE "$bundled_license"
+          plutil -lint "$source_entitlements"
+          test "$(plutil -convert json -o - "$source_entitlements")" = "$expected_entitlements"
           codesign --verify --all-architectures --strict --verbose=2 "$app"
+          codesign --display --entitlements - --xml "$app" > "$signed_entitlements"
+          plutil -lint "$signed_entitlements"
+          test "$(plutil -convert json -o - "$signed_entitlements")" = "$expected_entitlements"
+
+  site:
+    name: Marketing site
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Type-check site
+        run: npm run site:check
+      - name: Build static site
+        run: npm run site:build
+      - name: Check internal links
+        run: node .github/scripts/check-site-links.mjs apps/site/dist
+
+  scripts:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Parse and lint shell scripts
+        run: |
+          bash -n apps/macos/scripts/*.sh
+          shellcheck apps/macos/scripts/*.sh
+
+  test:
+    name: test
+    if: ${{ always() }}
+    needs: [native, site, scripts]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every CI lane to pass
+        env:
+          NATIVE_RESULT: ${{ needs.native.result }}
+          SITE_RESULT: ${{ needs.site.result }}
+          SCRIPTS_RESULT: ${{ needs.scripts.result }}
+        run: |
+          test "$NATIVE_RESULT" = success
+          test "$SITE_RESULT" = success
+          test "$SCRIPTS_RESULT" = success

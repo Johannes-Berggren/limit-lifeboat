@@ -1,0 +1,38 @@
+---
+interface Props {
+  size?: number;
+  decorative?: boolean;
+}
+
+const { size = 36, decorative = true } = Astro.props;
+---
+
+<svg
+  class="brand-mark"
+  width={size}
+  height={size}
+  viewBox="0 0 64 64"
+  fill="none"
+  role={decorative ? undefined : "img"}
+  aria-hidden={decorative ? "true" : undefined}
+  aria-label={decorative ? undefined : "Limit Lifeboat"}
+>
+  <defs>
+    <linearGradient id="mark-gradient" x1="7" y1="6" x2="58" y2="59" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5233B5" />
+      <stop offset="1" stop-color="#1F8CC2" />
+    </linearGradient>
+    <filter id="mark-shadow" x="-12" y="-12" width="88" height="88" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="3" stdDeviation="3" flood-color="#2A2670" flood-opacity=".2" />
+    </filter>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="17" fill="url(#mark-gradient)" />
+  <rect x="2.75" y="2.75" width="58.5" height="58.5" rx="16.25" stroke="white" stroke-opacity=".36" stroke-width="1.5" />
+  <g filter="url(#mark-shadow)">
+    <circle cx="32" cy="32" r="16.5" stroke="white" stroke-width="7" />
+    <path d="M20.3 20.3 25.4 25.4M38.6 38.6l5.1 5.1M43.7 20.3l-5.1 5.1M25.4 38.6l-5.1 5.1" stroke="#3677BE" stroke-width="7" />
+    <path d="M24.2 36.8a9.8 9.8 0 0 1 15.6-9.3" stroke="white" stroke-width="3" stroke-linecap="round" />
+    <path d="m32 32 7-6" stroke="white" stroke-width="3" stroke-linecap="round" />
+    <circle cx="32" cy="32" r="2.9" fill="white" />
+  </g>
+</svg>
