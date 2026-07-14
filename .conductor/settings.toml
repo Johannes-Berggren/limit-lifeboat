@@ -1,4 +1,11 @@
 "$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
 
 [scripts]
-archive = "./scripts/manage-workspace-app.sh terminate \"$CONDUCTOR_WORKSPACE_PATH/dist/LLMUsageMonitor.app/Contents/MacOS/LLMUsageMonitor\" && ./scripts/manage-workspace-app.sh terminate \"$CONDUCTOR_WORKSPACE_PATH/dist/Limit Lifeboat.app/Contents/MacOS/LimitLifeboat\""
+setup = "npm ci"
+archive = "apps/macos/scripts/manage-workspace-app.sh terminate \"$CONDUCTOR_WORKSPACE_PATH/apps/macos/dist/Limit Lifeboat.app/Contents/MacOS/LimitLifeboat\""
+run_mode = "concurrent"
+
+[scripts.run.site]
+command = "npm run dev --workspace=@limit-lifeboat/site -- --host 0.0.0.0 --port \"$CONDUCTOR_PORT\""
+default = true
+icon = "globe"

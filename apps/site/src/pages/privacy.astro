@@ -1,0 +1,67 @@
+---
+import { product } from "../config";
+import BaseLayout from "../layouts/BaseLayout.astro";
+
+const description = `How ${product.name} handles credentials, usage data, network access, and ordinary website hosting logs.`;
+---
+
+<BaseLayout title="Privacy" description={description} pageType="article">
+  <section class="page-hero page-hero--legal">
+    <div class="container page-hero-inner">
+      <p class="eyebrow">Privacy</p>
+      <h1>Your accounts are yours.</h1>
+      <p>Limit Lifeboat has no analytics, advertising, or product telemetry. Here is what the app and this website handle, in plain language.</p>
+      <p class="last-updated">Last updated July 14, 2026</p>
+    </div>
+  </section>
+
+  <div class="container article-layout">
+    <aside class="article-nav" aria-label="On this page">
+      <p>On this page</p>
+      <a href="#summary">Summary</a>
+      <a href="#stored">Data stored locally</a>
+      <a href="#network">Network access</a>
+      <a href="#website">This website</a>
+      <a href="#control">Your control</a>
+    </aside>
+
+    <article class="prose">
+      <section id="summary">
+        <h2>The short version</h2>
+        <p>Account profiles, usage history, settings, and credential snapshots are kept on your Mac. The app contacts provider services only to power the features you use, plus GitHub for update checks. It does not send product analytics or telemetry to Limit Lifeboat’s developer.</p>
+      </section>
+
+      <section id="stored">
+        <h2>Data stored locally</h2>
+        <p>Limit Lifeboat stores account profiles and usage history under <code>~/Library/Application Support/LimitLifeboat</code>. App settings use the standard macOS preferences domain <code>{product.bundleIdentifier}</code>.</p>
+        <p>App-managed credential snapshots are encrypted by macOS Keychain under the service <code>{product.bundleIdentifier}.credentials</code>. The app may read Claude Code’s provider-owned Keychain item when necessary, but it does not create or take ownership of that item.</p>
+        <p>When you switch an account, the app temporarily prepares rollback material with restricted filesystem permissions. It removes that material after a verified switch or successful rollback. If another process changes the live credentials during recovery, Limit Lifeboat keeps a protected recovery copy rather than overwriting the external change.</p>
+      </section>
+
+      <section id="network">
+        <h2>When the app uses the network</h2>
+        <p>Network access is limited to services needed for the selected feature:</p>
+        <ul>
+          <li><strong>Anthropic</strong> for Claude account identity, token refresh, and usage.</li>
+          <li><strong>OpenAI</strong> when an isolated Codex verification needs to refresh or validate the selected account’s authentication.</li>
+          <li><strong>GitHub</strong> for the daily update check and release links.</li>
+          <li><strong>Claude or ChatGPT web dashboards</strong> only when you explicitly open an embedded dashboard.</li>
+        </ul>
+        <p>Codex usage readings come from local Codex session data. An embedded dashboard uses an isolated web data store inside the app and remains separate from your normal browser session.</p>
+      </section>
+
+      <section id="website">
+        <h2>This website</h2>
+        <p>This static website has no analytics, advertising, tracking pixels, account system, cookies set by us, or contact forms. It does not load external fonts or third-party scripts.</p>
+        <p>The site is hosted by Vercel. Like ordinary web hosts, Vercel may process operational request data such as an IP address, user agent, requested URL, timestamp, and error details to deliver and protect the service. Those hosting logs are distinct from product analytics and are governed by Vercel’s own terms and privacy practices.</p>
+        <p>Following a link to GitHub, Homebrew, Anthropic, OpenAI, or another external service takes you to that service, where its privacy policy applies.</p>
+      </section>
+
+      <section id="control">
+        <h2>Your choices and control</h2>
+        <p>Notifications, Terminal Automation, and launch at login are optional macOS permissions or settings. You can change them in Limit Lifeboat or System Settings. Browser, desktop-app, and CLI sessions remain separate; switching affects only the selected CLI.</p>
+        <p>You can remove profiles in the app and uninstall Limit Lifeboat at any time. Review the project’s source code or report a concern through <a href={product.links.repository}>GitHub</a>. For a suspected vulnerability, use <a href={product.links.securityReport}>private vulnerability reporting</a> instead of a public issue.</p>
+      </section>
+    </article>
+  </div>
+</BaseLayout>

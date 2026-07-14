@@ -1,209 +1,207 @@
 # Releasing Limit Lifeboat
 
-Limit Lifeboat releases are built locally, signed with a Developer ID
-Application certificate, notarized by Apple, and published as immutable GitHub
-release assets. The Homebrew Cask installs that same DMG.
+Limit Lifeboat releases are built locally on Apple Silicon, signed with a
+Developer ID Application certificate, notarized by Apple, and published as
+immutable GitHub release assets. The personal Homebrew tap installs that same
+DMG. The v1 target is `1.0.0`, macOS 14+, and arm64 only.
 
-The first stable release is `1.0.0`. Release artifacts support Apple Silicon
-and macOS 14 Sonoma or newer.
+Signing and notarization credentials stay on the release Mac. Never commit a
+certificate UUID or fingerprint, certificate/private-key material, Apple ID,
+app-specific password, or notary credentials, and never add them to GitHub
+Actions.
 
-## One-time Apple setup
+## One-time launch setup
 
-1. In Apple Developer **Membership details**, confirm the legal team name and
-   Team ID for the JB Ventures organization. Use this same team for the App ID,
-   Developer ID certificate, signing, and notarization. Do not assume the Team
-   ID from an Apple Development certificate belongs to the intended team.
-   Record the 10-character Team ID as the permanent `TEAM_ID` for Limit
-   Lifeboat before publishing v1. The Team ID anchors the code-signing identity;
-   it is separate from the `com.limitlifeboat.app` bundle identifier and the
-   organization's display name.
-   Replace `UNCONFIGURED` in
-   `Sources/LimitLifeboat/DistributionIdentity.swift` with that confirmed Team
-   ID in the release-preparation pull request. This pins both the release
-   script and the migration-time Developer ID requirement; never change it
-   after v1 without a separate identity migration.
-2. Register the explicit App ID `com.limitlifeboat.app` under that team.
-3. Have the team's Account Holder create a **Developer ID Application**
-   certificate. Install the certificate and its private key in the login
-   keychain. A Developer ID Installer certificate is not needed for a DMG.
-4. Confirm that the expected identity and Team ID are available:
+1. In Apple Developer, confirm that App ID `com.limitlifeboat.app` is
+   registered under Team `3DQ7YC2YH2`.
+2. Have the team's Account Holder create a **Developer ID Application**
+   certificate for that team. Install the certificate and private key in the
+   release Mac's login keychain. A Developer ID Installer certificate is not
+   needed for a DMG.
+3. Confirm that the expected identity is available. If more than one
+   Developer ID Application identity appears, pass the full certificate name
+   through `SIGN_IDENTITY` when releasing; do not put its UUID in the repo.
 
    ```bash
    security find-identity -v -p codesigning
    ```
 
-   The output must contain exactly the Developer ID Application identity that
-   should own every public Limit Lifeboat release. If more than one matches,
-   always set `SIGN_IDENTITY` to the full identity string.
-5. Create an app-specific password for the Apple ID that will submit builds,
-   then store it in the release keychain profile:
+4. Store Apple notarization credentials in the release Mac's Keychain:
 
    ```bash
    xcrun notarytool store-credentials limit-lifeboat \
      --apple-id "<apple-id>" \
-     --team-id "<TEAMID>" \
+     --team-id "3DQ7YC2YH2" \
      --password "<app-specific-password>"
+   xcrun notarytool history --keychain-profile limit-lifeboat
    ```
 
-   The default profile name is `limit-lifeboat`. The release script accepts a
-   different name through `NOTARY_PROFILE`, but the standard profile should be
-   used for v1.
+5. Enable GitHub private vulnerability reporting and release immutability for
+   `Johannes-Berggren/limit-lifeboat`.
+6. Connect the repository to a Vercel project named `limit-lifeboat`. Set its
+   root directory to `apps/site`, framework preset to Astro, Node.js version to
+   24, and production branch to `main`. The site is static and needs no Vercel
+   adapter. Leave the production domains detached until the GitHub and
+   Homebrew downloads described below are public and tested.
 
-Also enable GitHub private vulnerability reporting and release immutability for
-`Johannes-Berggren/limit-lifeboat` before publishing v1. Do not put signing
-certificates, private keys, Apple credentials, or notarization credentials in
-the repository or GitHub Actions.
+## Prepare the exact release commit
 
-## Prepare a release
-
-Merge the version bump and every release change through the protected `main`
-branch before creating a tag. Then fetch and build the exact `origin/main`
-commit with no tracked or untracked changes. `VERSION` must contain a plain
-semantic version without a `v` prefix, and `HEAD` must have the exact matching
-`v<version>` tag.
+Merge every launch change through protected `main`, then work from the exact
+fetched `origin/main` commit with a completely clean repository. The release
+script intentionally evaluates the whole monorepo for cleanliness and tags;
+the native build number is the repository-wide Git commit count.
 
 ```bash
-# After the release-preparation pull request has merged:
 git fetch origin
 git switch main
 git pull --ff-only origin main
 test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
 git status --short
 
-version="$(tr -d '[:space:]' < VERSION)"
+version="$(tr -d '[:space:]' < apps/macos/VERSION)"
+test "$version" = "1.0.0" # v1 only
 git tag -a "v${version}" -m "Limit Lifeboat ${version}"
-
 git describe --tags --exact-match HEAD
 ```
 
-Do not move or reuse a version tag after it has been pushed. If the release
-candidate needs a code change, delete only the unpushed local tag, make the
-change on a new branch, merge its pull request, fast-forward local `main`, and
-create a new local tag on that corrected `origin/main` commit.
+Do not move or reuse a pushed tag. If the candidate needs a code change,
+delete only an unpushed local tag, make and merge the fix, fast-forward local
+`main`, and tag the corrected `origin/main` commit.
 
-## Build, sign, and notarize
+## Build, sign, and notarize locally
 
-Run tests and the release command on an Apple Silicon Mac with the Xcode 26
-toolchain and macOS 26 SDK selected and the Developer ID certificate installed:
+Use an Apple Silicon Mac with Xcode 26 and the macOS 26 SDK selected:
 
 ```bash
-swift test
-TEAM_ID="<10-character Team ID>" \
-  SIGN_IDENTITY="Developer ID Application: <legal team name> (<TEAMID>)" \
-  NOTARY_PROFILE="limit-lifeboat" \
-  ./scripts/release.sh
+swift test --package-path apps/macos
+TEAM_ID=3DQ7YC2YH2 \
+  SIGN_IDENTITY="Developer ID Application: <legal team name> (3DQ7YC2YH2)" \
+  NOTARY_PROFILE=limit-lifeboat \
+  apps/macos/scripts/release.sh
 ```
 
-`TEAM_ID` is mandatory on every release invocation, must match the committed
-`DistributionIdentity.appleTeamIdentifier`, and must be the permanent team
-confirmed in Apple Developer Membership details. The script rejects a
-selected Developer ID certificate whose leaf subject OU differs from
-`TEAM_ID`, then repeats that check against the signed app's `TeamIdentifier`
-and designated requirement.
+`TEAM_ID` is mandatory and must match the pinned value in
+`DistributionIdentity.swift`. `SIGN_IDENTITY` may be omitted only when exactly
+one Developer ID Application identity is installed. `NOTARY_PROFILE` defaults
+to `limit-lifeboat`.
 
-The script requires a clean exact tag matching `VERSION`, and refuses to build
-unless `HEAD` is the fetched `origin/main` commit. It also requires the release
-and signed entitlements to contain only the Apple Events Automation entitlement
-(in particular, debug and hardened-runtime bypass entitlements are rejected). It packages
-`Limit Lifeboat.app`, signs it with the hardened runtime and timestamp,
-notarizes and staples the app, builds and signs the DMG, notarizes and staples
-the DMG, and performs local integrity and Gatekeeper checks.
+The script requires a clean exact tag matching `apps/macos/VERSION` and
+requires `HEAD` to equal fetched `origin/main`. It tests the Swift package,
+packages the app, verifies the bundled root MIT license, signs with hardened
+runtime and a timestamp, notarizes and staples the app, creates/signs/notarizes
+the DMG, mounts and revalidates it, and writes the checksum. Release
+entitlements must contain only Apple Events automation.
 
-`./scripts/release.sh <version>` and the `VERSION` environment variable are
-available for automation, but either value must match the committed `VERSION`
-file. Do not supply conflicting environment and positional versions.
-`SIGN_IDENTITY` and `NOTARY_PROFILE` remain optional overrides; neither
-replaces the mandatory `TEAM_ID` check.
-
-For version `1.0.0`, the publishable outputs are:
+For v1 the outputs are:
 
 ```text
-dist/Limit-Lifeboat-1.0.0-arm64.dmg
-dist/Limit-Lifeboat-1.0.0-arm64.dmg.sha256
+apps/macos/dist/Limit Lifeboat.app
+apps/macos/dist/Limit-Lifeboat-1.0.0-arm64.dmg
+apps/macos/dist/Limit-Lifeboat-1.0.0-arm64.dmg.sha256
 ```
 
-Verify the release identity and artifacts independently before uploading:
+Verify the candidate independently before pushing the tag:
 
 ```bash
-app="dist/Limit Lifeboat.app"
-dmg="dist/Limit-Lifeboat-${version}-arm64.dmg"
+app="apps/macos/dist/Limit Lifeboat.app"
+dmg="apps/macos/dist/Limit-Lifeboat-${version}-arm64.dmg"
 
-codesign --verify --deep --strict --verbose=2 "$app"
+codesign --verify --all-architectures --strict --verbose=2 "$app"
 codesign -dv --verbose=4 "$app" 2>&1
 xcrun stapler validate "$app"
 xcrun stapler validate "$dmg"
 spctl -a -t exec -vv "$app"
 spctl -a -t open --context context:primary-signature -vv "$dmg"
 hdiutil verify "$dmg"
-(cd dist && shasum -a 256 -c "Limit-Lifeboat-${version}-arm64.dmg.sha256")
+(cd apps/macos/dist && shasum -a 256 -c "Limit-Lifeboat-${version}-arm64.dmg.sha256")
+cmp LICENSE "$app/Contents/Resources/LICENSE.txt"
 file "$app/Contents/MacOS/LimitLifeboat"
 /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist"
 ```
 
-Review the `codesign` output and require the intended Team ID, hardened
-runtime, timestamp, and `com.limitlifeboat.app`. Require an arm64 executable
-and reject any artifact that fails a command above.
-
-If notarization fails, use the submission ID printed by `notarytool`:
+Require Team ID `3DQ7YC2YH2`, bundle ID `com.limitlifeboat.app`, arm64-only
+code, hardened runtime, a trusted timestamp, a valid staple, and the exact MIT
+license. If notarization fails, retrieve the log using the submission ID that
+the script prints:
 
 ```bash
 xcrun notarytool log <submission-id> --keychain-profile limit-lifeboat
 ```
 
-Fix the underlying problem and issue a new release candidate. Never bypass
-notarization or Gatekeeper validation.
+Fix the cause and create a new candidate. Never bypass notarization or
+Gatekeeper checks.
 
-## Draft and validate the GitHub release
+## Draft and test the GitHub release
 
-Push the tag only after local verification succeeds. The tagged commit is
-already on the protected `main` branch from the preparation workflow above:
+Push the verified tag and create a draft containing the exact DMG and checksum:
 
 ```bash
 git push origin "v${version}"
 
 gh release create "v${version}" \
-  "dist/Limit-Lifeboat-${version}-arm64.dmg" \
-  "dist/Limit-Lifeboat-${version}-arm64.dmg.sha256" \
+  "apps/macos/dist/Limit-Lifeboat-${version}-arm64.dmg" \
+  "apps/macos/dist/Limit-Lifeboat-${version}-arm64.dmg.sha256" \
   --repo Johannes-Berggren/limit-lifeboat \
   --draft \
   --title "Limit Lifeboat ${version}" \
   --generate-notes
 ```
 
-Keep the release as a draft while testing. On a clean Apple Silicon test Mac
-running macOS 14 or newer:
+Download the draft through a browser so the DMG receives normal quarantine,
+then test on clean macOS 14 and current macOS 26 environments. Verify the
+checksum and Gatekeeper, install by dragging to Applications, and exercise
+first launch, legacy migration, Keychain continuity, account discovery and
+switching, notifications, Terminal Automation, relaunch, reinstall, launch at
+login, and the update link. Confirm the app never leaves routine switch
+rollback material after success.
 
-1. Download both assets through a web browser so the DMG receives the normal
-   quarantine attribute. Do not remove or alter quarantine metadata.
-2. Verify the downloaded checksum, open the DMG, drag **Limit Lifeboat** to
-   Applications, and launch it from Finder.
-3. Confirm Gatekeeper accepts the app without an unidentified-developer
-   bypass, the bundle identifier is `com.limitlifeboat.app`, and the app is
-   arm64.
-4. Exercise first launch, account discovery, Keychain access, notifications,
-   Terminal Automation, account switching, relaunch, launch at login, and the
-   update link. Test legacy migration separately when legacy data is present.
+Publish only after those checks pass. Published tags, versions, DMGs, and
+checksums are immutable; fixes require a new patch release.
 
-Publish the draft only after every validation passes and release immutability
-is enabled for the repository. Once published, the version, tag, DMG, and
-checksum are permanent. Never replace an artifact for a published version;
-fixes require a new patch release.
+## Publish the Homebrew Cask
 
-## Update the Homebrew tap
+After the GitHub release is public, add or update
+`Casks/limit-lifeboat.rb` in `Johannes-Berggren/homebrew-tap`. Use the checksum
+from the published `.sha256` file and the immutable versioned asset URL. The
+Cask should have this shape:
 
-After the GitHub release is public, update
-`Johannes-Berggren/homebrew-tap` at `Casks/limit-lifeboat.rb` with the new
-version and the SHA-256 from the published checksum file. The Cask URL must
-point to the versioned, immutable GitHub release asset:
+```ruby
+cask "limit-lifeboat" do
+  version "1.0.0"
+  sha256 "<published sha256>"
 
-```text
-https://github.com/Johannes-Berggren/limit-lifeboat/releases/download/v<version>/Limit-Lifeboat-<version>-arm64.dmg
+  url "https://github.com/Johannes-Berggren/limit-lifeboat/releases/download/v#{version}/Limit-Lifeboat-#{version}-arm64.dmg",
+      verified: "github.com/Johannes-Berggren/limit-lifeboat/"
+  name "Limit Lifeboat"
+  desc "Monitor and switch between AI coding subscription accounts"
+  homepage "https://limitlifeboat.com/"
+
+  livecheck do
+    url :url
+    strategy :github_latest
+  end
+
+  depends_on arch: :arm64
+  depends_on macos: ">= :sonoma"
+
+  app "Limit Lifeboat.app"
+
+  uninstall quit: "com.limitlifeboat.app"
+
+  zap trash: [
+    "~/Library/Application Support/LimitLifeboat",
+    "~/Library/Application Support/LLMUsageMonitor",
+    "~/Library/Application Support/.LimitLifeboatMigration-v1-stage",
+    "~/Library/Application Support/.LimitLifeboatMigration-v1.json",
+    "~/Library/Application Support/.LimitLifeboatMigration-v1.lock",
+    "~/Library/Preferences/com.limitlifeboat.app.plist",
+    "~/Library/Preferences/com.johannesberggren.LLMUsageMonitor.plist",
+  ]
+end
 ```
 
-Do not publish a Cask that uses a draft asset, a mutable `latest` download URL,
-or a locally calculated checksum from a different DMG. Commit and push the tap
-change, then validate from a clean Homebrew installation or disposable macOS
-account:
+Do not use a draft asset or mutable `latest` URL. Add tap CI for Cask style and
+audit, then validate against the public artifact:
 
 ```bash
 brew update
@@ -217,38 +215,43 @@ brew reinstall --cask Johannes-Berggren/tap/limit-lifeboat
 brew uninstall --cask Johannes-Berggren/tap/limit-lifeboat
 ```
 
-Test `brew uninstall --cask --zap Johannes-Berggren/tap/limit-lifeboat` only in
-a disposable account because it removes Limit Lifeboat's local data. Confirm
-that ordinary uninstall leaves user data intact. The reviewed `zap trash:` list
-must contain these exact app-owned paths so a reinstall cannot inherit a stale
-migration transaction:
+Test `brew uninstall --cask --zap Johannes-Berggren/tap/limit-lifeboat` only
+in a disposable macOS account containing both current and legacy state.
+Ordinary uninstall must preserve user data. Zap must not remove
+provider-owned Claude or Codex data.
 
-```ruby
-zap trash: [
-  "~/Library/Application Support/LimitLifeboat",
-  "~/Library/Application Support/LLMUsageMonitor",
-  "~/Library/Application Support/.LimitLifeboatMigration-v1-stage",
-  "~/Library/Application Support/.LimitLifeboatMigration-v1.json",
-  "~/Library/Application Support/.LimitLifeboatMigration-v1.lock",
-  "~/Library/Preferences/com.limitlifeboat.app.plist",
-  "~/Library/Preferences/com.johannesberggren.LLMUsageMonitor.plist",
-]
-```
+## Deploy the production website
 
-Do not use broad globs or remove provider-owned Claude/Codex data. Verify each
-path against a disposable account containing both current and legacy state.
+Before publishing the app, confirm that the launch commit produces a healthy
+Vercel preview and passes `npm run site:check`, `npm run site:build`, and the CI
+internal-link check. Keep `https://limitlifeboat.com` as the canonical URL.
 
-## Development builds
+After the GitHub and Homebrew installs both work:
+
+1. Promote/deploy `main` to the Vercel production project.
+2. Add `limitlifeboat.com` and `www.limitlifeboat.com` to that project, with
+   the apex as primary and `www` redirected to it.
+3. In Namecheap, remove only the old parking A/AAAA/CNAME records and replace
+   them with the exact DNS values Vercel shows for those domains. Preserve all
+   MX and email-forwarding records.
+4. Wait for Vercel to confirm DNS and TLS, then verify the apex, the `www`
+   redirect, `/privacy`, `/support`, the branded 404, security headers, the
+   GitHub download link, and the displayed Homebrew command.
+
+## Development artifacts
+
+For a local development bundle:
 
 ```bash
-./scripts/package-app.sh
-open "dist/Limit Lifeboat.app"
+apps/macos/scripts/package-app.sh
+open "apps/macos/dist/Limit Lifeboat.app"
 ```
 
 Development packaging uses an Apple Development identity when available and
-otherwise falls back to ad-hoc signing. A rebuilt app may need fresh Keychain,
-notification, or Automation approval. Never distribute a development or
-ad-hoc signed build, and never use `swift run` as a release candidate.
+otherwise falls back to ad-hoc signing. Never distribute a development or
+ad-hoc signed build. Regenerate the committed icon only when its source design
+changes:
 
-`Packaging/AppIcon.icns` is generated from `scripts/generate-icon.swift`; use
-`./scripts/generate-icon.sh` to regenerate it when the source design changes.
+```bash
+apps/macos/scripts/generate-icon.sh
+```

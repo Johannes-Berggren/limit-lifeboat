@@ -1,0 +1,97 @@
+---
+import BrandMark from "../components/BrandMark.astro";
+import { product } from "../config";
+import BaseLayout from "../layouts/BaseLayout.astro";
+
+const description = `Installation help, troubleshooting, and issue reporting for ${product.name}.`;
+---
+
+<BaseLayout title="Support" description={description}>
+  <section class="page-hero">
+    <div class="container page-hero-inner">
+      <p class="eyebrow">Support</p>
+      <h1>Get back above water.</h1>
+      <p>Start with the quick checks below. If the issue persists, the GitHub issue tracker is the best place to get help.</p>
+      <div class="hero-actions page-actions">
+        <a class="button button--primary button--large" href={product.links.newIssue}>Open a GitHub issue</a>
+        <a class="button button--secondary button--large" href={product.links.repository}>View documentation</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="section support-section">
+    <div class="container support-grid">
+      <article class="support-card">
+        <span class="feature-icon feature-icon--violet"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14" /></svg></span>
+        <h2>Install and update</h2>
+        <ul>
+          <li>Requires {product.architecture} and {product.minimumMacOS} or newer.</li>
+          <li>For the DMG, drag Limit Lifeboat into Applications before opening it.</li>
+          <li>The app links to new versions but never installs an update automatically.</li>
+        </ul>
+        <a class="text-link" href={product.links.releases}>Browse releases <span aria-hidden="true">→</span></a>
+      </article>
+
+      <article class="support-card">
+        <span class="feature-icon feature-icon--cyan"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m5 7 4 4-4 4m6 0h8" /></svg></span>
+        <h2>Accounts and usage</h2>
+        <ul>
+          <li>Sign in with <code>claude</code> or <code>codex login</code>, then refresh the app.</li>
+          <li>Inactive accounts retain their last reading and display its age.</li>
+          <li>If a login expires, use the account’s Log In or Retry action.</li>
+        </ul>
+        <a class="text-link" href={`${product.links.repository}#how-it-works`}>Read how it works <span aria-hidden="true">→</span></a>
+      </article>
+
+      <article class="support-card">
+        <span class="feature-icon feature-icon--green"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 7h11m0 0-3-3m3 3-3 3M16 17H5m0 0 3 3m-3-3 3-3" /></svg></span>
+        <h2>CLI switching</h2>
+        <ul>
+          <li>Switching changes the selected CLI login—not your browser or desktop app.</li>
+          <li>A first switch may ask for macOS Terminal Automation permission.</li>
+          <li>If another process changes credentials mid-switch, retry after it finishes.</li>
+        </ul>
+        <a class="text-link" href={`${product.links.repository}#how-it-works`}>Review switching behavior <span aria-hidden="true">→</span></a>
+      </article>
+
+      <article class="support-card">
+        <span class="feature-icon feature-icon--amber"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 4a6 6 0 0 0-6 6c0 7-3 7-3 7h18s-3 0-3-7a6 6 0 0 0-6-6Zm-2 16h4" /></svg></span>
+        <h2>Permissions</h2>
+        <ul>
+          <li>Notifications are optional and can be changed in System Settings.</li>
+          <li>Launch at login is off until you enable it in Settings.</li>
+          <li>Keychain prompts appear only for explicit actions when authorization is required.</li>
+        </ul>
+        <a class="text-link" href="/privacy">Read the privacy details <span aria-hidden="true">→</span></a>
+      </article>
+    </div>
+  </section>
+
+  <section class="section diagnostic-section">
+    <div class="container diagnostic-grid">
+      <div>
+        <p class="eyebrow">Before reporting a bug</p>
+        <h2>A few details speed up the diagnosis.</h2>
+        <p>Include the Limit Lifeboat version, your macOS version, the affected provider, what you expected, what happened, and the smallest sequence that reproduces it.</p>
+      </div>
+      <div class="privacy-warning">
+        <BrandMark size={48} />
+        <div>
+          <h3>Remove secrets first</h3>
+          <p>Never attach real access tokens, refresh tokens, cookies, passwords, private keys, full Keychain exports, or unredacted account data.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section security-report">
+    <div class="container security-report-inner">
+      <div>
+        <p class="eyebrow">Security issue?</p>
+        <h2>Report it privately.</h2>
+        <p>Do not open a public issue for an undisclosed vulnerability. GitHub private vulnerability reporting keeps the details between you and the maintainer while the issue is investigated.</p>
+      </div>
+      <a class="button button--primary button--large" href={product.links.securityReport}>Submit a private report</a>
+    </div>
+  </section>
+</BaseLayout>
