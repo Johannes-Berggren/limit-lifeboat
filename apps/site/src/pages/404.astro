@@ -1,0 +1,21 @@
+---
+import BrandMark from "../components/BrandMark.astro";
+import { product } from "../config";
+import BaseLayout from "../layouts/BaseLayout.astro";
+---
+
+<BaseLayout title="Page not found" noindex={true}>
+  <section class="not-found">
+    <div class="not-found-orbit" aria-hidden="true"><span></span><span></span><span></span></div>
+    <div class="not-found-content">
+      <BrandMark size={80} />
+      <p class="error-code">404</p>
+      <h1>You’re off the chart.</h1>
+      <p>The page you were looking for has drifted away, but your accounts are still safely aboard.</p>
+      <div class="hero-actions">
+        <a class="button button--primary button--large" href="/">Return home</a>
+        <a class="button button--secondary button--large" href={product.links.repository}>Visit GitHub</a>
+      </div>
+    </div>
+  </section>
+</BaseLayout>

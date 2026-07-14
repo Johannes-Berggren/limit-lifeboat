@@ -1,0 +1,15 @@
+.context/
+.conductor/
+.git/
+.github/
+.swiftpm/
+apps/macos/
+apps/site/.astro/
+apps/site/dist/
+apps/site/node_modules/
+node_modules/
+.env*.local
+README.md
+RELEASING.md
+SECURITY.md
+LICENSE

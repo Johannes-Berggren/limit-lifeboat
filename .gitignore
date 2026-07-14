@@ -1,5 +1,9 @@
 .build/
 dist/
+node_modules/
+.astro/
+.vercel/
+.env*.local
 .DS_Store
 *.xcworkspace/
 *.xcodeproj/
