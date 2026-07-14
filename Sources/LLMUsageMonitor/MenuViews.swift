@@ -173,7 +173,9 @@ struct MenuRootView: View {
                         estimates: state.burnRateEstimates[profile.id] ?? [:],
                         adviceReason: advisedID == profile.id ? state.switchAdvice[provider]?.reason : nil,
                         historyRecords: { state.historyRecords(for: profile) },
-                        switchCLI: { state.switchCLI(to: profile) },
+                        switchCLI: {
+                            Task { await state.switchCLI(to: profile) }
+                        },
                         openDashboard: { state.openDashboard(for: profile) },
                         beginCLILogin: { state.beginCLILogin(for: profile) },
                         captureCLI: { state.captureCLISnapshot(for: profile) },
@@ -430,9 +432,18 @@ struct AccountRowView: View {
                         .foregroundStyle(DS.presentationColor(problem.tone))
                         .lineLimit(2)
                         .help(problem.help)
-                    if problem.showsRetry {
+                    if let actionTitle = problem.action.title {
                         Spacer(minLength: 0)
-                        Button("Retry") { retry() }
+                        Button(actionTitle) {
+                            switch problem.action {
+                            case .none:
+                                break
+                            case .retry:
+                                retry()
+                            case .login:
+                                beginCLILogin()
+                            }
+                        }
                             .buttonStyle(.borderless)
                             .controlSize(.small)
                     }

@@ -489,6 +489,86 @@ final class CLISwitcherTests: XCTestCase {
         XCTAssertEqual(reloaded.refreshToken, "ref2")
     }
 
+    func testStoredCodexJSONFieldsCanBeReadAndCompareAndSwapUpdated() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let store = MemoryCredentialStore()
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: store,
+            claudeCLICredentialSource: FakeClaudeCLICredentialSource()
+        )
+        let profile = AccountProfile(provider: .codex, label: "Codex")
+        let initial = Data(#"{"tokens":{"access_token":"old","refresh_token":"refresh-1"}}"#.utf8)
+        let snapshot = CredentialSnapshot(provider: .codex, items: [
+            CredentialSnapshotItem(
+                relativePath: ".codex/auth.json",
+                kind: .jsonFields,
+                contents: initial,
+                posixPermissions: 0o600,
+                ownedJSONKeys: CodexCredentialAdapter.ownedKeys
+            )
+        ])
+        try store.save(snapshot: snapshot, for: profile.id)
+        let fingerprint = CredentialFingerprint.make(for: snapshot)
+        XCTAssertEqual(try switcher.storedCodexAuthJSON(for: profile.id), initial)
+
+        let updated = Data(#"{"tokens":{"access_token":"new","refresh_token":"refresh-2"}}"#.utf8)
+        XCTAssertTrue(
+            try switcher.replaceStoredCodexAuthJSON(
+                updated,
+                for: profile.id,
+                ifSnapshotFingerprintMatches: fingerprint
+            )
+        )
+        XCTAssertEqual(try switcher.storedCodexAuthJSON(for: profile.id), updated)
+
+        XCTAssertFalse(
+            try switcher.replaceStoredCodexAuthJSON(
+                initial,
+                for: profile.id,
+                ifSnapshotFingerprintMatches: fingerprint
+            ),
+            "The stale fingerprint must not overwrite the rotated snapshot"
+        )
+        XCTAssertEqual(try switcher.storedCodexAuthJSON(for: profile.id), updated)
+    }
+
+    func testLegacyFullFileCodexAuthCanBeReadAndCompareAndSwapUpdated() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let store = MemoryCredentialStore()
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: store,
+            claudeCLICredentialSource: FakeClaudeCLICredentialSource()
+        )
+        let profile = AccountProfile(provider: .codex, label: "Legacy Codex")
+        let initial = Data(#"{"tokens":{"access_token":"old","refresh_token":"refresh-1"}}"#.utf8)
+        let snapshot = CredentialSnapshot(provider: .codex, items: [
+            CredentialSnapshotItem(
+                relativePath: ".codex/auth.json",
+                kind: .fullFile,
+                contents: initial,
+                posixPermissions: 0o600
+            )
+        ])
+        try store.save(snapshot: snapshot, for: profile.id)
+
+        XCTAssertEqual(try switcher.storedCodexAuthJSON(for: profile.id), initial)
+        let updated = Data(#"{"tokens":{"access_token":"new","refresh_token":"refresh-2"}}"#.utf8)
+        XCTAssertTrue(
+            try switcher.replaceStoredCodexAuthJSON(
+                updated,
+                for: profile.id,
+                ifSnapshotFingerprintMatches: CredentialFingerprint.make(for: snapshot)
+            )
+        )
+        XCTAssertEqual(try switcher.storedCodexAuthJSON(for: profile.id), updated)
+    }
+
     func testClaudeCaptureAbortsWhenKeychainReadThrows() throws {
         let fixture = try TemporaryFixture()
         defer { fixture.cleanup() }

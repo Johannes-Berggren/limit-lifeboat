@@ -353,12 +353,36 @@ public final class CLISwitcher {
         accessMode: CredentialAccessMode = CredentialAccess.currentMode
     ) throws -> Data? {
         guard let snapshot = try credentialStore.loadSnapshot(for: profileID, accessMode: accessMode),
-              let item = snapshot.items.first(where: {
-                  $0.kind == .fullFile && $0.relativePath == ".codex/auth.json"
-              }) else {
+              let item = snapshot.items.first(where: Self.isCodexAuthItem) else {
             return nil
         }
         return item.contents
+    }
+
+    /// Replaces a stored Codex auth document only while the complete semantic
+    /// snapshot still matches the one that was preflighted. This prevents a
+    /// rotated refresh token from overwriting a newer capture made while the
+    /// app-server request was in flight.
+    @discardableResult
+    public func replaceStoredCodexAuthJSON(
+        _ authJSON: Data,
+        for profileID: UUID,
+        ifSnapshotFingerprintMatches expectedFingerprint: String,
+        accessMode: CredentialAccessMode = CredentialAccess.currentMode
+    ) throws -> Bool {
+        guard var snapshot = try credentialStore.loadSnapshot(for: profileID, accessMode: accessMode),
+              CredentialFingerprint.make(for: snapshot) == expectedFingerprint,
+              let index = snapshot.items.firstIndex(where: Self.isCodexAuthItem) else {
+            return false
+        }
+        snapshot.items[index].contents = authJSON
+        try credentialStore.save(snapshot: snapshot, for: profileID, accessMode: accessMode)
+        return true
+    }
+
+    private static func isCodexAuthItem(_ item: CredentialSnapshotItem) -> Bool {
+        (item.kind == .jsonFields || item.kind == .fullFile)
+            && item.relativePath == ".codex/auth.json"
     }
 
     public func hasActiveProcesses(provider: Provider) -> Bool {

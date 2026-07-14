@@ -5,7 +5,7 @@ final class RefreshOutcomePolicyTests: XCTestCase {
     func testNoCredentialsAlwaysNeedsLoginNoFallback() {
         for active in [true, false] {
             let outcome = RefreshOutcomePolicy.outcome(for: .noCredentials, isActiveCLI: active)
-            XCTAssertEqual(outcome.state, .needsLogin)
+            XCTAssertTrue(outcome.state.requiresLogin)
             XCTAssertFalse(outcome.attemptTUIFallback)
         }
     }
@@ -18,14 +18,12 @@ final class RefreshOutcomePolicyTests: XCTestCase {
         }
     }
 
-    func testUnauthorizedActiveTriesTUIFallbackInactiveNeedsLogin() {
-        let active = RefreshOutcomePolicy.outcome(for: .unauthorized, isActiveCLI: true)
-        XCTAssertEqual(active.state, .refreshing)
-        XCTAssertTrue(active.attemptTUIFallback)
-
-        let inactive = RefreshOutcomePolicy.outcome(for: .unauthorized, isActiveCLI: false)
-        XCTAssertEqual(inactive.state, .needsLogin)
-        XCTAssertFalse(inactive.attemptTUIFallback)
+    func testRepeatedUnauthorizedAlwaysNeedsLoginWithoutFallback() {
+        for active in [true, false] {
+            let outcome = RefreshOutcomePolicy.outcome(for: .unauthorized, isActiveCLI: active)
+            XCTAssertTrue(outcome.state.requiresLogin)
+            XCTAssertFalse(outcome.attemptTUIFallback)
+        }
     }
 
     func testTransportFailureIsReadFailedAndActiveFallsBack() {
@@ -50,5 +48,16 @@ final class RefreshOutcomePolicyTests: XCTestCase {
             return XCTFail("Expected readFailed, got \(outcome.state)")
         }
         XCTAssertFalse(reason.isEmpty)
+    }
+
+    func testPermanentRefreshFailureRequiresLogin() {
+        let error = ClaudeAccountUsageFetchError.refreshFailed(
+            ClaudeOAuthError.refreshRejected(status: 400, body: #"{"error":"invalid_grant"}"#)
+        )
+        for active in [true, false] {
+            let outcome = RefreshOutcomePolicy.outcome(for: error, isActiveCLI: active)
+            XCTAssertTrue(outcome.state.requiresLogin)
+            XCTAssertFalse(outcome.attemptTUIFallback)
+        }
     }
 }

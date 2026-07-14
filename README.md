@@ -36,7 +36,10 @@ usage-based overage.
   change wins and this app asks you to retry. Unrelated Claude/Codex and MCP
   settings are preserved. A legacy Claude snapshot without an OAuth token is
   never offered as a switch target, so it cannot log out the current terminal
-  session. Backups live in
+  session. Expired Claude credentials are refreshed before switching, and
+  Codex validates a copied snapshot through its own account service. Rejected
+  tokens offer a fresh login without disturbing the current CLI account;
+  automatic switching skips anything that cannot be verified. Backups live in
   `~/Library/Application Support/LLMUsageMonitor/Backups/`.
 - The menu bar shows both primary limits for each active account at a glance
   (`Claude S 42% W 18% · Codex S 87% W 51%`). Model-scoped limits such as
@@ -49,6 +52,10 @@ usage-based overage.
   remove, or account switch may present the authorization dialog. Background
   refreshes never rewrite Claude Code's live login, and the app never creates
   Claude Code's Keychain item; Claude Code remains the owner of its ACL.
+- **Expired logins stay actionable.** Detection marks the account and
+  shows a `Log In` action without opening a dialog. A Retry or Switch that
+  discovers an unrecoverable login asks whether to authenticate again. Login
+  terminals launched by the app exit cleanly when the CLI login finishes.
 
 Add, rename, or remove accounts from the popover (the `+` button per
 provider and the `…` menu per account). Browser, Claude Desktop, ChatGPT

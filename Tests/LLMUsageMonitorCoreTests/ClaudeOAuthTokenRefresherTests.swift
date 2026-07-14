@@ -135,6 +135,21 @@ final class ClaudeOAuthTokenRefresherTests: XCTestCase {
         }
     }
 
+    func testOnlyAuthenticationSpecificRefreshRejectionsRequireLogin() {
+        XCTAssertTrue(ClaudeOAuthError.missingRefreshToken.requiresLogin)
+        XCTAssertTrue(
+            ClaudeOAuthError.refreshRejected(
+                status: 400,
+                body: #"{"error":"invalid_grant"}"#
+            ).requiresLogin
+        )
+        XCTAssertTrue(ClaudeOAuthError.refreshRejected(status: 401, body: "").requiresLogin)
+        XCTAssertFalse(ClaudeOAuthError.refreshRejected(status: 408, body: "timeout").requiresLogin)
+        XCTAssertFalse(ClaudeOAuthError.refreshRejected(status: 429, body: "rate limited").requiresLogin)
+        XCTAssertFalse(ClaudeOAuthError.refreshRejected(status: 500, body: "server error").requiresLogin)
+        XCTAssertFalse(ClaudeOAuthError.malformedResponse.requiresLogin)
+    }
+
     private func makeCredentials(extraFields: [String: Any] = [:]) throws -> ClaudeOAuthCredentials {
         var object: [String: Any] = [
             "accessToken": "old-access",

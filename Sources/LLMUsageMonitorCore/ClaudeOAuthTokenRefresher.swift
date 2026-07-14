@@ -19,6 +19,39 @@ public enum ClaudeOAuthError: Error, LocalizedError {
             return "Claude token refresh returned a response in an unexpected format."
         }
     }
+
+    /// Whether retrying the same saved refresh token cannot recover the
+    /// account. Network/server/protocol failures remain retryable; only a
+    /// missing token or an authentication-specific rejection asks the user to
+    /// sign in again.
+    public var requiresLogin: Bool {
+        switch self {
+        case .missingRefreshToken:
+            return true
+        case .refreshRejected(let status, let body):
+            guard status != 408, status != 429, (400..<500).contains(status) else {
+                return false
+            }
+            if status == 401 || status == 403 {
+                return true
+            }
+            let normalized = body.lowercased()
+            let authenticationMarkers = [
+                "invalid_grant",
+                "invalid refresh",
+                "refresh token",
+                "token_invalidated",
+                "token expired",
+                "token revoked",
+                "already used",
+                "sign in again",
+                "login again"
+            ]
+            return authenticationMarkers.contains(where: normalized.contains)
+        case .network, .malformedResponse:
+            return false
+        }
+    }
 }
 
 /// Exchanges a refresh token for a fresh access token at Claude Code's own

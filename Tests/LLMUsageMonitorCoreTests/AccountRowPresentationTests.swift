@@ -14,7 +14,7 @@ final class AccountRowPresentationTests: XCTestCase {
 
         XCTAssertEqual(presentation.refreshProblem?.text, "Couldn't refresh")
         XCTAssertEqual(presentation.refreshProblem?.help, "Offline")
-        XCTAssertEqual(presentation.refreshProblem?.showsRetry, true)
+        XCTAssertEqual(presentation.refreshProblem?.action, .retry)
         XCTAssertNotNil(presentation.footerNote)
     }
 
@@ -109,6 +109,25 @@ final class AccountRowPresentationTests: XCTestCase {
         XCTAssertFalse(presentation.highlightsSwitch)
         XCTAssertTrue(presentation.switchHelp.contains("Log into this account"))
         XCTAssertTrue(presentation.footerNote?.text.contains("terminal") == true)
+    }
+
+    func testExpiredLoginShowsDirectLoginActionAndDoesNotHighlightSwitch() {
+        let profile = AccountProfile(
+            provider: .codex,
+            label: "Expired",
+            identity: AccountIdentity(email: "user@example.com", source: .codexIDToken)
+        )
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: nil,
+            hasStoredSnapshot: true,
+            refreshState: .needsLogin(reason: "Refresh token rejected"),
+            adviceReason: "More quota available"
+        )
+
+        XCTAssertEqual(presentation.refreshProblem?.text, "Login expired — sign in again")
+        XCTAssertEqual(presentation.refreshProblem?.action, .login)
+        XCTAssertFalse(presentation.highlightsSwitch)
     }
 
     func testActiveStaleAccountSurfacesStaleness() {

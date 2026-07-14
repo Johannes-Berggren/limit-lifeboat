@@ -8,19 +8,42 @@ public enum PresentationTone: Equatable, Sendable {
     case danger
 }
 
+public enum AccountRowAction: Equatable, Sendable {
+    case none
+    case retry
+    case login
+
+    public var title: String? {
+        switch self {
+        case .none:
+            return nil
+        case .retry:
+            return "Retry"
+        case .login:
+            return "Log In"
+        }
+    }
+}
+
 public struct AccountRowMessage: Equatable, Sendable {
     public var text: String
     public var icon: String
     public var tone: PresentationTone
     public var help: String
-    public var showsRetry: Bool
+    public var action: AccountRowAction
 
-    public init(text: String, icon: String, tone: PresentationTone, help: String? = nil, showsRetry: Bool = false) {
+    public init(
+        text: String,
+        icon: String,
+        tone: PresentationTone,
+        help: String? = nil,
+        action: AccountRowAction = .none
+    ) {
         self.text = text
         self.icon = icon
         self.tone = tone
         self.help = help ?? text
-        self.showsRetry = showsRetry
+        self.action = action
     }
 }
 
@@ -94,8 +117,10 @@ public struct AccountRowPresentation: Equatable, Sendable {
 
         let resetElapsed = snapshot?.allWindowsResetElapsed(asOf: now) == true
         self.switchTitle = adviceReason == nil ? "Switch" : "Best"
-        self.highlightsSwitch = resetElapsed || adviceReason != nil
-        if !hasStoredSnapshot {
+        self.highlightsSwitch = !refreshState.requiresLogin && (resetElapsed || adviceReason != nil)
+        if refreshState.requiresLogin {
+            self.switchHelp = "Log in to this account again before switching the CLI to it"
+        } else if !hasStoredSnapshot {
             self.switchHelp = "Log into this account once in the terminal so its credentials can be captured"
         } else if let adviceReason {
             self.switchHelp = adviceReason
@@ -136,17 +161,18 @@ public struct AccountRowPresentation: Equatable, Sendable {
                 icon: "exclamationmark.triangle",
                 tone: .warning,
                 help: reason,
-                showsRetry: true
+                action: .retry
             )
-        case .needsLogin:
-            guard hasSnapshot || profile.isActiveCLI else {
-                return nil
-            }
+        case .needsLogin(let reason):
+            let wasPreviouslyLinked = hasSnapshot || profile.identity != nil
             return AccountRowMessage(
-                text: "Not linked — log in to track usage",
+                text: wasPreviouslyLinked
+                    ? "Login expired — sign in again"
+                    : "Not linked — log in to track usage",
                 icon: "person.crop.circle.badge.questionmark",
-                tone: .secondary,
-                help: "Use the … menu → Log In via Terminal to link this account."
+                tone: wasPreviouslyLinked ? .warning : .secondary,
+                help: reason,
+                action: .login
             )
         case .keychainLocked:
             return AccountRowMessage(
@@ -154,7 +180,7 @@ public struct AccountRowPresentation: Equatable, Sendable {
                 icon: "lock",
                 tone: .stale,
                 help: "macOS denied access to this account's saved credentials. Tap Retry to grant access.",
-                showsRetry: true
+                action: .retry
             )
         }
     }
