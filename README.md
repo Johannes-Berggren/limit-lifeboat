@@ -1,70 +1,25 @@
-# LLM Usage Monitor
+# Limit Lifeboat
 
-Native macOS menu-bar app for people with multiple Claude and ChatGPT/Codex
-subscription accounts. It watches how much of each account's included usage
-is left and switches the Claude Code / Codex CLI to another account in one
-click — so you hop to an account with quota remaining instead of paying
-usage-based overage.
+[Limit Lifeboat](https://limitlifeboat.com) is a native macOS menu-bar app for
+people who use multiple Claude and ChatGPT/Codex subscription accounts. It
+shows each account's remaining usage and can switch Claude Code or the Codex
+CLI to another saved account without replacing unrelated CLI or MCP settings.
 
-## How it works
+## Requirements
 
-- **Accounts register themselves.** Log into Claude Code (`claude`) or
-  Codex (`codex login`) in your terminal; on the next refresh the app
-  detects the login, creates (or links) the account, and saves an encrypted
-  credential snapshot in your macOS Keychain. Changes made by Conductor,
-  Claude, Codex, or another terminal are reconciled automatically; opening
-  the popover always triggers an immediate check. No manual setup steps.
-- **Usage is read locally.** For the active account per provider, the app
-  briefly launches Claude Code in screen-reader mode and parses `/usage`,
-  and reads recent local Codex session logs for rate-limit status. Claude
-  Code labels this an approximate local-machine view; it does not include
-  other devices or claude.ai.
-- **Inactive accounts keep their last reading**, annotated with how old it
-  is — and highlighted when the limit window has already reset, meaning
-  that account likely has its full quota back (your best switch target).
-  When that happens to an account that was near or past its limit, the app
-  sends a notification so you know it is worth switching back.
-- **Stale numbers are marked.** Readings older than 30 minutes get a `*`
-  in the menu bar and a "Last checked …" note in the popover, and the app
-  re-reads usage after your Mac wakes from sleep and when you open the
-  popover with outdated data.
-- **Switching is one click.** Every non-active account row has a
-  "Switch CLI to this account" button. The app captures the current login
-  first (nothing is lost), backs up the files it touches, restores the
-  target account's credentials, and verifies the CLI now reports the right
-  account. If another app changes the credentials during the switch, its
-  change wins and this app asks you to retry. Unrelated Claude/Codex and MCP
-  settings are preserved. A legacy Claude snapshot without an OAuth token is
-  never offered as a switch target, so it cannot log out the current terminal
-  session. Expired Claude credentials are refreshed before switching, and
-  Codex validates a copied snapshot through its own account service. Rejected
-  tokens offer a fresh login without disturbing the current CLI account;
-  automatic switching skips anything that cannot be verified. Backups live in
-  `~/Library/Application Support/LLMUsageMonitor/Backups/`.
-- The menu bar shows both primary limits for each active account at a glance
-  (`Claude S 42% W 18% · Codex S 87% W 51%`). Model-scoped limits such as
-  Fable stay in the popover and never drive the menu-bar value or warning
-  color. When an account appears to be burning credits or pay-as-you-go, the
-  primary limits remain visible and `PAYG` is appended.
-- **Background checks never ask for a Keychain password.** If macOS requires
-  authorization, the account keeps its last reading and shows a retryable
-  "Keychain access needed" state. Only a deliberate Retry, login, capture,
-  remove, or account switch may present the authorization dialog. Background
-  refreshes never rewrite Claude Code's live login, and the app never creates
-  Claude Code's Keychain item; Claude Code remains the owner of its ACL.
-- **Expired logins stay actionable.** Detection marks the account and
-  shows a `Log In` action without opening a dialog. A Retry or Switch that
-  discovers an unrecoverable login asks whether to authenticate again. Login
-  terminals launched by the app exit cleanly when the CLI login finishes.
+- An Apple Silicon Mac
+- macOS 14 Sonoma or newer
+- Claude Code and/or the Codex CLI for the providers you want to monitor and
+  switch
 
 Add, rename, or remove accounts from the popover (the `+` button per
 provider and the `…` menu per account). Browser, Claude Desktop, ChatGPT
 Desktop, and CLI sessions are separate: switching affects the CLI only.
 
 Settings (the gear in the popover footer, or ⌘,) cover the refresh
-interval, launch at login, and both notification types. The app checks
-GitHub once a day for a newer release and links to the download when one
-exists — it never updates itself.
+interval, launch at login, organization-name visibility, and both notification
+types. The app checks GitHub once a day for a newer release and links to the
+download when one exists — it never updates itself.
 
 ### Dashboard fallback
 
@@ -74,18 +29,140 @@ browser context. Google sign-in sometimes rejects embedded browser windows;
 if that happens, use `Open in Browser`, sign in there, press Command-A then
 Command-C on the dashboard page, then click `Import Browser Text`.
 
+Intel Macs are not supported by the v1 release.
+
 ## Install
 
-Download the DMG from the latest release, drag the app to Applications,
-and launch it. The app lives in the menu bar (no Dock icon).
+The v1.0.0 distribution is being prepared. The Homebrew command and signed-DMG
+link below become available only after the first signed release is published;
+until then, build from source as described below.
+
+### Homebrew
+
+```bash
+brew install --cask Johannes-Berggren/tap/limit-lifeboat
+```
+
+### Signed DMG
+
+Download the signed and notarized DMG from the
+[latest GitHub release](https://github.com/Johannes-Berggren/limit-lifeboat/releases/latest),
+open it, and drag **Limit Lifeboat** to Applications. Published releases also
+include a SHA-256 checksum file for the DMG.
+
+Limit Lifeboat runs in the menu bar and does not add a Dock icon. Release
+artifacts are only published on the
+[GitHub releases page](https://github.com/Johannes-Berggren/limit-lifeboat/releases).
+
+## How it works
+
+- **Accounts register themselves.** Log in with `claude` or `codex login` in
+  Terminal. On refresh, Limit Lifeboat detects the active account, links or
+  creates its local profile, and saves an encrypted credential snapshot in the
+  macOS Keychain.
+- **Usage stays current.** Claude usage is fetched from Anthropic with the
+  account's saved OAuth credentials, with Claude Code's local `/usage` view as
+  a fallback. Codex usage is read from recent local Codex session data.
+  Inactive accounts retain their last reading and show its age.
+- **Expired logins stay actionable.** Recoverable Claude credentials refresh
+  silently. Rejected logins retain their last reading and show a **Log In**
+  action without opening a background dialog; Retry and Switch can offer to
+  authenticate again.
+- **Switching is explicit.** Selecting **Switch CLI to this account** first
+  captures the current login, backs up the files it will touch, restores the
+  chosen snapshot, and verifies the result. A conflicting change from another
+  process wins and the app asks you to retry. Codex snapshots are force-
+  refreshed and identity-checked in isolation before the live login changes;
+  automatic switching skips targets that cannot be verified.
+- **Warnings are optional.** The app can notify you when an account is nearing
+  a limit or when a previously depleted account is likely available again.
+- **Updates are user-controlled.** Limit Lifeboat checks GitHub at most once a
+  day and links to a new release. It does not update itself.
+
+Browser, Claude Desktop, ChatGPT Desktop, and CLI sessions are separate.
+Switching an account in Limit Lifeboat changes the corresponding CLI login,
+not those other sessions.
+
+## Privacy and security
+
+Limit Lifeboat has no analytics, advertising, or telemetry. Account profiles,
+usage history, and switching backups are stored locally under
+`~/Library/Application Support/LimitLifeboat`; settings use the standard macOS
+preferences domain `com.limitlifeboat.app`. App-managed credential snapshots
+are encrypted by macOS Keychain under the service
+`com.limitlifeboat.app.credentials`.
+
+The app reads Claude Code's provider-owned `Claude Code-credentials` Keychain
+item when necessary, but it does not create or take ownership of that item.
+Background refreshes do not display a Keychain authorization prompt or modify
+the live CLI login. If macOS requires authorization, the app keeps the last
+reading and waits for an explicit retry, capture, removal, or account switch.
+
+Network access is limited to the services needed for the selected features:
+
+- Anthropic endpoints for Claude account identity, token refresh, and usage
+- GitHub's API for the daily update check
+- Claude or ChatGPT web dashboards when you explicitly open an embedded
+  dashboard
+
+Codex usage readings come from local session data. Opening a dashboard uses an
+isolated web data store inside the app; those sessions are separate from your
+normal browser. Terminal Automation, notifications, and launch at login are
+optional macOS permissions or settings and can be changed in System Settings.
+
+Switching necessarily writes selected authentication fields to the provider's
+CLI configuration. Limit Lifeboat preserves unrelated provider and MCP fields
+and creates a local backup before making the change.
+
+Please report security issues through
+[GitHub private vulnerability reporting](SECURITY.md), not a public issue.
+
+## Migrating from LLM Usage Monitor
+
+The first launch can detect data from the pre-release **LLM Usage Monitor**
+identity (`com.johannesberggren.LLMUsageMonitor`). Migration only begins after
+you approve it. The legacy Application Support directory and Keychain items
+are retained as rollback material; migration does not delete or rewrite them.
+You can instead choose **Start Fresh**, which also leaves the legacy data
+untouched. For durable Keychain authorization, migration runs only from a
+Developer ID-signed Limit Lifeboat release; development and ad-hoc builds leave
+the old data untouched.
+
+Quit LLM Usage Monitor before migrating. If Limit Lifeboat already has
+non-empty data, automatic migration stops instead of merging or overwriting
+either data set.
+
+Some macOS state is tied to the old bundle identifier and cannot migrate:
+
+- Notification permission must be granted again.
+- Terminal Automation access may prompt again on the first switch.
+- The new app's launch-at-login registration starts off. The legacy login item
+  is separate; disable it in System Settings before enabling the new one.
+- Embedded dashboard sessions require a new login.
+
+After confirming that every profile, usage history entry, and saved switch
+target works in Limit Lifeboat, you may remove the old app and its retained
+data separately.
 
 ## Build from source
+
+The package requires the Xcode 26 toolchain (including the macOS 26 SDK) to
+compile the guarded Liquid Glass code paths. The resulting app still deploys
+to macOS 14 or newer.
 
 ```bash
 swift test
 ./scripts/package-app.sh
-open dist/LLMUsageMonitor.app
+open "dist/Limit Lifeboat.app"
 ```
+
+Do not use `swift run`: the app must run from an application bundle for macOS
+notifications, Automation, and Keychain identity to work correctly.
+
+Local packaging selects an available Apple Development signing identity. Set
+`SIGN_IDENTITY` to choose one explicitly. If none is available, packaging
+falls back to ad-hoc signing; macOS may then ask for Keychain and Automation
+permission again after rebuilding. Quit the copy in `dist` before rebuilding.
 
 The `/usr/bin/security` interoperability test is opt-in because macOS may show
 a real authorization dialog for that subprocess:
@@ -94,19 +171,9 @@ a real authorization dialog for that subprocess:
 RUN_KEYCHAIN_INTEROP_TESTS=1 swift test --filter testSecurityToolInteroperability
 ```
 
-Local packaging automatically uses the first available Apple Development
-certificate so macOS Keychain approvals remain valid across rebuilds. Set
-`SIGN_IDENTITY` to select a different identity. When no development identity is
-available the script falls back to ad-hoc signing and warns that a rebuilt app
-may require fresh Keychain approval. The first stably signed build can still ask
-once for each item created by an older ad-hoc build; choose `Always Allow` to
-migrate that item's trust to the stable identity.
+See [RELEASING.md](RELEASING.md) for the Developer ID signing, notarization,
+DMG, checksum, and Homebrew release procedure.
 
-Quit the copy in `dist` before rebuilding it. The packaging script refuses to
-delete a running bundle because doing so prevents macOS from verifying that
-process for Keychain access. Conductor also stops a workspace-launched copy
-before archiving that workspace once the shared repository settings are present
-on the default branch.
+## License
 
-Do not use `swift run` — the app must run from a bundle for notifications
-to work. See [RELEASING.md](RELEASING.md) for signed/notarized releases.
+Limit Lifeboat is available under the [MIT License](LICENSE).

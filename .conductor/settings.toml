@@ -1,4 +1,4 @@
 "$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
 
 [scripts]
-archive = "./scripts/manage-workspace-app.sh terminate \"$CONDUCTOR_WORKSPACE_PATH/dist/LLMUsageMonitor.app/Contents/MacOS/LLMUsageMonitor\""
+archive = "./scripts/manage-workspace-app.sh terminate \"$CONDUCTOR_WORKSPACE_PATH/dist/LLMUsageMonitor.app/Contents/MacOS/LLMUsageMonitor\" && ./scripts/manage-workspace-app.sh terminate \"$CONDUCTOR_WORKSPACE_PATH/dist/Limit Lifeboat.app/Contents/MacOS/LimitLifeboat\""

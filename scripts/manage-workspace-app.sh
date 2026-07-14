@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
-# Finds an LLMUsageMonitor process by its exact executable path. This avoids
-# stopping an installed copy or an app launched from another Conductor
-# workspace.
+# Finds an app process by its exact executable path. This avoids stopping an
+# installed copy or an app launched from another Conductor workspace.
 set -euo pipefail
 
 MODE="${1:-}"
 TARGET_EXECUTABLE="${2:-}"
 
 if [[ "$MODE" != "check" && "$MODE" != "terminate" ]] || [[ -z "$TARGET_EXECUTABLE" ]]; then
-  echo "Usage: $0 {check|terminate} /absolute/path/to/LLMUsageMonitor" >&2
+  echo "Usage: $0 {check|terminate} /absolute/path/to/app-executable" >&2
   exit 2
 fi
 
@@ -42,11 +41,11 @@ fi
 
 if [[ "$MODE" == "check" ]]; then
   echo "Refusing to replace $TARGET_EXECUTABLE while it is running (PID ${PIDS[*]})." >&2
-  echo "Quit that copy of LLM Usage Monitor and run the build again. Replacing a live bundle prevents macOS Keychain from verifying the process and causes repeated password prompts." >&2
+  echo "Quit that workspace app and run the build again. Replacing a live bundle prevents macOS Keychain from verifying the process and causes repeated password prompts." >&2
   exit 1
 fi
 
-echo "Stopping workspace copy of LLM Usage Monitor (PID ${PIDS[*]}) before archive."
+echo "Stopping workspace app at $TARGET_EXECUTABLE (PID ${PIDS[*]}) before archive."
 kill "${PIDS[@]}" 2>/dev/null || true
 
 for _ in {1..50}; do
@@ -63,5 +62,5 @@ for _ in {1..50}; do
   sleep 0.1
 done
 
-echo "LLM Usage Monitor did not exit; refusing to archive a workspace containing its running bundle (PID ${PIDS[*]})." >&2
+echo "The workspace app did not exit; refusing to archive its running bundle (PID ${PIDS[*]})." >&2
 exit 1
