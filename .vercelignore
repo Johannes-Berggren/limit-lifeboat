@@ -3,7 +3,8 @@
 .git/
 .github/
 .swiftpm/
-apps/macos/
+apps/macos/*
+!apps/macos/VERSION
 apps/site/.astro/
 apps/site/dist/
 apps/site/node_modules/
