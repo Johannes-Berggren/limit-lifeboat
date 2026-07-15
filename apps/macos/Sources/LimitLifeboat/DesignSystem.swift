@@ -3,20 +3,38 @@ import LimitLifeboatCore
 import SwiftUI
 
 enum DS {
+    static let accent = Color(nsColor: .systemBlue)
+    static let warning = Color(nsColor: .systemOrange)
+    static let danger = Color(nsColor: .systemRed)
+    static let success = Color(nsColor: .systemGreen)
+
+    enum Popover {
+        static let width: CGFloat = 680
+        static let height: CGFloat = 720
+    }
+
     enum Spacing {
         static let xs: CGFloat = 4
         static let tight: CGFloat = 6
         static let sm: CGFloat = 8
         static let md: CGFloat = 12
         static let lg: CGFloat = 16
-        static let xl: CGFloat = 20
-        static let cardPadding: CGFloat = 12
+        static let xl: CGFloat = 24
+        static let xxl: CGFloat = 32
+        static let cardPadding: CGFloat = 16
     }
 
     enum Radius {
-        static let small: CGFloat = 6
-        static let medium: CGFloat = 10
-        static let card: CGFloat = 14
+        static let small: CGFloat = 8
+        static let medium: CGFloat = 12
+        static let card: CGFloat = 18
+        static let panel: CGFloat = 22
+    }
+
+    enum Motion {
+        static let quick = Animation.easeOut(duration: 0.18)
+        static let standard = Animation.spring(response: 0.32, dampingFraction: 0.88)
+        static let progress = Animation.spring(response: 0.42, dampingFraction: 0.86)
     }
 
     /// systemYellow is near-invisible on light backgrounds, so light mode gets a darker amber.
@@ -29,11 +47,11 @@ enum DS {
     static func riskColor(_ level: RiskLevel) -> Color {
         switch level {
         case .healthy:
-            return .green
+            return accent
         case .warning:
-            return .orange
+            return warning
         case .depleted:
-            return .red
+            return danger
         case .stale:
             return staleAmber
         case .unknown:
@@ -44,13 +62,13 @@ enum DS {
     static func billingColor(_ mode: BillingUsageMode) -> Color {
         switch mode {
         case .includedSubscription:
-            return .green
+            return success
         case .includedSubscriptionNearLimit:
-            return .orange
+            return warning
         case .overLimitPayAsYouGo:
-            return .red
+            return danger
         case .payAsYouGoVisible:
-            return .orange
+            return warning
         case .needsLogin:
             return staleAmber
         case .unknown:
@@ -63,18 +81,18 @@ enum DS {
         case .secondary:
             return .secondary
         case .warning:
-            return .orange
+            return warning
         case .stale:
             return staleAmber
         case .success:
-            return .green
+            return success
         case .danger:
-            return .red
+            return danger
         }
     }
 
     static func providerAccent(_ provider: Provider) -> Color {
-        provider == .claude ? .purple : .blue
+        accent
     }
 
     static func providerSymbol(_ provider: Provider) -> String {
@@ -103,11 +121,15 @@ struct Badge: View {
 
     var body: some View {
         content
-            .font(.caption2.weight(.semibold))
+            .font(.caption2.weight(.medium))
             .foregroundStyle(color)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2.5)
-            .background(color.opacity(0.14), in: Capsule())
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(color.opacity(0.11), in: Capsule())
+            .overlay {
+                Capsule()
+                    .strokeBorder(color.opacity(0.14), lineWidth: 0.5)
+            }
     }
 
     @ViewBuilder
@@ -124,6 +146,7 @@ struct StatusBanner: View {
     let text: String
     let systemImage: String
     let color: Color
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         HStack(alignment: .top, spacing: DS.Spacing.sm) {
@@ -138,9 +161,9 @@ struct StatusBanner: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, DS.Spacing.md)
-        .padding(.vertical, DS.Spacing.sm)
+        .padding(.vertical, 10)
         .background(
-            color.opacity(0.09),
+            reduceTransparency ? Color(nsColor: .controlBackgroundColor) : color.opacity(0.07),
             in: RoundedRectangle(cornerRadius: DS.Radius.medium, style: .continuous)
         )
         .overlay {
@@ -151,9 +174,17 @@ struct StatusBanner: View {
 }
 
 extension View {
-    func cardSurface(tint: Color? = nil, isEmphasized: Bool = false) -> some View {
+    func cardSurface(
+        tint: Color? = nil,
+        isEmphasized: Bool = false,
+        isHovered: Bool = false
+    ) -> some View {
         modifier(CardSurfaceModifier(tint: tint))
-            .modifier(ActiveCardEmphasisModifier(isEmphasized: isEmphasized))
+            .modifier(ActiveCardEmphasisModifier(isEmphasized: isEmphasized, isHovered: isHovered))
+    }
+
+    func calmSurface(tint: Color? = nil) -> some View {
+        modifier(CardSurfaceModifier(tint: tint))
     }
 
     @ViewBuilder
@@ -174,22 +205,29 @@ extension View {
 
 private struct ActiveCardEmphasisModifier: ViewModifier {
     let isEmphasized: Bool
+    let isHovered: Bool
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous)
         content
             .overlay {
-                if isEmphasized {
-                    shape
-                        .strokeBorder(Color.green.opacity(0.72), lineWidth: 1.5)
-                        .allowsHitTesting(false)
-                }
+                shape
+                    .strokeBorder(
+                        isEmphasized
+                            ? DS.accent.opacity(0.62)
+                            : Color.primary.opacity(isHovered ? 0.13 : 0.075),
+                        lineWidth: isEmphasized ? 1.25 : 0.5
+                    )
+                    .allowsHitTesting(false)
             }
             .shadow(
-                color: isEmphasized ? Color.green.opacity(0.16) : .clear,
-                radius: isEmphasized ? 5 : 0,
-                y: isEmphasized ? 1 : 0
+                color: isEmphasized
+                    ? DS.accent.opacity(0.13)
+                    : Color.black.opacity(isHovered ? 0.08 : 0.035),
+                radius: isEmphasized ? 9 : (isHovered ? 7 : 3),
+                y: isEmphasized || isHovered ? 2 : 1
             )
+            .scaleEffect(isHovered ? 1.002 : 1)
     }
 }
 
@@ -205,28 +243,35 @@ private struct CardSurfaceModifier: ViewModifier {
         if reduceTransparency {
             content
                 .background(Color(nsColor: .controlBackgroundColor), in: shape)
-                .overlay(shape.strokeBorder(borderGradient, lineWidth: 0.75))
-                .shadow(color: .black.opacity(0.05), radius: 3, y: 1)
+                .overlay {
+                    if let tint {
+                        shape.fill(tint.opacity(0.045)).allowsHitTesting(false)
+                    }
+                }
         } else if #available(macOS 26.0, *) {
             content
-                .glassEffect(.regular.tint(tint?.opacity(0.06)), in: shape)
+                .glassEffect(.regular, in: shape)
+                .overlay {
+                    if let tint {
+                        shape.fill(tint.opacity(0.035)).allowsHitTesting(false)
+                    }
+                }
         } else {
             content
                 .background(.regularMaterial, in: shape)
-                .overlay(shape.strokeBorder(borderGradient, lineWidth: 0.75))
-                .shadow(color: .black.opacity(0.06), radius: 4, y: 1)
+                .overlay {
+                    if let tint {
+                        shape.fill(tint.opacity(0.035)).allowsHitTesting(false)
+                    }
+                }
         }
     }
+}
 
-    private var borderGradient: LinearGradient {
-        LinearGradient(
-            colors: [
-                .white.opacity(0.24),
-                (tint ?? .white).opacity(0.09),
-                .black.opacity(0.07)
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
+struct CalmWindowBackground: View {
+    var body: some View {
+        Color(nsColor: .windowBackgroundColor)
+            .overlay(Color.primary.opacity(0.012))
+            .ignoresSafeArea()
     }
 }

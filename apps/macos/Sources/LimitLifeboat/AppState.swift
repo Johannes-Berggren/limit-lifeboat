@@ -1302,7 +1302,7 @@ final class AppState: ObservableObject {
         if hasExistingSession {
             do {
                 guard let initialObservation else {
-                    throw CLISwitcherError.credentialConflict("live ChatGPT/Codex credentials")
+                    throw CLISwitcherError.credentialConflict("live Codex credentials")
                 }
                 _ = try reconcileLiveCredentials(provider: .codex, origin: .login, observation: initialObservation)
             } catch {

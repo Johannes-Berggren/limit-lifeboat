@@ -11,7 +11,7 @@ public enum Provider: String, Codable, CaseIterable, Identifiable, Sendable {
         case .claude:
             return "Claude"
         case .codex:
-            return "ChatGPT/Codex"
+            return "Codex"
         }
     }
 

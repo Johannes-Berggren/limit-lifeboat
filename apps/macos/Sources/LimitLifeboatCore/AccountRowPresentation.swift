@@ -60,9 +60,8 @@ public struct BillingBadgePresentation: Equatable, Sendable {
 }
 
 public struct AccountGaugeGroups: Equatable, Sendable {
-    /// Every limit is visible in the dense card. Keeping this in the pure
-    /// presentation model makes it impossible for the SwiftUI layer to
-    /// accidentally reintroduce a second collapsed state.
+    /// Every limit available to the card. `featured` chooses the useful compact
+    /// summary and `additional` preserves the rest in stable display order.
     public var visible: [UsageWindow]
     public var needsSessionCaptureNote: Bool
     /// True when the visible gauges are the last reading from *before* an
@@ -70,11 +69,51 @@ public struct AccountGaugeGroups: Equatable, Sendable {
     /// flag the numbers as pre-reset instead of letting stale bars contradict
     /// the green "quota restored" footer note.
     public var showsPreResetNote: Bool
+    /// Active accounts show all reported limits without requiring disclosure.
+    /// Inactive cards stay compact and reveal their remaining limits on demand.
+    public var showsAllLimitsAtAGlance: Bool
+    private var featuredWindowID: String?
 
-    public init(visible: [UsageWindow], needsSessionCaptureNote: Bool, showsPreResetNote: Bool = false) {
+    public init(
+        visible: [UsageWindow],
+        needsSessionCaptureNote: Bool,
+        showsPreResetNote: Bool = false,
+        showsAllLimitsAtAGlance: Bool = false,
+        featuredWindowID: String? = nil
+    ) {
         self.visible = visible
         self.needsSessionCaptureNote = needsSessionCaptureNote
         self.showsPreResetNote = showsPreResetNote
+        self.showsAllLimitsAtAGlance = showsAllLimitsAtAGlance
+        self.featuredWindowID = featuredWindowID
+    }
+
+    /// The session limit leads during ordinary use. A primary weekly limit
+    /// takes over once it is more urgent; scoped limits remain visible below it
+    /// on active cards rather than hijacking the account's headline.
+    public var featured: UsageWindow? {
+        if let featuredWindowID,
+           let selected = visible.first(where: { $0.id == featuredWindowID }) {
+            return selected
+        }
+        return visible.reduce(nil as UsageWindow?) { current, candidate in
+            guard let current else { return candidate }
+            return candidate.usedPercent > current.usedPercent ? candidate : current
+        }
+    }
+
+    /// Remaining gauges in their stable display order for the disclosure area.
+    public var additional: [UsageWindow] {
+        guard let featured else { return [] }
+        return visible.filter { $0.id != featured.id }
+    }
+
+    public var atAGlanceAdditional: [UsageWindow] {
+        showsAllLimitsAtAGlance ? additional : []
+    }
+
+    public var disclosedAdditional: [UsageWindow] {
+        showsAllLimitsAtAGlance ? [] : additional
     }
 }
 
@@ -273,7 +312,9 @@ public struct AccountRowPresentation: Equatable, Sendable {
         return AccountGaugeGroups(
             visible: ordered,
             needsSessionCaptureNote: needsSession,
-            showsPreResetNote: showsPreReset
+            showsPreResetNote: showsPreReset,
+            showsAllLimitsAtAGlance: profile.isActiveCLI,
+            featuredWindowID: snapshot?.mostRelevantWindow?.id
         )
     }
 }

@@ -1,25 +1,62 @@
 import Foundation
 
+public struct MenuBarLimitValue: Equatable, Sendable {
+    public var label: String
+    public var usedPercent: Int
+    public var riskLevel: RiskLevel
+
+    public init(label: String, usedPercent: Int, riskLevel: RiskLevel) {
+        self.label = label
+        self.usedPercent = usedPercent
+        self.riskLevel = riskLevel
+    }
+}
+
+public struct MenuBarProviderLimits: Equatable, Sendable {
+    public var provider: Provider
+    public var limits: [MenuBarLimitValue]
+
+    public init(provider: Provider, limits: [MenuBarLimitValue]) {
+        self.provider = provider
+        self.limits = limits
+    }
+}
+
 /// Platform-neutral menu-bar content. Keeping its derivation in Core makes
 /// active-account, staleness, and accessibility policy directly testable.
 public struct MenuBarSummary: Equatable, Sendable {
     public var claudeValue: String
     public var codexValue: String
+    public var compactValue: String
     public var accessibilityText: String
     public var riskLevel: RiskLevel
+    /// Every reported quota for each currently active provider account, in
+    /// stable provider and window display order. An empty limit array means
+    /// that provider has an active account whose reading is unavailable.
+    public var activeProviderLimits: [MenuBarProviderLimits]
 
-    public init(claudeValue: String, codexValue: String, accessibilityText: String, riskLevel: RiskLevel) {
+    public init(
+        claudeValue: String,
+        codexValue: String,
+        accessibilityText: String,
+        riskLevel: RiskLevel,
+        compactValue: String = "–",
+        activeProviderLimits: [MenuBarProviderLimits] = []
+    ) {
         self.claudeValue = claudeValue
         self.codexValue = codexValue
+        self.compactValue = compactValue
         self.accessibilityText = accessibilityText
         self.riskLevel = riskLevel
+        self.activeProviderLimits = activeProviderLimits
     }
 
     public static let empty = MenuBarSummary(
         claudeValue: "–",
         codexValue: "–",
         accessibilityText: "LLM usage has not been refreshed.",
-        riskLevel: .unknown
+        riskLevel: .unknown,
+        compactValue: "–"
     )
 }
 
@@ -29,12 +66,32 @@ public enum MenuBarSummaryProjector {
         snapshots: [UUID: UsageSnapshot],
         now: Date = Date()
     ) -> MenuBarSummary {
-        MenuBarSummary(
+        let selected = mostRelevantActiveWindow(
+            profiles: profiles,
+            snapshots: snapshots
+        )
+        return MenuBarSummary(
             claudeValue: providerValue(.claude, profiles: profiles, snapshots: snapshots, now: now),
             codexValue: providerValue(.codex, profiles: profiles, snapshots: snapshots, now: now),
             accessibilityText: accessibilitySummary(profiles: profiles, snapshots: snapshots, now: now),
-            riskLevel: highestRisk(profiles: profiles, snapshots: snapshots, now: now)
+            riskLevel: highestRisk(
+                profiles: profiles,
+                snapshots: snapshots,
+                selected: selected,
+                now: now
+            ),
+            compactValue: compactValue(profiles: profiles, selected: selected),
+            activeProviderLimits: activeProviderLimits(
+                profiles: profiles,
+                snapshots: snapshots,
+                now: now
+            )
         )
+    }
+
+    private struct SelectedWindow {
+        var window: UsageWindow
+        var snapshot: UsageSnapshot
     }
 
     private static func activeProfile(_ provider: Provider, profiles: [AccountProfile]) -> AccountProfile? {
@@ -71,9 +128,92 @@ public enum MenuBarSummaryProjector {
         return "\(Int(window.usedPercent.rounded()))%"
     }
 
+    private static func activeProviderLimits(
+        profiles: [AccountProfile],
+        snapshots: [UUID: UsageSnapshot],
+        now: Date
+    ) -> [MenuBarProviderLimits] {
+        Provider.allCases.compactMap { provider in
+            guard let profile = activeProfile(provider, profiles: profiles) else {
+                return nil
+            }
+            guard let snapshot = snapshots[profile.id] else {
+                return MenuBarProviderLimits(provider: provider, limits: [])
+            }
+
+            let isStale = snapshot.isStale(asOf: now)
+            let limits = snapshot.orderedDisplayWindows.map { window in
+                MenuBarLimitValue(
+                    label: shortLabel(for: window),
+                    usedPercent: Int(window.usedPercent.rounded()),
+                    riskLevel: isStale
+                        ? .stale
+                        : min(
+                            window.riskLevel,
+                            UsageThresholds.standard.riskLevel(usedPercent: window.usedPercent)
+                        )
+                )
+            }
+            return MenuBarProviderLimits(provider: provider, limits: limits)
+        }
+    }
+
+    private static func shortLabel(for window: UsageWindow) -> String {
+        switch window.kind {
+        case .session:
+            return "S"
+        case .weekly:
+            return "W"
+        case .weeklyScoped:
+            let label = window.label
+            if let opening = label.firstIndex(of: "("),
+               label.last == ")",
+               opening < label.index(before: label.endIndex) {
+                return String(label[label.index(after: opening)..<label.index(before: label.endIndex)])
+            }
+            return label
+        case .other:
+            return window.label
+        }
+    }
+
+    private static func compactValue(
+        profiles: [AccountProfile],
+        selected: SelectedWindow?
+    ) -> String {
+        if let selected {
+            return percentValue(selected.window)
+        }
+        return profiles.contains(where: \.isActiveCLI) ? "?" : "–"
+    }
+
+    /// Each provider first chooses its useful headline quota (normally session,
+    /// or weekly once it enters the warning band). Stable provider traversal
+    /// then chooses the tighter of those headline quotas for the menu bar.
+    private static func mostRelevantActiveWindow(
+        profiles: [AccountProfile],
+        snapshots: [UUID: UsageSnapshot]
+    ) -> SelectedWindow? {
+        var selected: SelectedWindow?
+        for provider in Provider.allCases {
+            guard let profile = activeProfile(provider, profiles: profiles),
+                  let snapshot = snapshots[profile.id] else {
+                continue
+            }
+            guard let window = snapshot.mostRelevantWindow else {
+                continue
+            }
+            if selected == nil || window.usedPercent > selected!.window.usedPercent {
+                selected = SelectedWindow(window: window, snapshot: snapshot)
+            }
+        }
+        return selected
+    }
+
     private static func highestRisk(
         profiles: [AccountProfile],
         snapshots: [UUID: UsageSnapshot],
+        selected: SelectedWindow?,
         now: Date
     ) -> RiskLevel {
         let activeSnapshots = Provider.allCases
@@ -83,16 +223,20 @@ public enum MenuBarSummaryProjector {
             return .depleted
         }
 
-        let risk = activeSnapshots
-            .flatMap(\.primaryLimitWindows)
-            .map { min($0.riskLevel, UsageThresholds.standard.riskLevel(usedPercent: $0.usedPercent)) }
-            .min() ?? .unknown
-        if risk == .healthy || risk == .unknown,
-           !activeSnapshots.isEmpty,
-           activeSnapshots.allSatisfy({ $0.isStale(asOf: now) }) {
+        guard let selected else {
+            if !activeSnapshots.isEmpty,
+               activeSnapshots.allSatisfy({ $0.isStale(asOf: now) }) {
+                return .stale
+            }
+            return .unknown
+        }
+        if selected.snapshot.isStale(asOf: now) {
             return .stale
         }
-        return risk
+        return min(
+            selected.window.riskLevel,
+            UsageThresholds.standard.riskLevel(usedPercent: selected.window.usedPercent)
+        )
     }
 
     private static func accessibilitySummary(
@@ -126,13 +270,13 @@ public enum MenuBarSummaryProjector {
                 mode = "usage mode unknown"
             }
 
-            let session = snapshot.window(ofKind: .session)
-                .map { "session \(Int($0.usedPercent.rounded())) percent used" }
-                ?? "session limit unavailable"
-            let weekly = snapshot.window(ofKind: .weekly)
-                .map { "weekly \(Int($0.usedPercent.rounded())) percent used" }
-                ?? "weekly limit unavailable"
-            var entry = "\(provider.displayName) active account \(profile.label): \(session), \(weekly), \(mode)"
+            let windows = snapshot.orderedDisplayWindows
+            let usage = windows.isEmpty
+                ? "usage unavailable"
+                : windows.map {
+                    "\($0.label) \(Int($0.usedPercent.rounded())) percent used"
+                }.joined(separator: ", ")
+            var entry = "\(provider.displayName) active account \(profile.label): \(usage), \(mode)"
             if snapshot.isStale(asOf: now) {
                 entry += ", last checked \(snapshot.lastRefreshed.formatted(.relative(presentation: .named)))"
             }

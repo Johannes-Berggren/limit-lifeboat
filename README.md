@@ -1,7 +1,7 @@
 # Limit Lifeboat
 
 [Limit Lifeboat](https://limitlifeboat.com) is a native macOS menu-bar app for
-people who use multiple Claude and ChatGPT/Codex subscription accounts. It
+people who use multiple Claude and Codex subscription accounts. It
 shows each account's remaining usage and can switch Claude Code or the Codex
 CLI to another saved account without replacing unrelated CLI or MCP settings.
 

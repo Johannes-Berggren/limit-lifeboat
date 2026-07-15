@@ -44,14 +44,15 @@ struct DashboardContainerView: View {
     let onText: (String) -> Void
     @State private var captureSignal = 0
     @State private var notice: DashboardNotice?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: DS.Spacing.md) {
+            HStack(spacing: DS.Spacing.lg) {
                 VStack(alignment: .leading, spacing: 2) {
                     ProviderLabel(text: profile.label, provider: profile.provider)
-                        .font(.headline)
-                    Text("Usage dashboard")
+                        .font(.title3.weight(.semibold))
+                    Text("Usage Dashboard")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -61,11 +62,12 @@ struct DashboardContainerView: View {
                 Button {
                     captureSignal += 1
                 } label: {
-                    Label("Read Page", systemImage: "text.viewfinder")
+                    Label("Update Usage", systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(.borderedProminent)
+                .controlSize(.regular)
 
-                ControlGroup {
+                Menu {
                     Button {
                         openInBrowser()
                     } label: {
@@ -79,18 +81,30 @@ struct DashboardContainerView: View {
                         Label("Import Browser Text", systemImage: "doc.on.clipboard")
                     }
                     .help("Copy dashboard page text from your browser, then import it here")
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 16))
+                        .frame(width: 24, height: 24)
                 }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("More dashboard options")
             }
-            .padding(.horizontal, DS.Spacing.lg)
-            .padding(.vertical, DS.Spacing.md)
+            .padding(.horizontal, DS.Spacing.xl)
+            .padding(.vertical, DS.Spacing.lg)
+            .background(.bar)
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(Color.primary.opacity(0.07))
+                    .frame(height: 0.5)
+            }
 
             if let notice {
                 DashboardNoticeView(notice: notice)
-                    .padding(.horizontal, DS.Spacing.lg)
-                    .padding(.bottom, DS.Spacing.md)
+                    .padding(.horizontal, DS.Spacing.xl)
+                    .padding(.vertical, DS.Spacing.md)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
-
-            Divider()
 
             DashboardWebView(
                 profile: profile,
@@ -99,6 +113,9 @@ struct DashboardContainerView: View {
                 onNotice: { notice = $0 }
             )
         }
+        .background(CalmWindowBackground())
+        .tint(DS.accent)
+        .animation(reduceMotion ? nil : DS.Motion.standard, value: notice)
     }
 
     private func openInBrowser() {
@@ -225,11 +242,11 @@ struct DashboardNoticeView: View {
     private var color: Color {
         switch notice.tone {
         case .info:
-            return .blue
+            return DS.accent
         case .warning:
-            return .orange
+            return DS.warning
         case .success:
-            return .green
+            return DS.success
         }
     }
 }

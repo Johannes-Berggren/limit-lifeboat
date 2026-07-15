@@ -6,6 +6,22 @@ public enum AccountProfileOrdering {
     public static func activeFirst(_ profiles: [AccountProfile]) -> [AccountProfile] {
         profiles.filter(\.isActiveCLI) + profiles.filter { !$0.isActiveCLI }
     }
+
+    /// Keeps the active CLI account at the top and, when one exists, places
+    /// the advised handoff target directly after it. All other accounts retain
+    /// repository order so routine refreshes never shuffle the list.
+    public static func activeThenRecommended(
+        _ profiles: [AccountProfile],
+        recommendedID: UUID?
+    ) -> [AccountProfile] {
+        let active = profiles.filter(\.isActiveCLI)
+        let inactive = profiles.filter { !$0.isActiveCLI }
+        guard let recommendedID,
+              let recommended = inactive.first(where: { $0.id == recommendedID }) else {
+            return active + inactive
+        }
+        return active + [recommended] + inactive.filter { $0.id != recommendedID }
+    }
 }
 
 public struct AccountIdentity: Codable, Hashable, Sendable {

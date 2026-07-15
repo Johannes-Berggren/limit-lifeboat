@@ -65,7 +65,7 @@ final class AccountRowPresentationTests: XCTestCase {
         XCTAssertNotNil(presentation.footerNote)
     }
 
-    func testEveryScopedWindowIsVisibleInDenseView() {
+    func testEveryScopedWindowRemainsAvailableForDisclosure() {
         let profile = AccountProfile(provider: .claude, label: "Claude", isActiveCLI: true)
         let windows = [
             UsageSnapshotFactory.window(
@@ -99,6 +99,94 @@ final class AccountRowPresentationTests: XCTestCase {
         )
 
         XCTAssertEqual(presentation.gauges.visible.map(\.id), ["session", "weekly-ok", "weekly-risk"])
+        XCTAssertEqual(presentation.gauges.featured?.id, "weekly-risk")
+        XCTAssertEqual(presentation.gauges.additional.map(\.id), ["session", "weekly-ok"])
+        XCTAssertEqual(presentation.gauges.atAGlanceAdditional.map(\.id), ["session", "weekly-ok"])
+        XCTAssertTrue(presentation.gauges.disclosedAdditional.isEmpty)
+    }
+
+    func testPrimaryWeeklyBecomesFeaturedWithoutHidingSessionOrScopedLimit() {
+        let profile = AccountProfile(provider: .claude, label: "Claude", isActiveCLI: true)
+        let windows = [
+            UsageSnapshotFactory.window(
+                descriptor: UsageWindowDescriptor(id: "session", kind: .session, label: "Session"),
+                usedPercent: 48
+            ),
+            UsageSnapshotFactory.window(
+                descriptor: UsageWindowDescriptor(id: "weekly-all", kind: .weekly, label: "Weekly (all models)"),
+                usedPercent: 94
+            ),
+            UsageSnapshotFactory.window(
+                descriptor: UsageWindowDescriptor(id: "weekly-fable", kind: .weeklyScoped, label: "Weekly (Fable)"),
+                usedPercent: 100
+            )
+        ]
+        let snapshot = UsageSnapshotFactory.snapshot(
+            accountID: profile.id,
+            provider: .claude,
+            windows: windows,
+            source: "test",
+            lastRefreshed: Date(),
+            message: "test"
+        )
+
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: snapshot,
+            hasStoredSnapshot: true,
+            refreshState: .ok,
+            adviceReason: nil
+        )
+
+        XCTAssertEqual(presentation.gauges.featured?.id, "weekly-all")
+        XCTAssertEqual(
+            presentation.gauges.atAGlanceAdditional.map(\.id),
+            ["session", "weekly-fable"]
+        )
+    }
+
+    func testHealthyWeeklyDoesNotDisplaceSessionAsFeaturedGauge() {
+        let profile = AccountProfile(provider: .claude, label: "Claude", isActiveCLI: true)
+        let snapshot = UsageSnapshotFactory.snapshot(
+            accountID: profile.id,
+            provider: .claude,
+            windows: [
+                UsageSnapshotFactory.window(
+                    descriptor: UsageWindowDescriptor(id: "session", kind: .session, label: "Session"),
+                    usedPercent: 30
+                ),
+                UsageSnapshotFactory.window(
+                    descriptor: UsageWindowDescriptor(id: "weekly", kind: .weekly, label: "Weekly"),
+                    usedPercent: 70
+                )
+            ],
+            source: "test",
+            lastRefreshed: Date(),
+            message: "test"
+        )
+
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: snapshot,
+            hasStoredSnapshot: true,
+            refreshState: .ok,
+            adviceReason: nil
+        )
+
+        XCTAssertEqual(presentation.gauges.featured?.id, "session")
+        XCTAssertEqual(presentation.gauges.atAGlanceAdditional.map(\.id), ["weekly"])
+    }
+
+    func testFeaturedGaugeUsesStableOrderToBreakTies() {
+        let first = UsageWindow(id: "first", kind: .session, label: "First", usedPercent: 75)
+        let second = UsageWindow(id: "second", kind: .weekly, label: "Second", usedPercent: 75)
+        let groups = AccountGaugeGroups(
+            visible: [first, second],
+            needsSessionCaptureNote: false
+        )
+
+        XCTAssertEqual(groups.featured?.id, "first")
+        XCTAssertEqual(groups.additional.map(\.id), ["second"])
     }
 
     func testAdviceHighlightsAndLabelsSwitch() {

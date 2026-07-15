@@ -12,6 +12,7 @@ struct UsageHistoryChartView: View {
     var currentWindows: [UsageWindow] = []
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var scope: Scope = .day
 
     enum Scope: String, CaseIterable, Identifiable {
@@ -47,95 +48,123 @@ struct UsageHistoryChartView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: DS.Spacing.md) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Usage History")
-                        .font(.title3.weight(.semibold))
-                    ProviderLabel(text: profile.label, provider: profile.provider)
-                        .font(.caption)
-                }
-                Spacer()
-                Picker("Scope", selection: $scope) {
-                    ForEach(Scope.allCases) { scope in
-                        Text(scope.rawValue).tag(scope)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .fixedSize()
-            }
+        ZStack {
+            CalmWindowBackground()
 
-            if points.isEmpty {
-                ContentUnavailableView(
-                    "No readings yet",
-                    systemImage: "chart.xyaxis.line",
-                    description: Text("History accumulates as usage is refreshed; check back after a few refresh cycles.")
-                )
-                .frame(minHeight: 220)
-            } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: DS.Spacing.sm) {
-                        ForEach(latestValues) { value in
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(value.label)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                Text("\(Int(value.usedPercent.rounded()))%")
-                                    .font(.caption.monospacedDigit().weight(.semibold))
+            VStack(alignment: .leading, spacing: DS.Spacing.lg) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Usage History")
+                            .font(.title2.weight(.semibold))
+                        ProviderLabel(text: profile.label, provider: profile.provider)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Picker("Scope", selection: $scope) {
+                        ForEach(Scope.allCases) { scope in
+                            Text(scope.rawValue).tag(scope)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
+                }
+
+                if points.isEmpty {
+                    ContentUnavailableView(
+                        "No readings yet",
+                        systemImage: "chart.xyaxis.line",
+                        description: Text("History accumulates as usage is refreshed; check back after a few refresh cycles.")
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 280)
+                    .calmSurface()
+                } else {
+                    VStack(alignment: .leading, spacing: DS.Spacing.lg) {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: DS.Spacing.lg) {
+                                ForEach(latestValues) { value in
+                                    HStack(spacing: DS.Spacing.tight) {
+                                        Circle()
+                                            .fill(seriesColor(for: value.label))
+                                            .frame(width: 7, height: 7)
+                                        Text(value.label)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                        Text("\(Int(value.usedPercent.rounded()))%")
+                                            .font(.caption.monospacedDigit().weight(.semibold))
+                                    }
+                                }
                             }
-                            .padding(.horizontal, DS.Spacing.sm)
-                            .padding(.vertical, DS.Spacing.tight)
-                            .background(
-                                Color.primary.opacity(0.04),
-                                in: RoundedRectangle(cornerRadius: DS.Radius.small, style: .continuous)
+                        }
+
+                        Chart(points) { point in
+                            LineMark(
+                                x: .value("Time", point.timestamp),
+                                y: .value("Used", point.usedPercent)
                             )
+                            .foregroundStyle(by: .value("Window", point.label))
+                            .interpolationMethod(.monotone)
+                            .lineStyle(StrokeStyle(lineWidth: 2))
+
+                            PointMark(
+                                x: .value("Time", point.timestamp),
+                                y: .value("Used", point.usedPercent)
+                            )
+                            .foregroundStyle(by: .value("Window", point.label))
+                            .symbolSize(14)
                         }
-                    }
-                }
-
-                Chart(points) { point in
-                    LineMark(
-                        x: .value("Time", point.timestamp),
-                        y: .value("Used", point.usedPercent)
-                    )
-                    .foregroundStyle(by: .value("Window", point.label))
-                    .interpolationMethod(.monotone)
-                    .lineStyle(StrokeStyle(lineWidth: 2))
-
-                    PointMark(
-                        x: .value("Time", point.timestamp),
-                        y: .value("Used", point.usedPercent)
-                    )
-                    .foregroundStyle(by: .value("Window", point.label))
-                    .symbolSize(16)
-                }
-                .chartYScale(domain: 0...100)
-                .chartLegend(position: .top, alignment: .leading, spacing: DS.Spacing.sm)
-                .chartYAxis {
-                    AxisMarks(values: [0, 25, 50, 75, 100]) { value in
-                        AxisGridLine()
-                        AxisValueLabel {
-                            if let percent = value.as(Int.self) {
-                                Text("\(percent)%")
+                        .chartForegroundStyleScale(domain: seriesLabels, range: seriesColors)
+                        .chartYScale(domain: 0...100)
+                        .chartLegend(.hidden)
+                        .chartYAxis {
+                            AxisMarks(values: [0, 25, 50, 75, 100]) { value in
+                                AxisGridLine()
+                                    .foregroundStyle(Color.primary.opacity(0.06))
+                                AxisValueLabel {
+                                    if let percent = value.as(Int.self) {
+                                        Text("\(percent)%")
+                                    }
+                                }
                             }
                         }
+                        .frame(minHeight: 250)
+                        .accessibilityLabel("Usage history for \(profile.label)")
                     }
+                    .padding(DS.Spacing.lg)
+                    .calmSurface()
+                    .animation(reduceMotion ? nil : DS.Motion.standard, value: scope)
                 }
-                .frame(minHeight: 220)
-                .accessibilityLabel("Usage history for \(profile.label)")
-            }
 
-            HStack {
-                Spacer()
-                Button("Done") { dismiss() }
-                    .keyboardShortcut(.defaultAction)
+                HStack {
+                    Spacer()
+                    Button("Done") { dismiss() }
+                        .keyboardShortcut(.defaultAction)
+                }
             }
+            .padding(DS.Spacing.xl)
         }
-        .padding(DS.Spacing.lg)
-        .frame(width: 520)
-        .frame(minHeight: 360)
+        .frame(width: 600)
+        .frame(minHeight: 420)
+        .tint(DS.accent)
+    }
+
+    private var seriesLabels: [String] {
+        latestValues.map(\.label)
+    }
+
+    private var seriesColors: [Color] {
+        seriesLabels.indices.map { seriesPalette[$0 % seriesPalette.count] }
+    }
+
+    private var seriesPalette: [Color] {
+        [.blue, .purple, .orange, .green, .pink, .teal, .indigo]
+    }
+
+    private func seriesColor(for label: String) -> Color {
+        guard let index = seriesLabels.firstIndex(of: label) else { return DS.accent }
+        return seriesPalette[index % seriesPalette.count]
     }
 
     private var points: [Point] {
