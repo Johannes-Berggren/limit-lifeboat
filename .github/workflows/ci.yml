@@ -36,7 +36,7 @@ jobs:
           grep -Fq '"identity" : "sparkle"' apps/macos/Package.resolved
           grep -Fq '"version" : "2.9.4"' apps/macos/Package.resolved
       - name: Test Swift package
-        run: swift test --package-path apps/macos
+        run: swift test --package-path apps/macos --disable-keychain
       - name: Package arm64 app
         env:
           SIGN_IDENTITY: "-"
@@ -71,7 +71,7 @@ jobs:
           test "$(plutil -extract SUFeedURL raw -o - "$info")" = \
             "https://github.com/Johannes-Berggren/limit-lifeboat/releases/latest/download/appcast.xml"
           test "$(plutil -extract SUPublicEDKey raw -o - "$info")" = \
-            "9mfTfQVDLtvuNmxMr1BvduLMOiVeceFp5rOkOC3PW5Y="
+            "sByqwP3sYWWv46jT+x7vgv7tt+iujcezHs7WX+gyP7g="
           grep -Fq 'static let appleTeamIdentifier = "3DQ7YC2YH2"' \
             apps/macos/Sources/LimitLifeboat/DistributionIdentity.swift
           cmp -s LICENSE "$bundled_license"

@@ -51,7 +51,7 @@ add them to GitHub Actions.
    The committed public key is:
 
    ```text
-   9mfTfQVDLtvuNmxMr1BvduLMOiVeceFp5rOkOC3PW5Y=
+   sByqwP3sYWWv46jT+x7vgv7tt+iujcezHs7WX+gyP7g=
    ```
 
    Export the private key once to an encrypted removable volume or encrypted
