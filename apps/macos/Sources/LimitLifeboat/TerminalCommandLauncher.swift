@@ -20,6 +20,13 @@ final class TerminalCommandLauncher {
     }
 
     /// Returns nil on success or a user-facing explanation on failure.
+    ///
+    /// - Important: `command` MUST be a compile-time constant (currently only
+    ///   `Provider.loginCommand` plus a fixed PATH export). The escaping below
+    ///   only handles `\` and `"`; routing an account label, email, or any
+    ///   file-derived string in here would be an AppleScript/command injection
+    ///   vector. Do not pass untrusted input without escaping every AppleScript
+    ///   metacharacter first.
     func runViaAutomation(_ command: String) -> String? {
         let escaped = command
             .replacingOccurrences(of: "\\", with: "\\\\")

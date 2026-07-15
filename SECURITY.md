@@ -6,6 +6,34 @@ Security fixes are provided for the latest stable release of Limit Lifeboat.
 Pre-release builds and older stable versions may be used to reproduce a report,
 but users should update to the newest stable release to receive fixes.
 
+## Credential handling
+
+Limit Lifeboat reads and switches CLI authentication material. A few properties
+of that handling are worth stating explicitly:
+
+- **At-rest storage.** Account credential snapshots are stored in the macOS
+  Keychain with `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, so they are
+  not synced to iCloud and are excluded from device backups. The app never
+  recreates Claude Code's own live Keychain item; it only updates its value,
+  preserving the CLI's existing access control.
+- **Transient plaintext during a switch.** While switching or restoring an
+  account, the current credentials are copied out of the Keychain into
+  short-lived rollback files under
+  `~/Library/Application Support/LimitLifeboat/Backups/`. These files are
+  written with `0600` permissions inside a `0700` directory and are deleted once
+  the switch commits or rolls back successfully. Codex preflight similarly
+  writes `auth.json` to a `0700` per-user temporary directory that is removed
+  after the check.
+- **Retained recovery directory.** If a rollback itself fails (a conflicting
+  concurrent change), the recovery directory is intentionally retained so the
+  credentials can be restored manually, rather than being deleted. In that case
+  the `0600` rollback files remain on disk under Application Support until you
+  remove them.
+
+These files are protected by POSIX permissions rather than Keychain encryption
+while they exist. Consider excluding the Application Support directory from
+unencrypted backups if that is part of your threat model.
+
 ## Report a vulnerability
 
 Use

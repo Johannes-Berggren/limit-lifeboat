@@ -43,6 +43,11 @@ struct CLIExecutableResolver {
     }
 
     private func loginShellResolvedPath(command: String) -> String? {
+        // `command` MUST be a compile-time constant (currently only
+        // `Provider.commandName`, "claude"/"codex"). It is interpolated into a
+        // shell string run via `$SHELL -lic`; passing untrusted input here is a
+        // command-injection vector. The result is validated as an absolute path
+        // to an executable below before it is used.
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         let process = Process()
         process.executableURL = URL(fileURLWithPath: shell)
