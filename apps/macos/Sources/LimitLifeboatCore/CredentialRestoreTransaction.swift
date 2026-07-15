@@ -78,7 +78,15 @@ final class CredentialRestoreTransaction {
             }
         }
         do {
-            try fileManager.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
+            // Create the Backups root as 0o700 rather than the umask default:
+            // it transiently holds cleartext credential rollback files during a
+            // switch. (Existing directories keep their permissions; the 0o700
+            // leaf directory and 0o600 files below protect contents regardless.)
+            try fileManager.createDirectory(
+                at: backupDirectory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
             try fileManager.createDirectory(
                 at: restoreBackupDirectory,
                 withIntermediateDirectories: false,
