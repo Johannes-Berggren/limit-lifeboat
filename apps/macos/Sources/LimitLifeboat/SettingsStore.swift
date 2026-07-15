@@ -32,16 +32,6 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(showOrganizationNames, forKey: Keys.showOrganizationNames) }
     }
 
-    var lastUpdateCheck: Date? {
-        get { defaults.object(forKey: Keys.lastUpdateCheck) as? Date }
-        set { defaults.set(newValue, forKey: Keys.lastUpdateCheck) }
-    }
-
-    var lastFailedUpdateCheck: Date? {
-        get { defaults.object(forKey: Keys.lastFailedUpdateCheck) as? Date }
-        set { defaults.set(newValue, forKey: Keys.lastFailedUpdateCheck) }
-    }
-
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -62,7 +52,5 @@ final class SettingsStore: ObservableObject {
         static let autoSwitchEnabled = "autoSwitchEnabled"
         static let resetAlertsEnabled = "resetAlertsEnabled"
         static let showOrganizationNames = "showOrganizationNames"
-        static let lastUpdateCheck = "lastUpdateCheck"
-        static let lastFailedUpdateCheck = "lastFailedUpdateCheck"
     }
 }

@@ -10,7 +10,6 @@ final class AppState: ObservableObject {
     @Published private(set) var snapshots: [UUID: UsageSnapshot]
     @Published private(set) var isRefreshing = false
     @Published private(set) var refreshStage: String?
-    @Published private(set) var availableUpdate: AvailableUpdate?
     @Published var menuBarSummary: MenuBarSummary = .empty
     @Published var statusMessage = ""
     /// Per-account, per-window burn-rate projections; only `.depletesAt`
@@ -30,6 +29,7 @@ final class AppState: ObservableObject {
     @Published private(set) var storedSnapshotStatuses: [UUID: StoredSnapshotStatus] = [:]
 
     let settings: SettingsStore
+    let updater: AppUpdater
 
     private let repository: ProfileRepository
     private let cliSwitcher: CLISwitcher
@@ -47,7 +47,6 @@ final class AppState: ObservableObject {
     private let burnRateEstimator = BurnRateEstimator()
     private let switchAdvisor = SwitchAdvisor()
     private let paceAlertPlanner = PaceAlertPlanner()
-    private let updateService = UpdateService()
     private let settingsWindowController = SettingsWindowController()
     private let terminalLauncher = TerminalCommandLauncher()
     private var refreshTask: Task<Void, Never>?
@@ -81,6 +80,7 @@ final class AppState: ObservableObject {
         self.cliSwitcher = cliSwitcher
         self.claudeUsageService = ClaudeAccountUsageService(credentials: cliSwitcher)
         self.settings = settings ?? SettingsStore()
+        self.updater = AppUpdater()
         self.profiles = try repository.loadProfiles()
         self.snapshots = try repository.loadUsageSnapshots()
         self.historyStore = try? UsageHistoryStore(applicationSupportDirectory: repository.applicationSupportDirectory)
@@ -264,7 +264,6 @@ final class AppState: ObservableObject {
         notifyElapsedResets()
         updateSwitchAdvice()
         updateMenuBarSummary()
-        await checkForUpdatesIfDue()
     }
 
     /// Recomputes the best-switch-target hint from the fresh readings and,
@@ -1610,46 +1609,6 @@ final class AppState: ObservableObject {
 
     func openSettings() {
         settingsWindowController.show(state: self)
-    }
-
-    // MARK: - Updates
-
-    private func checkForUpdatesIfDue() async {
-        guard UpdateCheckSchedule.shouldCheck(
-            lastSuccessfulCheck: settings.lastUpdateCheck,
-            lastFailedCheck: settings.lastFailedUpdateCheck
-        ) else {
-            return
-        }
-        await checkForUpdatesNow()
-    }
-
-    @discardableResult
-    func checkForUpdatesNow() async -> UpdateCheckResult {
-        let result = await updateService.checkForUpdates()
-        let checkedAt = Date()
-        switch result {
-        case .updateAvailable(let update):
-            availableUpdate = update
-            settings.lastUpdateCheck = checkedAt
-            settings.lastFailedUpdateCheck = nil
-        case .upToDate:
-            availableUpdate = nil
-            settings.lastUpdateCheck = checkedAt
-            settings.lastFailedUpdateCheck = nil
-        case .failed:
-            // A transient failure gets a shorter retry gate and does not
-            // advance the once-per-day successful-response timestamp.
-            settings.lastFailedUpdateCheck = checkedAt
-        }
-        return result
-    }
-
-    func openAvailableUpdate() {
-        guard let availableUpdate else {
-            return
-        }
-        NSWorkspace.shared.open(availableUpdate.url)
     }
 
     // MARK: - Identity

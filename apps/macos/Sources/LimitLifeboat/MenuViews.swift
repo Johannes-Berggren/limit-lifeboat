@@ -4,6 +4,7 @@ import SwiftUI
 struct MenuRootView: View {
     @ObservedObject var state: AppState
     @ObservedObject var settings: SettingsStore
+    @ObservedObject var updater: AppUpdater
     @State private var expandedAccounts: [Provider: UUID] = [:]
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -57,16 +58,16 @@ struct MenuRootView: View {
 
             Spacer()
 
-            if let update = state.availableUpdate {
+            if let version = updater.availableVersion {
                 Button {
-                    state.openAvailableUpdate()
+                    updater.checkForUpdates()
                 } label: {
                     Label("Update", systemImage: "arrow.down.circle.fill")
                         .font(.caption.weight(.medium))
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(DS.accent)
-                .help("Download Limit Lifeboat \(update.version)")
+                .help("Install Limit Lifeboat \(version)")
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }
 
@@ -95,7 +96,7 @@ struct MenuRootView: View {
         .padding(.top, DS.Spacing.lg)
         .padding(.bottom, DS.Spacing.sm)
         .animation(reduceMotion ? nil : DS.Motion.quick, value: state.isRefreshing)
-        .animation(reduceMotion ? nil : DS.Motion.quick, value: state.availableUpdate)
+        .animation(reduceMotion ? nil : DS.Motion.quick, value: updater.availableVersion)
     }
 
     private var footer: some View {

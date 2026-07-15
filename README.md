@@ -26,7 +26,7 @@ apps/site   Astro website for limitlifeboat.com
 - Xcode 26, including the macOS 26 SDK, to build the native app
 - Node.js 24 and npm to work on the website
 
-Intel Macs are not supported by the v1 release.
+Intel Macs are not supported.
 
 ## Install
 
@@ -65,12 +65,14 @@ direct-download source for release artifacts.
   rollback cannot be completed.
 - **Warnings are optional.** The app can notify you when an account is nearing
   a limit or when a previously depleted account is likely available again.
-- **Updates are user-controlled.** After a valid GitHub response, Limit
-  Lifeboat waits a day before checking again; network and API failures use a
-  shorter retry backoff. It links to a new release and never updates itself.
+- **Updates are user-controlled.** Sparkle checks the signed GitHub release
+  feed daily by default and shows a quiet menu-bar affordance when an update is
+  available. Limit Lifeboat installs an update only after you explicitly choose
+  **Install and Relaunch**; automatic installation is disabled.
 
 Add, rename, or remove accounts from the popover. Settings cover refresh
-frequency, launch at login, organization-name visibility, and notifications.
+frequency, launch at login, automatic update checks, organization-name
+visibility, and notifications.
 Browser, Claude Desktop, ChatGPT Desktop, and CLI sessions are separate:
 switching affects only the corresponding CLI login.
 
@@ -98,7 +100,7 @@ Network access is limited to the services needed for the selected features:
 - Anthropic endpoints for Claude account identity, token refresh, and usage
 - OpenAI endpoints when isolated Codex identity verification needs account or
   token refresh; ordinary Codex usage readings come from local session data
-- GitHub's API for update checks
+- GitHub Releases for the signed update feed and update downloads
 - Claude or ChatGPT web dashboards when you explicitly open one in the app
 
 Embedded dashboards use isolated web data stores that are separate from your
@@ -164,8 +166,8 @@ npm run site:check
 npm run site:build
 ```
 
-See [RELEASING.md](RELEASING.md) for the Developer ID signing, notarization,
-GitHub Release, Homebrew, and Vercel rollout procedure.
+See [RELEASING.md](RELEASING.md) for Developer ID and Sparkle signing,
+notarization, GitHub Release, Homebrew, and website rollout procedures.
 
 ## License
 

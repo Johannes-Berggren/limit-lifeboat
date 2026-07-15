@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
 
 permissions:
@@ -18,6 +19,22 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+      - name: Validate release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < apps/macos/VERSION)"
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "apps/macos/VERSION must use stable major.minor.patch SemVer." >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" && "${GITHUB_REF_NAME:-}" != "v${version}" ]]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match VERSION ${version}." >&2
+            exit 1
+          fi
+          grep -Fq 'exact: "2.9.4"' apps/macos/Package.swift
+          grep -Fq '"identity" : "sparkle"' apps/macos/Package.resolved
+          grep -Fq '"version" : "2.9.4"' apps/macos/Package.resolved
       - name: Test Swift package
         run: swift test --package-path apps/macos
       - name: Package arm64 app
@@ -31,6 +48,8 @@ jobs:
           executable="$app/Contents/MacOS/LimitLifeboat"
           info="$app/Contents/Info.plist"
           bundled_license="$app/Contents/Resources/LICENSE.txt"
+          sparkle_license="$app/Contents/Resources/ThirdPartyLicenses/Sparkle.txt"
+          sparkle_framework="$app/Contents/Frameworks/Sparkle.framework"
           source_entitlements="apps/macos/Packaging/LimitLifeboat.entitlements"
           signed_entitlements="$(mktemp)"
           trap 'rm -f "$signed_entitlements"' EXIT
@@ -44,12 +63,37 @@ jobs:
           test "$(plutil -extract CFBundleShortVersionString raw -o - "$info")" = "$(tr -d '[:space:]' < apps/macos/VERSION)"
           test "$(plutil -extract CFBundleVersion raw -o - "$info")" = "$(git rev-list --count HEAD)"
           test "$(plutil -extract LSMinimumSystemVersion raw -o - "$info")" = "14.0"
+          test "$(plutil -extract SUEnableAutomaticChecks raw -o - "$info")" = "true"
+          test "$(plutil -extract SUAutomaticallyUpdate raw -o - "$info")" = "false"
+          test "$(plutil -extract SUScheduledCheckInterval raw -o - "$info")" = "86400"
+          test "$(plutil -extract SUVerifyUpdateBeforeExtraction raw -o - "$info")" = "true"
+          test "$(plutil -extract SURequireSignedFeed raw -o - "$info")" = "true"
+          test "$(plutil -extract SUFeedURL raw -o - "$info")" = \
+            "https://github.com/Johannes-Berggren/limit-lifeboat/releases/latest/download/appcast.xml"
+          test "$(plutil -extract SUPublicEDKey raw -o - "$info")" = \
+            "9mfTfQVDLtvuNmxMr1BvduLMOiVeceFp5rOkOC3PW5Y="
           grep -Fq 'static let appleTeamIdentifier = "3DQ7YC2YH2"' \
             apps/macos/Sources/LimitLifeboat/DistributionIdentity.swift
           cmp -s LICENSE "$bundled_license"
+          cmp -s apps/macos/Packaging/Sparkle-LICENSE.txt "$sparkle_license"
+          test -d "$sparkle_framework"
+          test ! -e "$sparkle_framework/Versions/B/XPCServices"
+          test ! -e "$sparkle_framework/XPCServices"
+          test -L "$sparkle_framework/Versions/Current"
+          test "$(readlink "$sparkle_framework/Versions/Current")" = "B"
+          test -x "$sparkle_framework/Versions/B/Autoupdate"
+          test -d "$sparkle_framework/Versions/B/Updater.app"
+          otool -L "$executable" | grep -Fq '@rpath/Sparkle.framework/Versions/B/Sparkle'
+          otool -l "$executable" | grep -A2 'cmd LC_RPATH' | \
+            grep -Fq '@executable_path/../Frameworks'
           plutil -lint "$source_entitlements"
           test "$(plutil -convert json -o - "$source_entitlements")" = "$expected_entitlements"
           codesign --verify --all-architectures --strict --verbose=2 "$app"
+          codesign --verify --all-architectures --strict --verbose=2 \
+            "$sparkle_framework/Versions/B/Autoupdate"
+          codesign --verify --all-architectures --strict --verbose=2 \
+            "$sparkle_framework/Versions/B/Updater.app"
+          codesign --verify --all-architectures --strict --verbose=2 "$sparkle_framework"
           codesign --display --entitlements - --xml "$app" > "$signed_entitlements"
           plutil -lint "$signed_entitlements"
           test "$(plutil -convert json -o - "$signed_entitlements")" = "$expected_entitlements"

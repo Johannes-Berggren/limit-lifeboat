@@ -11,7 +11,7 @@ const description = `How ${product.name} handles credentials, usage data, networ
       <p class="eyebrow">Privacy</p>
       <h1>Your accounts are yours.</h1>
       <p>Limit Lifeboat has no analytics, advertising, or product telemetry. Here is what the app and this website handle, in plain language.</p>
-      <p class="last-updated">Last updated July 14, 2026</p>
+      <p class="last-updated">Last updated July 15, 2026</p>
     </div>
   </section>
 
@@ -28,7 +28,7 @@ const description = `How ${product.name} handles credentials, usage data, networ
     <article class="prose">
       <section id="summary">
         <h2>The short version</h2>
-        <p>Account profiles, usage history, settings, and credential snapshots are kept on your Mac. The app contacts provider services only to power the features you use, plus GitHub for update checks. It does not send product analytics or telemetry to Limit Lifeboat’s developer.</p>
+        <p>Account profiles, usage history, settings, and credential snapshots are kept on your Mac. The app contacts provider services only to power the features you use, plus GitHub for signed update checks and downloads. It does not send product analytics or telemetry to Limit Lifeboat’s developer.</p>
       </section>
 
       <section id="stored">
@@ -44,7 +44,7 @@ const description = `How ${product.name} handles credentials, usage data, networ
         <ul>
           <li><strong>Anthropic</strong> for Claude account identity, token refresh, and usage.</li>
           <li><strong>OpenAI</strong> when an isolated Codex verification needs to refresh or validate the selected account’s authentication.</li>
-          <li><strong>GitHub</strong> for the daily update check and release links.</li>
+          <li><strong>GitHub</strong> for the signed daily update feed, update downloads, and release links. Automatic checks can be disabled in Settings; installing always requires confirmation.</li>
           <li><strong>Claude or ChatGPT web dashboards</strong> only when you explicitly open an embedded dashboard.</li>
         </ul>
         <p>Codex usage readings come from local Codex session data. An embedded dashboard uses an isolated web data store inside the app and remains separate from your normal browser session.</p>
