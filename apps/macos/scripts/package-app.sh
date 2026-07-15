@@ -29,7 +29,7 @@ LICENSE_FILE="$REPO_ROOT/LICENSE"
 BUNDLED_LICENSE="$RESOURCES_DIR/LICENSE.txt"
 SPARKLE_LICENSE_FILE="$APP_ROOT/Packaging/Sparkle-LICENSE.txt"
 BUNDLED_SPARKLE_LICENSE="$RESOURCES_DIR/ThirdPartyLicenses/Sparkle.txt"
-SPARKLE_PUBLIC_KEY="9mfTfQVDLtvuNmxMr1BvduLMOiVeceFp5rOkOC3PW5Y="
+SPARKLE_PUBLIC_KEY="sByqwP3sYWWv46jT+x7vgv7tt+iujcezHs7WX+gyP7g="
 SPARKLE_FEED_URL="https://github.com/Johannes-Berggren/limit-lifeboat/releases/latest/download/appcast.xml"
 
 VERSION="${VERSION:-$(tr -d '[:space:]' < "$APP_ROOT/VERSION")}"
@@ -63,8 +63,8 @@ plutil -lint "$ENTITLEMENTS" >/dev/null
 }
 "$PROCESS_HELPER" check "$APP_EXECUTABLE"
 
-swift build --package-path "$APP_ROOT" -c "$CONFIGURATION" --arch "$ARCHITECTURE"
-BUILD_DIR="$(swift build --package-path "$APP_ROOT" -c "$CONFIGURATION" --arch "$ARCHITECTURE" --show-bin-path)"
+swift build --package-path "$APP_ROOT" --disable-keychain -c "$CONFIGURATION" --arch "$ARCHITECTURE"
+BUILD_DIR="$(swift build --package-path "$APP_ROOT" --disable-keychain -c "$CONFIGURATION" --arch "$ARCHITECTURE" --show-bin-path)"
 BUILD_BIN="$BUILD_DIR/$EXECUTABLE_NAME"
 
 if [[ ! -x "$BUILD_BIN" ]]; then

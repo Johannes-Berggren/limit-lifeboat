@@ -2,7 +2,7 @@ import Foundation
 import XCTest
 
 final class ReleaseConfigurationTests: XCTestCase {
-    private let publicKey = "9mfTfQVDLtvuNmxMr1BvduLMOiVeceFp5rOkOC3PW5Y="
+    private let publicKey = "sByqwP3sYWWv46jT+x7vgv7tt+iujcezHs7WX+gyP7g="
     private let feedURL = "https://github.com/Johannes-Berggren/limit-lifeboat/releases/latest/download/appcast.xml"
 
     func testProductVersionIsStableSemVer() throws {

@@ -220,7 +220,7 @@ xcrun notarytool history \
   || fail "Cannot authenticate with notarytool profile '$NOTARY_PROFILE'"
 
 echo "==> Running tests"
-swift test --package-path "$APP_ROOT" --arch "$ARCHITECTURE"
+swift test --package-path "$APP_ROOT" --disable-keychain --arch "$ARCHITECTURE"
 
 for sparkle_tool in "$GENERATE_APPCAST" "$GENERATE_KEYS" "$SIGN_UPDATE"; do
   [[ -x "$sparkle_tool" ]] || fail "Sparkle release tool is unavailable: $sparkle_tool"
