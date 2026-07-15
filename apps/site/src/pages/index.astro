@@ -25,7 +25,7 @@ const faqs = [
   {
     question: "Does the app update itself?",
     answer:
-      "No. It checks GitHub once a day and links to a newer release when one is available. Installing an update always stays in your control.",
+      "It checks the signed update feed once a day by default, but it never installs silently. Every update requires you to choose Install and Relaunch.",
   },
   {
     question: "Where does my account data live?",
@@ -288,7 +288,7 @@ const structuredData = {
         <ul class="check-list">
           <li><span>✓</span><div><strong>Credentials protected by macOS Keychain</strong><p>App-managed snapshots are encrypted by the system credential store.</p></div></li>
           <li><span>✓</span><div><strong>No analytics, ads, or product telemetry</strong><p>Your activity is not measured, profiled, or sold.</p></div></li>
-          <li><span>✓</span><div><strong>Network access only where features need it</strong><p>Provider usage and identity services, GitHub update checks, and dashboards you explicitly open.</p></div></li>
+          <li><span>✓</span><div><strong>Network access only where features need it</strong><p>Provider usage and identity services, signed GitHub update checks, and dashboards you explicitly open.</p></div></li>
           <li><span>✓</span><div><strong>Open source and inspectable</strong><p>The app is MIT licensed, with its implementation and release process on GitHub.</p></div></li>
         </ul>
         <a class="text-link" href="/privacy">Read the privacy details <span aria-hidden="true">→</span></a>

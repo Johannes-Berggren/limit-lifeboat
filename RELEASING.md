@@ -2,31 +2,33 @@
 
 Limit Lifeboat releases are built locally on Apple Silicon, signed with a
 Developer ID Application certificate, notarized by Apple, and published as
-immutable GitHub release assets. The personal Homebrew tap installs that same
-DMG. The v1 target is `1.0.0`, macOS 14+, and arm64 only.
+immutable GitHub release assets. The personal Homebrew tap installs the same
+DMG. Releases are stable `major.minor.patch` versions, require macOS 14 or
+later, and are arm64 only.
 
-Signing and notarization credentials stay on the release Mac. Never commit a
+`apps/macos/VERSION` is the only product-version source. The native build
+number is the repository commit count. Protected, linear `main` keeps that
+number monotonic. npm package versions are unrelated tooling metadata.
+
+Apple and Sparkle private credentials stay on the release Mac. Never commit a
 certificate UUID or fingerprint, certificate/private-key material, Apple ID,
-app-specific password, or notary credentials, and never add them to GitHub
-Actions.
+app-specific password, notary credentials, or a Sparkle private key, and never
+add them to GitHub Actions.
 
-## One-time launch setup
+## One-time release-machine setup
 
 1. In Apple Developer, confirm that App ID `com.limitlifeboat.app` is
    registered under Team `3DQ7YC2YH2`.
-2. Have the team's Account Holder create a **Developer ID Application**
-   certificate for that team. Install the certificate and private key in the
-   release Mac's login keychain. A Developer ID Installer certificate is not
-   needed for a DMG.
-3. Confirm that the expected identity is available. If more than one
-   Developer ID Application identity appears, pass the full certificate name
-   through `SIGN_IDENTITY` when releasing; do not put its UUID in the repo.
+2. Install that team's Developer ID Application certificate and private key in
+   the release Mac's login Keychain. A Developer ID Installer certificate is
+   not needed for a DMG. If more than one matching identity is installed, pass
+   the full certificate name through `SIGN_IDENTITY` when releasing.
 
    ```bash
    security find-identity -v -p codesigning
    ```
 
-4. Store Apple notarization credentials in the release Mac's Keychain:
+3. Store notarization credentials in Keychain:
 
    ```bash
    xcrun notarytool store-credentials limit-lifeboat \
@@ -36,75 +38,113 @@ Actions.
    xcrun notarytool history --keychain-profile limit-lifeboat
    ```
 
-5. Enable GitHub private vulnerability reporting and release immutability for
-   `Johannes-Berggren/limit-lifeboat`.
-6. Connect the repository to a Vercel project named `limit-lifeboat`. Set its
-   root directory to `apps/site`, framework preset to Astro, Node.js version to
-   24, and production branch to `main`. The site is static and needs no Vercel
-   adapter. Leave the production domains detached until the GitHub and
-   Homebrew downloads described below are public and tested.
+4. Resolve Swift dependencies, then create or inspect the Sparkle EdDSA key
+   under Keychain account `limit-lifeboat`:
 
-## Prepare the exact release commit
+   ```bash
+   swift package resolve --package-path apps/macos
+   sparkle_tools="apps/macos/.build/artifacts/sparkle/Sparkle/bin"
+   "$sparkle_tools/generate_keys" --account limit-lifeboat
+   "$sparkle_tools/generate_keys" --account limit-lifeboat -p
+   ```
 
-Merge every launch change through protected `main`, then work from the exact
-fetched `origin/main` commit with a completely clean repository. The release
-script intentionally evaluates the whole monorepo for cleanliness and tags;
-the native build number is the repository-wide Git commit count.
+   The committed public key is:
+
+   ```text
+   9mfTfQVDLtvuNmxMr1BvduLMOiVeceFp5rOkOC3PW5Y=
+   ```
+
+   Export the private key once to an encrypted removable volume or encrypted
+   secrets vault, then securely remove any temporary plaintext file. Keep this
+   backup outside every Git checkout and cloud-synced unencrypted folder:
+
+   ```bash
+   umask 077
+   "$sparkle_tools/generate_keys" --account limit-lifeboat \
+     -x "/Volumes/<encrypted-volume>/limit-lifeboat-sparkle-private-key"
+   ```
+
+   Losing this key prevents existing installations from trusting new updates.
+   Never rotate it as part of a routine release.
+
+5. Confirm `gh auth status` is authenticated for
+   `Johannes-Berggren/limit-lifeboat`. Keep GitHub release immutability and
+   private vulnerability reporting enabled.
+
+## Prepare the release commit
+
+Change only `apps/macos/VERSION` when advancing the product version. Merge the
+version and release changes through protected `main`, then fetch the target
+commit. A Conductor workspace branch is valid: do not switch or rename it just
+for a release. Both release scripts require a completely clean worktree whose
+`HEAD` equals the fetched `origin/main` commit.
 
 ```bash
-git fetch origin
-git switch main
-git pull --ff-only origin main
+git fetch origin main
 test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
-git status --short
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
 
 version="$(tr -d '[:space:]' < apps/macos/VERSION)"
-test "$version" = "1.0.0" # v1 only
+[[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
 git tag -a "v${version}" -m "Limit Lifeboat ${version}"
 git describe --tags --exact-match HEAD
 ```
 
-Do not move or reuse a pushed tag. If the candidate needs a code change,
-delete only an unpushed local tag, make and merge the fix, fast-forward local
-`main`, and tag the corrected `origin/main` commit.
+Tags must be annotated and exactly match `VERSION`. Do not move or reuse a
+pushed tag. If the candidate needs a change, delete only an unpushed local tag,
+merge the fix through `main`, fetch the corrected `origin/main`, and tag that
+commit.
 
-## Build, sign, and notarize locally
+## Build, sign, notarize, and create the appcast
 
-Use an Apple Silicon Mac with Xcode 26 and the macOS 26 SDK selected:
+Use an Apple Silicon Mac with the repository's supported Xcode toolchain:
 
 ```bash
-swift test --package-path apps/macos
 TEAM_ID=3DQ7YC2YH2 \
   SIGN_IDENTITY="Developer ID Application: <legal team name> (3DQ7YC2YH2)" \
   NOTARY_PROFILE=limit-lifeboat \
+  SPARKLE_ACCOUNT=limit-lifeboat \
   apps/macos/scripts/release.sh
 ```
 
-`TEAM_ID` is mandatory and must match the pinned value in
-`DistributionIdentity.swift`. `SIGN_IDENTITY` may be omitted only when exactly
-one Developer ID Application identity is installed. `NOTARY_PROFILE` defaults
-to `limit-lifeboat`.
+`SIGN_IDENTITY` may be omitted only when exactly one Developer ID Application
+identity is installed. The other values default where safe, but `TEAM_ID` is
+mandatory and must match `DistributionIdentity.swift`.
 
-The script requires a clean exact tag matching `apps/macos/VERSION` and
-requires `HEAD` to equal fetched `origin/main`. It tests the Swift package,
-packages the app, verifies the bundled root MIT license, signs with hardened
-runtime and a timestamp, notarizes and staples the app, creates/signs/notarizes
-the DMG, mounts and revalidates it, and writes the checksum. Release
-entitlements must contain only Apple Events automation.
+The release script:
 
-For v1 the outputs are:
+- checks stable SemVer, the exact annotated tag, clean worktree, and
+  `HEAD == origin/main` without requiring a branch name;
+- runs the Swift suite and packages the app with the commit-count build number;
+- checks the embedded Sparkle framework, rpath, update keys, licenses, and
+  absence of unused XPC services;
+- checks the Keychain EdDSA public key against the app's committed public key;
+- signs Sparkle's nested helpers and framework inside-out with the same
+  Developer ID identity, then signs the app with hardened runtime and trusted
+  timestamps;
+- notarizes and staples the app, creates/signs/notarizes/staples the DMG, then
+  mounts and revalidates the distribution;
+- writes and verifies the SHA-256 checksum; and
+- uses Sparkle's pinned `generate_appcast` to create a signed, one-version
+  `appcast.xml` with one full update, no deltas, the immutable versioned DMG
+  URL, build/version/minimum macOS metadata, and GitHub release-notes link.
+
+Outputs for version `$version` are:
 
 ```text
 apps/macos/dist/Limit Lifeboat.app
-apps/macos/dist/Limit-Lifeboat-1.0.0-arm64.dmg
-apps/macos/dist/Limit-Lifeboat-1.0.0-arm64.dmg.sha256
+apps/macos/dist/Limit-Lifeboat-$version-arm64.dmg
+apps/macos/dist/Limit-Lifeboat-$version-arm64.dmg.sha256
+apps/macos/dist/appcast.xml
 ```
 
-Verify the candidate independently before pushing the tag:
+The script validates every required property, but review the candidate before
+publishing:
 
 ```bash
 app="apps/macos/dist/Limit Lifeboat.app"
 dmg="apps/macos/dist/Limit-Lifeboat-${version}-arm64.dmg"
+sparkle_tools="apps/macos/.build/artifacts/sparkle/Sparkle/bin"
 
 codesign --verify --all-architectures --strict --verbose=2 "$app"
 codesign -dv --verbose=4 "$app" 2>&1
@@ -114,129 +154,110 @@ spctl -a -t exec -vv "$app"
 spctl -a -t open --context context:primary-signature -vv "$dmg"
 hdiutil verify "$dmg"
 (cd apps/macos/dist && shasum -a 256 -c "Limit-Lifeboat-${version}-arm64.dmg.sha256")
-cmp LICENSE "$app/Contents/Resources/LICENSE.txt"
-file "$app/Contents/MacOS/LimitLifeboat"
-/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist"
+xmllint --noout apps/macos/dist/appcast.xml
+"$sparkle_tools/sign_update" --account limit-lifeboat --verify \
+  apps/macos/dist/appcast.xml
 ```
 
 Require Team ID `3DQ7YC2YH2`, bundle ID `com.limitlifeboat.app`, arm64-only
-code, hardened runtime, a trusted timestamp, a valid staple, and the exact MIT
-license. If notarization fails, retrieve the log using the submission ID that
-the script prints:
+code, hardened runtime, trusted timestamps, valid staples, Gatekeeper
+acceptance, exact license copies, and the expected Sparkle feed metadata. If
+notarization fails, use the submission ID printed by the script:
 
 ```bash
 xcrun notarytool log <submission-id> --keychain-profile limit-lifeboat
 ```
 
-Fix the cause and create a new candidate. Never bypass notarization or
-Gatekeeper checks.
+Fix the cause and create a new candidate. Never bypass signing, notarization,
+Sparkle signature, or Gatekeeper checks.
 
-## Draft and test the GitHub release
+## Push the verified tag and create a draft
 
-Push the verified tag and create a draft containing the exact DMG and checksum:
-
-```bash
-git push origin "v${version}"
-
-gh release create "v${version}" \
-  "apps/macos/dist/Limit-Lifeboat-${version}-arm64.dmg" \
-  "apps/macos/dist/Limit-Lifeboat-${version}-arm64.dmg.sha256" \
-  --repo Johannes-Berggren/limit-lifeboat \
-  --draft \
-  --title "Limit Lifeboat ${version}" \
-  --generate-notes
-```
-
-Download the draft through a browser so the DMG receives normal quarantine,
-then test on clean macOS 14 and current macOS 26 environments. Verify the
-checksum and Gatekeeper, install by dragging to Applications, and exercise
-first launch, legacy migration, Keychain continuity, account discovery and
-switching, notifications, Terminal Automation, relaunch, reinstall, launch at
-login, and the update link. Confirm the app never leaves routine switch
-rollback material after success.
-
-Publish only after those checks pass. Published tags, versions, DMGs, and
-checksums are immutable; fixes require a new patch release.
-
-## Publish the Homebrew Cask
-
-After the GitHub release is public, add or update
-`Casks/limit-lifeboat.rb` in `Johannes-Berggren/homebrew-tap`. Use the checksum
-from the published `.sha256` file and the immutable versioned asset URL. The
-Cask should have this shape:
-
-```ruby
-cask "limit-lifeboat" do
-  version "1.0.0"
-  sha256 "<published sha256>"
-
-  url "https://github.com/Johannes-Berggren/limit-lifeboat/releases/download/v#{version}/Limit-Lifeboat-#{version}-arm64.dmg",
-      verified: "github.com/Johannes-Berggren/limit-lifeboat/"
-  name "Limit Lifeboat"
-  desc "Monitor and switch between AI coding subscription accounts"
-  homepage "https://limitlifeboat.com/"
-
-  livecheck do
-    url :url
-    strategy :github_latest
-  end
-
-  depends_on arch: :arm64
-  depends_on macos: ">= :sonoma"
-
-  app "Limit Lifeboat.app"
-
-  uninstall quit: "com.limitlifeboat.app"
-
-  zap trash: [
-    "~/Library/Application Support/LimitLifeboat",
-    "~/Library/Application Support/LLMUsageMonitor",
-    "~/Library/Application Support/.LimitLifeboatMigration-v1-stage",
-    "~/Library/Application Support/.LimitLifeboatMigration-v1.json",
-    "~/Library/Application Support/.LimitLifeboatMigration-v1.lock",
-    "~/Library/Preferences/com.limitlifeboat.app.plist",
-    "~/Library/Preferences/com.johannesberggren.LLMUsageMonitor.plist",
-  ]
-end
-```
-
-Do not use a draft asset or mutable `latest` URL. Add tap CI for Cask style and
-audit, then validate against the public artifact:
+Publication is deliberately separate from building. After independent review,
+run:
 
 ```bash
-brew update
-brew tap Johannes-Berggren/tap
+TEAM_ID=3DQ7YC2YH2 \
+  SPARKLE_ACCOUNT=limit-lifeboat \
+  apps/macos/scripts/publish-draft.sh
+```
+
+This script revalidates the checksum, DMG, mounted app, every nested signature,
+Team ID, hardened runtime, notarization staples, Gatekeeper, licenses, Sparkle
+metadata, signed feed, and enclosure EdDSA signature. It then proves the tag
+and release do not already exist remotely, pushes the already-verified tag,
+and creates a GitHub draft containing exactly:
+
+```text
+Limit-Lifeboat-$version-arm64.dmg
+Limit-Lifeboat-$version-arm64.dmg.sha256
+appcast.xml
+```
+
+It refuses to overwrite a tag, release, or assets. If draft creation fails
+after the tag push, diagnose the failure; never force-push or move the tag.
+
+## Test the draft and update path
+
+Download the draft through a browser so the DMG receives normal quarantine.
+In disposable accounts on macOS 14 and the current macOS release, verify:
+
+- install, first launch, account discovery/switching, notifications, Terminal
+  Automation, relaunch, reinstall, and launch at login;
+- Keychain and account-data continuity, legacy migration, and no false
+  executable-integrity warning;
+- manual **Check for Updates**, scheduled gentle reminder, menu-bar **Update**
+  affordance, dismiss/skip, and explicit **Install and Relaunch**; and
+- the installed version/build after updating and launch-at-login continuity.
+
+Installation must always require the user's explicit Install and Relaunch
+action. Scheduled checks must not steal focus.
+
+Before promoting the first Sparkle-enabled release on the website and
+Homebrew, install a lower-build Sparkle-enabled candidate and verify that it
+updates through the published production appcast on both macOS 14 and current
+macOS. Because `releases/latest/download/appcast.xml` does not serve a draft,
+perform that final production-feed test immediately after publishing and
+before changing the website or Homebrew cask.
+
+`v1.0.0` remains immutable. Its original notification-only checker directs
+users to install the Sparkle bootstrap release manually. Only later releases
+can update in-app.
+
+## Publish the Homebrew cask
+
+The tap lives in the separate `Johannes-Berggren/homebrew-tap` repository. Use
+its own workspace and PR. The initial `v1.0.0` cask uses SHA-256
+`0691bcf240b22c8fbc77da4554eb1285ff0bf789e0d4d9ff378b5a1d7a97975c`.
+Starting with the first Sparkle-enabled release, include `auto_updates true` so
+Homebrew and the app do not compete to own updates.
+
+Always use the immutable versioned URL, never a draft or mutable `latest` DMG
+URL. Update the tap README and require its existing lifecycle CI to pass:
+
+```bash
 brew style --cask Johannes-Berggren/tap/limit-lifeboat
 brew audit --cask --online Johannes-Berggren/tap/limit-lifeboat
 brew livecheck --cask Johannes-Berggren/tap/limit-lifeboat
 brew install --cask Johannes-Berggren/tap/limit-lifeboat
-open -a "Limit Lifeboat"
 brew reinstall --cask Johannes-Berggren/tap/limit-lifeboat
 brew uninstall --cask Johannes-Berggren/tap/limit-lifeboat
 ```
 
-Test `brew uninstall --cask --zap Johannes-Berggren/tap/limit-lifeboat` only
-in a disposable macOS account containing both current and legacy state.
-Ordinary uninstall must preserve user data. Zap must not remove
-provider-owned Claude or Codex data.
+Test `brew uninstall --cask --zap` only in a disposable account containing
+both current and legacy state. Ordinary uninstall must preserve user data. Zap
+must not remove provider-owned Claude or Codex data.
 
-## Deploy the production website
+## Publish the website and release
 
-Before publishing the app, confirm that the launch commit produces a healthy
-Vercel preview and passes `npm run site:check`, `npm run site:build`, and the CI
-internal-link check. Keep `https://limitlifeboat.com` as the canonical URL.
+Before publication, require the Swift suite, Astro type-check/build/internal
+link checks, shell syntax, ShellCheck, packaging assertions, and tap CI to pass.
+Publish the GitHub release only after draft testing succeeds. Then immediately
+perform the production-feed update test described above before promoting that
+version through Homebrew and the website.
 
-After the GitHub and Homebrew installs both work:
-
-1. Promote/deploy `main` to the Vercel production project.
-2. Add `limitlifeboat.com` and `www.limitlifeboat.com` to that project, with
-   the apex as primary and `www` redirected to it.
-3. In Namecheap, remove only the old parking A/AAAA/CNAME records and replace
-   them with the exact DNS values Vercel shows for those domains. Preserve all
-   MX and email-forwarding records.
-4. Wait for Vercel to confirm DNS and TLS, then verify the apex, the `www`
-   redirect, `/privacy`, `/support`, the branded 404, security headers, the
-   GitHub download link, and the displayed Homebrew command.
+Published tags, versions, DMGs, checksums, and appcasts are immutable. Fixes
+always require a new patch release.
 
 ## Development artifacts
 

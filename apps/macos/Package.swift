@@ -10,11 +10,23 @@ let package = Package(
         .library(name: "LimitLifeboatCore", targets: ["LimitLifeboatCore"]),
         .executable(name: "LimitLifeboat", targets: ["LimitLifeboat"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.4")
+    ],
     targets: [
         .target(name: "LimitLifeboatCore"),
         .executableTarget(
             name: "LimitLifeboat",
-            dependencies: ["LimitLifeboatCore"]
+            dependencies: [
+                "LimitLifeboatCore",
+                .product(name: "Sparkle", package: "Sparkle")
+            ],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "@executable_path/../Frameworks"
+                ])
+            ]
         ),
         .testTarget(
             name: "LimitLifeboatCoreTests",

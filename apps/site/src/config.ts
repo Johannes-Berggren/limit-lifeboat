@@ -1,4 +1,11 @@
-const version = "1.0.0";
+import productVersion from "../../macos/VERSION?raw";
+
+const version = productVersion.trim();
+
+if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) {
+  throw new Error(`apps/macos/VERSION must use stable major.minor.patch SemVer; found "${version}"`);
+}
+
 const dmgAsset = `Limit-Lifeboat-${version}-arm64.dmg`;
 
 export const product = {

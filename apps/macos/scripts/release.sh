@@ -7,7 +7,7 @@
 #
 # Usage: apps/macos/scripts/release.sh [version]
 # Required environment: TEAM_ID (the permanent 10-character Apple Team ID)
-# Environment overrides: VERSION, SIGN_IDENTITY, NOTARY_PROFILE
+# Environment overrides: VERSION, SIGN_IDENTITY, NOTARY_PROFILE, SPARKLE_ACCOUNT
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,17 +35,31 @@ RELEASE_VERSION="${VERSION:-${ARG_VERSION:-$FILE_VERSION}}"
 TEAM_ID="${TEAM_ID:-}"
 SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-limit-lifeboat}"
+SPARKLE_ACCOUNT="${SPARKLE_ACCOUNT:-limit-lifeboat}"
 EXPECTED_TAG="v$RELEASE_VERSION"
 APP_DIR="$APP_ROOT/dist/$PRODUCT_NAME.app"
 APP_EXECUTABLE="$APP_DIR/Contents/MacOS/$EXECUTABLE_NAME"
 INFO_PLIST="$APP_DIR/Contents/Info.plist"
+APP_FRAMEWORK="$APP_DIR/Contents/Frameworks/Sparkle.framework"
+APP_AUTOUPDATE="$APP_FRAMEWORK/Versions/B/Autoupdate"
+APP_UPDATER="$APP_FRAMEWORK/Versions/B/Updater.app"
 ENTITLEMENTS="$APP_ROOT/Packaging/LimitLifeboat.entitlements"
 TEAM_ID_SOURCE="$APP_ROOT/Sources/LimitLifeboat/DistributionIdentity.swift"
 LICENSE_FILE="$REPO_ROOT/LICENSE"
 APP_LICENSE="$APP_DIR/Contents/Resources/LICENSE.txt"
+SPARKLE_LICENSE_FILE="$APP_ROOT/Packaging/Sparkle-LICENSE.txt"
+APP_SPARKLE_LICENSE="$APP_DIR/Contents/Resources/ThirdPartyLicenses/Sparkle.txt"
+SPARKLE_TOOLS="$APP_ROOT/.build/artifacts/sparkle/Sparkle/bin"
+GENERATE_APPCAST="$SPARKLE_TOOLS/generate_appcast"
+GENERATE_KEYS="$SPARKLE_TOOLS/generate_keys"
+SIGN_UPDATE="$SPARKLE_TOOLS/sign_update"
+FEED_URL="https://github.com/Johannes-Berggren/limit-lifeboat/releases/latest/download/appcast.xml"
+PUBLIC_DOWNLOAD_ROOT="https://github.com/Johannes-Berggren/limit-lifeboat/releases/download/$EXPECTED_TAG"
+RELEASE_NOTES_URL="https://github.com/Johannes-Berggren/limit-lifeboat/releases/tag/$EXPECTED_TAG"
 DMG_BASENAME="Limit-Lifeboat-$RELEASE_VERSION-$ARCHITECTURE.dmg"
 DMG_PATH="$APP_ROOT/dist/$DMG_BASENAME"
 CHECKSUM_PATH="$DMG_PATH.sha256"
+APPCAST_PATH="$APP_ROOT/dist/appcast.xml"
 WORK_DIR=""
 MOUNT_POINT=""
 
@@ -90,6 +104,23 @@ assert_release_entitlements() {
     || fail "Release entitlements in $plist must contain only the Apple Events automation entitlement"
 }
 
+assert_developer_id_signature() {
+  local artifact="$1"
+  local label="$2"
+  local details
+
+  codesign --verify --all-architectures --strict --verbose=2 "$artifact"
+  details="$(codesign --display --verbose=4 "$artifact" 2>&1)"
+  grep -Fq "Authority=Developer ID Application:" <<< "$details" \
+    || fail "$label is not signed with a Developer ID Application certificate"
+  grep -Fxq "TeamIdentifier=$TEAM_ID" <<< "$details" \
+    || fail "$label TeamIdentifier does not match expected Apple Team $TEAM_ID"
+  grep -Eq '^Timestamp=' <<< "$details" \
+    || fail "$label has no trusted timestamp"
+  grep -Eq '^CodeDirectory .*flags=.*runtime' <<< "$details" \
+    || fail "$label does not have hardened runtime enabled"
+}
+
 notarize() {
   local artifact="$1"
   local label="$2"
@@ -123,8 +154,8 @@ notarize() {
 }
 
 echo "==> Release preflight"
-[[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] \
-  || fail "Invalid release version '$RELEASE_VERSION'"
+[[ "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+  || fail "Release version '$RELEASE_VERSION' must be stable major.minor.patch SemVer"
 [[ "$RELEASE_VERSION" == "$FILE_VERSION" ]] \
   || fail "Release version '$RELEASE_VERSION' does not match VERSION ('$FILE_VERSION')"
 [[ "$TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] \
@@ -137,13 +168,14 @@ PINNED_TEAM_ID="$(sed -nE 's/^[[:space:]]*static let appleTeamIdentifier = "([^"
 [[ "$(uname -m)" == "$ARCHITECTURE" ]] \
   || fail "Releases must be built on an Apple Silicon Mac (found $(uname -m))"
 
-for command_name in awk cmp codesign ditto git grep hdiutil lipo mount plutil readlink security sed shasum spctl swift xcrun; do
+for command_name in awk cmp codesign ditto git grep hdiutil lipo mount otool plutil readlink security sed shasum spctl stat swift xmllint xcrun; do
   command -v "$command_name" >/dev/null || fail "Required command '$command_name' was not found"
 done
 xcrun --find notarytool >/dev/null || fail "notarytool is unavailable"
 xcrun --find stapler >/dev/null || fail "stapler is unavailable"
 
 [[ -s "$LICENSE_FILE" ]] || fail "The repository license is missing or empty: $LICENSE_FILE"
+[[ -s "$SPARKLE_LICENSE_FILE" ]] || fail "The Sparkle license is missing or empty: $SPARKLE_LICENSE_FILE"
 [[ -z "$(git -C "$REPO_ROOT" status --porcelain=v1 --untracked-files=all)" ]] \
   || fail "The worktree must be clean before releasing"
 ORIGIN_MAIN="$(git -C "$REPO_ROOT" rev-parse --verify 'refs/remotes/origin/main^{commit}' 2>/dev/null || true)"
@@ -154,6 +186,10 @@ ORIGIN_MAIN="$(git -C "$REPO_ROOT" rev-parse --verify 'refs/remotes/origin/main^
 [[ "$(git -C "$REPO_ROOT" rev-parse HEAD)" == \
     "$(git -C "$REPO_ROOT" rev-parse --verify "$EXPECTED_TAG^{commit}" 2>/dev/null || true)" ]] \
   || fail "HEAD must be exactly tagged $EXPECTED_TAG"
+[[ "$(git -C "$REPO_ROOT" cat-file -t "refs/tags/$EXPECTED_TAG" 2>/dev/null || true)" == "tag" ]] \
+  || fail "$EXPECTED_TAG must be an annotated tag"
+BUILD_NUMBER="$(git -C "$REPO_ROOT" rev-list --count HEAD)"
+[[ "$BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]] || fail "Commit-count build number is invalid: $BUILD_NUMBER"
 
 plutil -lint "$ENTITLEMENTS" >/dev/null
 assert_release_entitlements "$ENTITLEMENTS"
@@ -186,8 +222,16 @@ xcrun notarytool history \
 echo "==> Running tests"
 swift test --package-path "$APP_ROOT" --arch "$ARCHITECTURE"
 
+for sparkle_tool in "$GENERATE_APPCAST" "$GENERATE_KEYS" "$SIGN_UPDATE"; do
+  [[ -x "$sparkle_tool" ]] || fail "Sparkle release tool is unavailable: $sparkle_tool"
+done
+KEYCHAIN_PUBLIC_KEY="$("$GENERATE_KEYS" --account "$SPARKLE_ACCOUNT" -p)" \
+  || fail "Could not read the Sparkle EdDSA key from Keychain account '$SPARKLE_ACCOUNT'"
+[[ "$KEYCHAIN_PUBLIC_KEY" =~ ^[A-Za-z0-9+/]{43}=$ ]] \
+  || fail "Keychain account '$SPARKLE_ACCOUNT' returned an invalid Sparkle public key"
+
 echo "==> Building app"
-SKIP_ADHOC_SIGN=1 ARCHITECTURE="$ARCHITECTURE" VERSION="$RELEASE_VERSION" \
+SKIP_ADHOC_SIGN=1 ARCHITECTURE="$ARCHITECTURE" VERSION="$RELEASE_VERSION" BUILD_NUMBER="$BUILD_NUMBER" \
   "$APP_ROOT/scripts/package-app.sh"
 
 plutil -lint "$INFO_PLIST" >/dev/null
@@ -195,19 +239,47 @@ assert_plist_value "$INFO_PLIST" CFBundleDisplayName "$PRODUCT_NAME"
 assert_plist_value "$INFO_PLIST" CFBundleExecutable "$EXECUTABLE_NAME"
 assert_plist_value "$INFO_PLIST" CFBundleIdentifier "$BUNDLE_ID"
 assert_plist_value "$INFO_PLIST" CFBundleShortVersionString "$RELEASE_VERSION"
+assert_plist_value "$INFO_PLIST" CFBundleVersion "$BUILD_NUMBER"
 assert_plist_value "$INFO_PLIST" LSMinimumSystemVersion "14.0"
+assert_plist_value "$INFO_PLIST" SUEnableAutomaticChecks "true"
+assert_plist_value "$INFO_PLIST" SUAutomaticallyUpdate "false"
+assert_plist_value "$INFO_PLIST" SUScheduledCheckInterval "86400"
+assert_plist_value "$INFO_PLIST" SUFeedURL "$FEED_URL"
+assert_plist_value "$INFO_PLIST" SUPublicEDKey "$KEYCHAIN_PUBLIC_KEY"
+assert_plist_value "$INFO_PLIST" SURequireSignedFeed "true"
+assert_plist_value "$INFO_PLIST" SUVerifyUpdateBeforeExtraction "true"
 cmp -s "$LICENSE_FILE" "$APP_LICENSE" \
   || fail "The app does not contain an exact copy of the repository license"
+cmp -s "$SPARKLE_LICENSE_FILE" "$APP_SPARKLE_LICENSE" \
+  || fail "The app does not contain an exact copy of the Sparkle license notice"
+[[ -d "$APP_FRAMEWORK" ]] || fail "The app does not contain Sparkle.framework"
+[[ ! -e "$APP_FRAMEWORK/Versions/B/XPCServices" ]] \
+  || fail "The non-sandboxed app must not include Sparkle's unused XPC services"
+otool -L "$APP_EXECUTABLE" | grep -Fq '@rpath/Sparkle.framework/Versions/B/Sparkle' \
+  || fail "Packaged executable is not linked to embedded Sparkle.framework"
+otool -l "$APP_EXECUTABLE" | grep -A2 LC_RPATH | grep -Fq '@executable_path/../Frameworks' \
+  || fail "Packaged executable does not contain the Sparkle framework rpath"
 [[ "$(lipo -archs "$APP_EXECUTABLE")" == "$ARCHITECTURE" ]] \
   || fail "Packaged executable is not arm64-only: $(lipo -archs "$APP_EXECUTABLE")"
 [[ "$(xcrun vtool -show-build "$APP_EXECUTABLE" | awk '$1 == "minos" { print $2; exit }')" == "14.0" ]] \
   || fail "Packaged executable does not have a macOS 14.0 deployment target"
+
+echo "==> Signing Sparkle inside-out with '$SIGN_IDENTITY'"
+codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP_AUTOUPDATE"
+codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP_UPDATER"
+codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP_FRAMEWORK"
+assert_developer_id_signature "$APP_AUTOUPDATE" "Sparkle Autoupdate"
+assert_developer_id_signature "$APP_UPDATER" "Sparkle Updater.app"
+assert_developer_id_signature "$APP_FRAMEWORK" "Sparkle.framework"
 
 echo "==> Signing app with '$SIGN_IDENTITY'"
 codesign --force --options runtime --timestamp \
   --entitlements "$ENTITLEMENTS" \
   --sign "$SIGN_IDENTITY" "$APP_DIR"
 codesign --verify --all-architectures --strict --verbose=2 "$APP_DIR"
+assert_developer_id_signature "$APP_AUTOUPDATE" "Embedded Sparkle Autoupdate"
+assert_developer_id_signature "$APP_UPDATER" "Embedded Sparkle Updater.app"
+assert_developer_id_signature "$APP_FRAMEWORK" "Embedded Sparkle.framework"
 
 CODESIGN_DETAILS="$(codesign --display --verbose=4 "$APP_DIR" 2>&1)"
 grep -Fxq "Identifier=$BUNDLE_ID" <<< "$CODESIGN_DETAILS" \
@@ -246,7 +318,7 @@ STAGE="$WORK_DIR/dmg-staging"
 mkdir -p "$STAGE"
 ditto "$APP_DIR" "$STAGE/$PRODUCT_NAME.app"
 ln -s /Applications "$STAGE/Applications"
-rm -f "$DMG_PATH" "$CHECKSUM_PATH"
+rm -f "$DMG_PATH" "$CHECKSUM_PATH" "$APPCAST_PATH"
 hdiutil create \
   -volname "$PRODUCT_NAME" \
   -srcfolder "$STAGE" \
@@ -282,14 +354,38 @@ MOUNTED_APP="$MOUNT_POINT/$PRODUCT_NAME.app"
 MOUNTED_EXECUTABLE="$MOUNTED_APP/Contents/MacOS/$EXECUTABLE_NAME"
 MOUNTED_INFO="$MOUNTED_APP/Contents/Info.plist"
 MOUNTED_LICENSE="$MOUNTED_APP/Contents/Resources/LICENSE.txt"
+MOUNTED_SPARKLE_LICENSE="$MOUNTED_APP/Contents/Resources/ThirdPartyLicenses/Sparkle.txt"
+MOUNTED_FRAMEWORK="$MOUNTED_APP/Contents/Frameworks/Sparkle.framework"
+MOUNTED_AUTOUPDATE="$MOUNTED_FRAMEWORK/Versions/B/Autoupdate"
+MOUNTED_UPDATER="$MOUNTED_FRAMEWORK/Versions/B/Updater.app"
 assert_plist_value "$MOUNTED_INFO" CFBundleIdentifier "$BUNDLE_ID"
 assert_plist_value "$MOUNTED_INFO" CFBundleShortVersionString "$RELEASE_VERSION"
+assert_plist_value "$MOUNTED_INFO" CFBundleVersion "$BUILD_NUMBER"
 assert_plist_value "$MOUNTED_INFO" LSMinimumSystemVersion "14.0"
+assert_plist_value "$MOUNTED_INFO" SUEnableAutomaticChecks "true"
+assert_plist_value "$MOUNTED_INFO" SUAutomaticallyUpdate "false"
+assert_plist_value "$MOUNTED_INFO" SUScheduledCheckInterval "86400"
+assert_plist_value "$MOUNTED_INFO" SUFeedURL "$FEED_URL"
+assert_plist_value "$MOUNTED_INFO" SUPublicEDKey "$KEYCHAIN_PUBLIC_KEY"
+assert_plist_value "$MOUNTED_INFO" SURequireSignedFeed "true"
+assert_plist_value "$MOUNTED_INFO" SUVerifyUpdateBeforeExtraction "true"
 cmp -s "$LICENSE_FILE" "$MOUNTED_LICENSE" \
   || fail "The app inside the DMG does not contain the repository license"
+cmp -s "$SPARKLE_LICENSE_FILE" "$MOUNTED_SPARKLE_LICENSE" \
+  || fail "The app inside the DMG does not contain the Sparkle license notice"
+[[ -d "$MOUNTED_FRAMEWORK" ]] || fail "The app inside the DMG does not contain Sparkle.framework"
+[[ ! -e "$MOUNTED_FRAMEWORK/Versions/B/XPCServices" ]] \
+  || fail "The app inside the DMG contains unused Sparkle XPC services"
+otool -L "$MOUNTED_EXECUTABLE" | grep -Fq '@rpath/Sparkle.framework/Versions/B/Sparkle' \
+  || fail "The app inside the DMG is not linked to Sparkle.framework"
+otool -l "$MOUNTED_EXECUTABLE" | grep -A2 LC_RPATH | grep -Fq '@executable_path/../Frameworks' \
+  || fail "The app inside the DMG lacks the Sparkle framework rpath"
 [[ "$(lipo -archs "$MOUNTED_EXECUTABLE")" == "$ARCHITECTURE" ]] \
   || fail "The app inside the DMG is not arm64-only"
 codesign --verify --all-architectures --strict --verbose=2 "$MOUNTED_APP"
+assert_developer_id_signature "$MOUNTED_AUTOUPDATE" "DMG Sparkle Autoupdate"
+assert_developer_id_signature "$MOUNTED_UPDATER" "DMG Sparkle Updater.app"
+assert_developer_id_signature "$MOUNTED_FRAMEWORK" "DMG Sparkle.framework"
 MOUNTED_CODESIGN_DETAILS="$(codesign --display --verbose=4 "$MOUNTED_APP" 2>&1)"
 grep -Fxq "Identifier=$BUNDLE_ID" <<< "$MOUNTED_CODESIGN_DETAILS" \
   || fail "The app inside the DMG has the wrong signing identifier"
@@ -306,6 +402,58 @@ MOUNT_POINT=""
   shasum -a 256 -c "$DMG_BASENAME.sha256"
 )
 
+echo "==> Generating signed Sparkle appcast"
+APPCAST_SOURCE="$WORK_DIR/appcast-source"
+mkdir -p "$APPCAST_SOURCE"
+ditto "$DMG_PATH" "$APPCAST_SOURCE/$DMG_BASENAME"
+"$GENERATE_APPCAST" \
+  --account "$SPARKLE_ACCOUNT" \
+  --download-url-prefix "$PUBLIC_DOWNLOAD_ROOT/" \
+  --full-release-notes-url "$RELEASE_NOTES_URL" \
+  --link "https://limitlifeboat.com" \
+  --maximum-versions 1 \
+  --maximum-deltas 0 \
+  -o "$APPCAST_PATH" \
+  "$APPCAST_SOURCE"
+
+xmllint --noout "$APPCAST_PATH"
+"$SIGN_UPDATE" --account "$SPARKLE_ACCOUNT" --verify "$APPCAST_PATH"
+
+APPCAST_ITEM_COUNT="$(xmllint --xpath 'count(//*[local-name()="item"])' "$APPCAST_PATH")"
+APPCAST_ENCLOSURE_COUNT="$(xmllint --xpath 'count(//*[local-name()="enclosure"])' "$APPCAST_PATH")"
+APPCAST_DELTA_COUNT="$(xmllint --xpath 'count(//*[local-name()="deltaFrom"])' "$APPCAST_PATH")"
+APPCAST_VERSION="$(xmllint --xpath 'string(//*[local-name()="version"])' "$APPCAST_PATH")"
+APPCAST_SHORT_VERSION="$(xmllint --xpath 'string(//*[local-name()="shortVersionString"])' "$APPCAST_PATH")"
+APPCAST_MINIMUM_SYSTEM="$(xmllint --xpath 'string(//*[local-name()="minimumSystemVersion"])' "$APPCAST_PATH")"
+APPCAST_HARDWARE="$(xmllint --xpath 'string(//*[local-name()="hardwareRequirements"])' "$APPCAST_PATH")"
+APPCAST_RELEASE_NOTES="$(xmllint --xpath 'string(//*[local-name()="fullReleaseNotesLink"])' "$APPCAST_PATH")"
+APPCAST_ENCLOSURE_URL="$(xmllint --xpath 'string(//*[local-name()="enclosure"]/@url)' "$APPCAST_PATH")"
+APPCAST_ENCLOSURE_LENGTH="$(xmllint --xpath 'string(//*[local-name()="enclosure"]/@length)' "$APPCAST_PATH")"
+APPCAST_ENCLOSURE_SIGNATURE="$(xmllint --xpath 'string(//*[local-name()="enclosure"]/@*[local-name()="edSignature"])' "$APPCAST_PATH")"
+
+[[ "$APPCAST_ITEM_COUNT" == "1" && "$APPCAST_ENCLOSURE_COUNT" == "1" ]] \
+  || fail "Appcast must contain exactly one full update"
+[[ "$APPCAST_DELTA_COUNT" == "0" ]] || fail "Appcast must not contain delta updates"
+[[ "$APPCAST_VERSION" == "$BUILD_NUMBER" ]] \
+  || fail "Appcast build '$APPCAST_VERSION' does not match '$BUILD_NUMBER'"
+[[ "$APPCAST_SHORT_VERSION" == "$RELEASE_VERSION" ]] \
+  || fail "Appcast version '$APPCAST_SHORT_VERSION' does not match '$RELEASE_VERSION'"
+[[ "$APPCAST_MINIMUM_SYSTEM" == "14.0" ]] \
+  || fail "Appcast minimum macOS is '$APPCAST_MINIMUM_SYSTEM'; expected '14.0'"
+[[ "$APPCAST_HARDWARE" == "$ARCHITECTURE" ]] \
+  || fail "Appcast hardware requirement is '$APPCAST_HARDWARE'; expected '$ARCHITECTURE'"
+[[ "$APPCAST_RELEASE_NOTES" == "$RELEASE_NOTES_URL" ]] \
+  || fail "Appcast release notes URL does not target $EXPECTED_TAG"
+[[ "$APPCAST_ENCLOSURE_URL" == "$PUBLIC_DOWNLOAD_ROOT/$DMG_BASENAME" ]] \
+  || fail "Appcast enclosure does not use the immutable versioned DMG URL"
+[[ "$APPCAST_ENCLOSURE_LENGTH" == "$(stat -f '%z' "$DMG_PATH")" ]] \
+  || fail "Appcast enclosure length does not match the DMG"
+[[ -n "$APPCAST_ENCLOSURE_SIGNATURE" ]] \
+  || fail "Appcast enclosure has no EdDSA signature"
+"$SIGN_UPDATE" --account "$SPARKLE_ACCOUNT" --verify \
+  "$DMG_PATH" "$APPCAST_ENCLOSURE_SIGNATURE"
+
 echo "Release ready:"
 echo "  $DMG_PATH"
 echo "  $CHECKSUM_PATH"
+echo "  $APPCAST_PATH"

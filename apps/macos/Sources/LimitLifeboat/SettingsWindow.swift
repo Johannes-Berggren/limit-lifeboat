@@ -10,14 +10,16 @@ final class SettingsWindowController {
 
     func show(state: AppState) {
         if window == nil {
-            let hosting = NSHostingController(rootView: SettingsView(state: state, settings: state.settings))
+            let hosting = NSHostingController(
+                rootView: SettingsView(settings: state.settings, updater: state.updater)
+            )
             let window = NSWindow(contentViewController: hosting)
             window.title = "Limit Lifeboat Settings"
             window.styleMask = [.titled, .closable]
             window.isReleasedWhenClosed = false
             window.center()
             // Drop the window on close so the next open builds a fresh view —
-            // otherwise @State (login-item toggle, update-check message) keeps
+            // otherwise @State (such as the login-item toggle) keeps
             // showing whatever was true the first time it opened.
             closeObserver = NotificationCenter.default.addObserver(
                 forName: NSWindow.willCloseNotification,
@@ -70,14 +72,11 @@ enum LaunchAtLogin {
 }
 
 struct SettingsView: View {
-    @ObservedObject var state: AppState
     @ObservedObject var settings: SettingsStore
+    @ObservedObject var updater: AppUpdater
 
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
     @State private var launchAtLoginMessage: String?
-    @State private var isCheckingForUpdates = false
-    @State private var updateCheckMessage: String?
-    @State private var updateCheckFailed = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -142,26 +141,27 @@ struct SettingsView: View {
 
                     Section("Updates") {
                         LabeledContent("Version", value: AppInfo.version)
-                        if let update = state.availableUpdate {
-                            Button("Download version \(update.version)…") {
-                                state.openAvailableUpdate()
-                            }
-                        } else {
-                            Button(isCheckingForUpdates ? "Checking…" : "Check for Updates") {
-                                checkForUpdates()
-                            }
-                            .disabled(isCheckingForUpdates)
-                            if let updateCheckMessage {
-                                StatusBanner(
-                                    text: updateCheckMessage,
-                                    systemImage: updateCheckFailed
-                                        ? "exclamationmark.triangle.fill"
-                                        : "checkmark.circle.fill",
-                                    color: updateCheckFailed ? DS.danger : DS.success
-                                )
-                                .transition(.opacity.combined(with: .move(edge: .top)))
-                            }
+                        Toggle(
+                            "Automatically check for updates",
+                            isOn: Binding(
+                                get: { updater.automaticallyChecksForUpdates },
+                                set: { updater.setAutomaticallyChecksForUpdates($0) }
+                            )
+                        )
+                        if let version = updater.availableVersion {
+                            Label(
+                                "Version \(version) is ready to install.",
+                                systemImage: "arrow.down.circle.fill"
+                            )
+                            .foregroundStyle(DS.accent)
                         }
+                        Button(
+                            updater.availableVersion.map { "Install version \($0)…" }
+                                ?? "Check for Updates…"
+                        ) {
+                            updater.checkForUpdates()
+                        }
+                        .disabled(!updater.canCheckForUpdates)
                     }
                 }
                 .formStyle(.grouped)
@@ -172,7 +172,7 @@ struct SettingsView: View {
         .fixedSize(horizontal: false, vertical: true)
         .tint(DS.accent)
         .animation(reduceMotion ? nil : DS.Motion.standard, value: launchAtLoginMessage)
-        .animation(reduceMotion ? nil : DS.Motion.standard, value: updateCheckMessage)
+        .animation(reduceMotion ? nil : DS.Motion.standard, value: updater.availableVersion)
     }
 
     private func applyLaunchAtLogin(_ enabled: Bool) {
@@ -186,27 +186,6 @@ struct SettingsView: View {
             withAnimation(reduceMotion ? nil : DS.Motion.quick) {
                 launchAtLoginMessage = "Could not update the login item: \(error.localizedDescription)"
             }
-        }
-    }
-
-    private func checkForUpdates() {
-        isCheckingForUpdates = true
-        updateCheckMessage = nil
-        updateCheckFailed = false
-        Task {
-            let result = await state.checkForUpdatesNow()
-            withAnimation(reduceMotion ? nil : DS.Motion.quick) {
-                switch result {
-                case .updateAvailable:
-                    updateCheckMessage = nil
-                case .upToDate:
-                    updateCheckMessage = "You're up to date."
-                case .failed(let message):
-                    updateCheckMessage = message
-                    updateCheckFailed = true
-                }
-            }
-            isCheckingForUpdates = false
         }
     }
 }
