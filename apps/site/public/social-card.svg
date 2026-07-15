@@ -36,9 +36,9 @@
     <circle cx="79" cy="79" r="7" fill="#fff"/>
   </g>
   <text x="292" y="149" fill="#141423" font-family="-apple-system,BlinkMacSystemFont,Arial,sans-serif" font-size="35" font-weight="700" letter-spacing="-1">Limit Lifeboat</text>
-  <text x="92" y="366" fill="#0A0916" font-family="-apple-system,BlinkMacSystemFont,Arial,sans-serif" font-size="70" font-weight="750" letter-spacing="-3">Keep every AI coding</text>
-  <text x="92" y="446" fill="#5233B5" font-family="-apple-system,BlinkMacSystemFont,Arial,sans-serif" font-size="70" font-weight="750" letter-spacing="-3">account afloat.</text>
-  <text x="95" y="519" fill="#626277" font-family="-apple-system,BlinkMacSystemFont,Arial,sans-serif" font-size="26">Claude + ChatGPT/Codex usage, warnings, and safe CLI switching.</text>
+  <text x="92" y="366" fill="#0A0916" font-family="-apple-system,BlinkMacSystemFont,Arial,sans-serif" font-size="67" font-weight="750" letter-spacing="-3">See every Claude Code + Codex</text>
+  <text x="92" y="446" fill="#5233B5" font-family="-apple-system,BlinkMacSystemFont,Arial,sans-serif" font-size="67" font-weight="750" letter-spacing="-3">account. Switch safely.</text>
+  <text x="95" y="519" fill="#626277" font-family="-apple-system,BlinkMacSystemFont,Arial,sans-serif" font-size="26">Work + personal usage and verified CLI switching for Mac.</text>
   <g transform="translate(902 91)">
     <rect width="207" height="48" rx="24" fill="#fff" fill-opacity=".72" stroke="#302663" stroke-opacity=".1"/>
     <circle cx="27" cy="24" r="5" fill="#18A14C"/>

@@ -408,18 +408,14 @@ final class AppState: ObservableObject {
         profiles.first { $0.provider == provider && $0.isActiveCLI }
     }
 
-    /// Syncs the active-CLI flags and identities from the current terminal
-    /// login, then captures its credentials into the matching profile so
-    /// switching never depends on a manual snapshot step.
-    @discardableResult
-    private func reconcileLiveCredentials(
+    /// Resolves which profile the current live CLI login belongs to, refreshing
+    /// `storedSnapshotStatuses` as a side effect. Shared by `reconcileLiveCredentials`
+    /// and the non-activating capture path so ownership is decided one way only.
+    private func planLiveOwnership(
         provider: Provider,
-        origin: AuthChangeOrigin,
-        observation suppliedObservation: LiveCredentialObservation? = nil,
+        observation: LiveCredentialObservation,
         preferredLoginProfileID: UUID? = nil
-    ) throws -> AccountProfile? {
-        let observation = try suppliedObservation ?? cliSwitcher.liveObservation(provider: provider)
-        let previousActiveID = activeProfile(for: provider)?.id
+    ) throws -> CLIAccountSyncAction {
         var storedFingerprints: [UUID: String] = [:]
         var profilesWithStoredCredentials: Set<UUID> = []
         for profile in profiles where profile.provider == provider {
@@ -456,6 +452,26 @@ final class AppState: ObservableObject {
            !profiles.contains(where: { $0.provider == provider && $0.identity?.matches(identity) == true }) {
             action = .adopt(preferred.id)
         }
+        return action
+    }
+
+    /// Syncs the active-CLI flags and identities from the current terminal
+    /// login, then captures its credentials into the matching profile so
+    /// switching never depends on a manual snapshot step.
+    @discardableResult
+    private func reconcileLiveCredentials(
+        provider: Provider,
+        origin: AuthChangeOrigin,
+        observation suppliedObservation: LiveCredentialObservation? = nil,
+        preferredLoginProfileID: UUID? = nil
+    ) throws -> AccountProfile? {
+        let observation = try suppliedObservation ?? cliSwitcher.liveObservation(provider: provider)
+        let previousActiveID = activeProfile(for: provider)?.id
+        let action = try planLiveOwnership(
+            provider: provider,
+            observation: observation,
+            preferredLoginProfileID: preferredLoginProfileID
+        )
         var changed = false
         var activeID: UUID?
 
@@ -1280,17 +1296,24 @@ final class AppState: ObservableObject {
         terminalLauncher.open()
     }
 
-    func beginCLILogin(for profile: AccountProfile) {
+    func beginCLILogin(for profile: AccountProfile, activateAfterLogin: Bool = true) {
         if CredentialAccess.currentMode != .userInitiated {
             CredentialAccess.userInitiated(
                 reason: "prepare \(profile.label) for CLI login"
             ) {
-                beginCLILogin(for: profile)
+                beginCLILogin(for: profile, activateAfterLogin: activateAfterLogin)
             }
             return
         }
 
         let initialObservation = try? cliSwitcher.stableLiveObservation(provider: profile.provider)
+
+        // Not switching is only meaningful when there is a *different* active
+        // account to preserve. With no active account (first login) or when
+        // re-authenticating the account that is already active, fall back to
+        // the normal activating login.
+        let previousActiveID = activeProfile(for: profile.provider)?.id
+        let activate = activateAfterLogin || previousActiveID == nil || previousActiveID == profile.id
 
         // Codex accounts share the single `~/.codex/auth.json`, so a bare
         // `codex login` launched while another account is signed in runs
@@ -1298,17 +1321,21 @@ final class AppState: ObservableObject {
         // Capture the active account first (so its credentials survive as a
         // restorable snapshot), then log the terminal out before logging in.
         let hasExistingSession = profile.provider == .codex && cliSwitcher.validateActiveLogin(provider: .codex)
-        if hasExistingSession {
+        // A non-activating login must be able to restore the previous account
+        // afterward, so capture it first for both providers. Codex is already
+        // captured by the `hasExistingSession` path below; capture Claude here.
+        let capturesActiveFirst = hasExistingSession || (!activate && profile.provider == .claude)
+        if capturesActiveFirst {
             do {
                 guard let initialObservation else {
-                    throw CLISwitcherError.credentialConflict("live Codex credentials")
+                    throw CLISwitcherError.credentialConflict("live \(profile.provider.displayName) credentials")
                 }
-                _ = try reconcileLiveCredentials(provider: .codex, origin: .login, observation: initialObservation)
+                _ = try reconcileLiveCredentials(provider: profile.provider, origin: .login, observation: initialObservation)
             } catch {
-                statusMessage = "Login cancelled: the current Codex account could not be saved."
+                statusMessage = "Login cancelled: the current \(profile.provider.displayName) account could not be saved."
                 showError(
-                    message: "Could not safely start Codex login",
-                    details: "The current account was not logged out because its credentials could not be captured. \(error.localizedDescription)"
+                    message: "Could not safely start \(profile.provider.displayName) login",
+                    details: "The current account was not touched because its credentials could not be captured. \(error.localizedDescription)"
                 )
                 return
             }
@@ -1323,13 +1350,16 @@ final class AppState: ObservableObject {
             hasExistingSession: hasExistingSession,
             exitWhenDone: true
         )
+        let linkNote = activate
+            ? "The account links automatically after login."
+            : "It is updated without switching your active account."
 
         // Preferred path: drive Terminal via AppleScript (reuses a window when
         // the user has granted Automation permission).
         let appleScriptError = terminalLauncher.runViaAutomation(launchedCommand)
         if appleScriptError == nil {
-            statusMessage = "Started login for \(profile.label). The account links automatically after login."
-            watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialObservation: initialObservation)
+            statusMessage = "Started login for \(profile.label). \(linkNote)"
+            watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialObservation: initialObservation, activateAfterLogin: activate, previousActiveID: previousActiveID)
             return
         }
 
@@ -1339,8 +1369,8 @@ final class AppState: ObservableObject {
         // command by opening an executable `.command` file, which needs no
         // Apple Events permission.
         if terminalLauncher.runViaCommandFile(launchedCommand) {
-            statusMessage = "Opened Terminal to log in \(profile.label). The account links automatically after login."
-            watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialObservation: initialObservation)
+            statusMessage = "Opened Terminal to log in \(profile.label). \(linkNote)"
+            watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialObservation: initialObservation, activateAfterLogin: activate, previousActiveID: previousActiveID)
             return
         }
 
@@ -1349,9 +1379,9 @@ final class AppState: ObservableObject {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(command, forType: .string)
         statusMessage = appleScriptError
-            ?? "Copied the login command. Paste it into Terminal; the account links automatically after login."
+            ?? "Copied the login command. Paste it into Terminal; \(linkNote.prefix(1).lowercased() + linkNote.dropFirst())"
         terminalLauncher.open()
-        watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialObservation: initialObservation)
+        watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialObservation: initialObservation, activateAfterLogin: activate, previousActiveID: previousActiveID)
     }
 
     /// Builds the CLI login command, prefixed with a PATH export so the
@@ -1381,7 +1411,9 @@ final class AppState: ObservableObject {
     private func watchForCompletedLogin(
         profileID: UUID,
         provider: Provider,
-        initialObservation: LiveCredentialObservation?
+        initialObservation: LiveCredentialObservation?,
+        activateAfterLogin: Bool,
+        previousActiveID: UUID?
     ) {
         loginFollowUpTasks[provider]?.cancel()
         loginFollowUpTasks[provider] = Task { [weak self] in
@@ -1394,7 +1426,9 @@ final class AppState: ObservableObject {
                 let linked = await self?.refreshAfterCompletedLogin(
                     profileID: profileID,
                     provider: provider,
-                    initialObservation: initialObservation
+                    initialObservation: initialObservation,
+                    activateAfterLogin: activateAfterLogin,
+                    previousActiveID: previousActiveID
                 ) ?? true
                 if linked {
                     return
@@ -1406,7 +1440,9 @@ final class AppState: ObservableObject {
     private func refreshAfterCompletedLogin(
         profileID: UUID,
         provider: Provider,
-        initialObservation: LiveCredentialObservation?
+        initialObservation: LiveCredentialObservation?,
+        activateAfterLogin: Bool,
+        previousActiveID: UUID?
     ) async -> Bool {
         guard let current = try? cliSwitcher.liveObservation(provider: provider),
               current.isLoggedIn else {
@@ -1422,6 +1458,13 @@ final class AppState: ObservableObject {
         guard identityChanged || credentialsChanged else {
             return false
         }
+        guard activateAfterLogin else {
+            return await handleNonActivatingLoginCompletion(
+                current: current,
+                profileID: profileID,
+                previousActiveID: previousActiveID
+            )
+        }
         do {
             _ = try reconcileLiveCredentials(
                 provider: provider,
@@ -1436,6 +1479,128 @@ final class AppState: ObservableObject {
             statusMessage = "Login finished, but the account could not be saved: \(error.localizedDescription)"
             return false
         }
+    }
+
+    /// Captures the just-completed login into its profile *without* changing the
+    /// active account, then restores the previously-active account into the live
+    /// session so the app's active-CLI belief and the on-disk session agree.
+    private func handleNonActivatingLoginCompletion(
+        current: LiveCredentialObservation,
+        profileID: UUID,
+        previousActiveID: UUID?
+    ) async -> Bool {
+        let provider = current.provider
+        let resolved: AccountProfile?
+        do {
+            resolved = try captureLoginIntoProfile(
+                observation: current,
+                provider: provider,
+                targetProfileID: profileID
+            )
+        } catch {
+            statusMessage = "Login finished, but the account could not be saved: \(error.localizedDescription)"
+            return false
+        }
+        // No stable identity yet — keep polling.
+        guard let resolved else {
+            return false
+        }
+        refreshStates[resolved.id] = .ok
+
+        // Without a previous account to return to (or one we can restore), the
+        // freshly logged-in account simply becomes active.
+        guard let previousActiveID,
+              let previous = profiles.first(where: { $0.id == previousActiveID }),
+              hasStoredSnapshot(for: previous) else {
+            _ = try? reconcileLiveCredentials(provider: provider, origin: .login, observation: current, preferredLoginProfileID: profileID)
+            statusMessage = "Logged into \(resolved.label). Could not restore the previous account, so it is now active."
+            await CredentialAccess.nonInteractive { await refreshAll() }
+            return true
+        }
+
+        do {
+            let result = try cliSwitcher.restoreSnapshot(
+                for: previous,
+                expectedLiveFingerprint: current.credentialFingerprint,
+                enforceExpectedLiveState: true
+            )
+            _ = try reconcileLiveCredentials(
+                provider: provider,
+                origin: .login,
+                observation: result.verifiedObservation
+            )
+            var message = "Logged into \(resolved.label). Kept \(previous.label) as the active \(provider.displayName) account."
+            if resolved.id != profileID {
+                message += " The login matched an existing account."
+            }
+            statusMessage = message
+            await CredentialAccess.nonInteractive { await refreshAll() }
+            return true
+        } catch {
+            // Restore-back failed — the live session still belongs to the new
+            // account. Reconcile to that reality so the app never claims an
+            // active account that isn't live, then tell the user plainly.
+            _ = try? reconcileLiveCredentials(provider: provider, origin: .login, observation: current, preferredLoginProfileID: profileID)
+            showError(
+                message: "Logged into \(resolved.label), but could not switch back to \(previous.label)",
+                details: "\(resolved.label) is now the active \(provider.displayName) account. \(error.localizedDescription)"
+            )
+            await CredentialAccess.nonInteractive { await refreshAll() }
+            return true
+        }
+    }
+
+    /// Records the live login for the profile it belongs to (matching identity,
+    /// adopting a placeholder, or registering a new profile) and stores its
+    /// credential snapshot, without ever marking it active. Returns the profile
+    /// the login was attributed to, or `nil` if the identity is not yet stable.
+    private func captureLoginIntoProfile(
+        observation: LiveCredentialObservation,
+        provider: Provider,
+        targetProfileID: UUID
+    ) throws -> AccountProfile? {
+        guard observation.isLoggedIn,
+              observation.snapshot != nil,
+              let identity = observation.identity else {
+            return nil
+        }
+        let action = try planLiveOwnership(
+            provider: provider,
+            observation: observation,
+            preferredLoginProfileID: targetProfileID
+        )
+        let resolvedID: UUID
+        switch action {
+        case .activate(let id), .adopt(let id):
+            resolvedID = id
+        case .create:
+            let profile = AccountProfile(
+                provider: provider,
+                label: defaultLabel(for: identity, provider: provider),
+                identity: identity
+            )
+            profiles.append(profile)
+            resolvedID = profile.id
+        case .deactivateAll:
+            return nil
+        }
+        AccountProfileUpdater.enrich(
+            profiles: &profiles,
+            profileID: resolvedID,
+            enrichment: AccountProfileEnrichment(identity: identity)
+        )
+        persistProfiles()
+        guard let resolved = profiles.first(where: { $0.id == resolvedID }) else {
+            return nil
+        }
+        do {
+            _ = try cliSwitcher.storeObservation(observation, for: resolved)
+            storedSnapshotStatuses[resolvedID] = .present
+        } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
+            storedSnapshotStatuses[resolvedID] = .locked
+            throw error
+        }
+        return resolved
     }
 
     func quit() {

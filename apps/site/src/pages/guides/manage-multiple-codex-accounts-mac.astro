@@ -1,0 +1,72 @@
+---
+import GuideLayout from "../../layouts/GuideLayout.astro";
+
+const title = "How to Use Multiple Codex CLI Accounts on Mac";
+const description =
+  "Manage work and personal Codex CLI accounts on Mac, verify the active login, and switch without replacing unrelated Codex or MCP settings.";
+const faqs = [
+  {
+    question: "Does the ChatGPT account switcher also switch Codex CLI?",
+    answer:
+      "No. OpenAI’s account switcher applies to ChatGPT web and is not currently supported in Codex desktop. Codex CLI keeps its own cached authentication, so verify the CLI separately.",
+  },
+  {
+    question: "Where does Codex CLI keep authentication?",
+    answer:
+      "OpenAI documents that Codex caches credentials in its configured credential store, which may be auth.json under CODEX_HOME or the operating-system credential store. Treat either location as sensitive.",
+  },
+  {
+    question: "Does Limit Lifeboat switch the ChatGPT desktop app?",
+    answer:
+      "No. It changes only Codex CLI authentication fields. ChatGPT web, ChatGPT Desktop, and Codex CLI remain separate sessions.",
+  },
+] as const;
+---
+
+<GuideLayout
+  title={title}
+  description={description}
+  eyebrow="Codex CLI account guide"
+  introduction="ChatGPT can keep work and personal accounts separate on the web, but Codex CLI has its own cached login. A reliable workflow verifies that CLI identity and avoids replacing the rest of your Codex configuration."
+  path="/guides/manage-multiple-codex-accounts-mac"
+  imageAlt="Limit Lifeboat showing a Codex CLI account alongside separate Claude Code accounts, with usage and active-login status."
+  readingTime="6 minute read"
+  faqs={faqs}
+>
+  <Fragment slot="nav">
+    <a href="#official-method">Official method</a>
+    <a href="#separate-surfaces">Separate surfaces</a>
+    <a href="#safe-switch">A safer saved switch</a>
+    <a href="#policy">Policy and security</a>
+    <a href="#questions">Questions</a>
+  </Fragment>
+
+  <section id="official-method">
+    <h2>Start with the official Codex CLI commands</h2>
+    <p>Use <code>codex login status</code> to inspect the active authentication method. To change accounts manually, clear the cached CLI login with <code>codex logout</code>, run <code>codex login</code>, and complete OpenAI’s browser flow with the intended account and workspace.</p>
+    <pre><code>codex login status
+codex logout
+codex login</code></pre>
+    <p>OpenAI documents these commands and the available credential stores in <a href="https://developers.openai.com/codex/auth/">Codex authentication</a>. Signing in with ChatGPT uses subscription access; signing in with an API key uses metered API billing instead.</p>
+  </section>
+
+  <section id="separate-surfaces">
+    <h2>ChatGPT web and Codex CLI are separate surfaces</h2>
+    <p>OpenAI supports keeping two accounts signed in on ChatGPT web, commonly for work and personal separation. Its <a href="https://help.openai.com/en/articles/20001068-use-multiple-accounts-with-account-switching">account-switching documentation</a> says that each account keeps independent chats, memory, history, billing, and workspaces. It also states that this switcher is not currently supported in Codex desktop.</p>
+    <p>Codex CLI caches its own authentication, shared with the Codex IDE extension according to OpenAI’s current documentation. Changing the active browser account therefore does not prove that a terminal is using the same identity. Check the CLI before opening a sensitive repository or consuming a managed workspace’s allowance.</p>
+  </section>
+
+  <section id="safe-switch">
+    <h2>Switch only the fields that identify the CLI account</h2>
+    <p>Limit Lifeboat captures the authenticated Codex account as a named local profile and stores its app-managed credential snapshot in macOS Keychain. The menu-bar view then keeps each account’s identity, last usage reading, reading age, and active state visible.</p>
+    <p>A requested switch preserves unrelated Codex and MCP settings, stages private rollback material, restores the selected identity, and validates it before reporting success. A failed validation rolls back. If another process changes the live credentials during the transaction, the app does not overwrite that newer external change.</p>
+    <p>Limit Lifeboat switches one global Codex CLI login at a time. It does not start parallel isolated Codex homes or switch ChatGPT Desktop. Manual switching is the default; optional switching away from a depleted account is disabled until you explicitly enable it.</p>
+  </section>
+
+  <section id="policy">
+    <h2>Respect workspace, billing, and usage boundaries</h2>
+    <p>Use a managed work account only for activity authorized by that organization. OpenAI notes that workspace policies, roles, retention, and administrative controls follow the account used to sign in. A personal account stays independent from the managed workspace.</p>
+    <p>Account switching must not be presented as a way to circumvent provider restrictions. OpenAI’s <a href="https://openai.com/policies/row-terms-of-use/">Terms of Use</a> prohibit circumventing rate limits or restrictions. Limit Lifeboat does not merge allowances, share accounts between people, or alter a provider’s enforcement.</p>
+    <p>To manage the other supported CLI, read <a href="/guides/switch-claude-code-accounts-mac">how to switch Claude Code accounts on Mac</a>. For limit visibility across both providers, continue with the <a href="/guides/claude-code-codex-usage-monitor-mac">usage-monitor guide</a>.</p>
+  </section>
+</GuideLayout>

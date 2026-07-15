@@ -1,0 +1,81 @@
+---
+import GuideLayout from "../../layouts/GuideLayout.astro";
+
+const title = "How to Monitor Claude Code and Codex Usage on Mac";
+const description =
+  "Monitor Claude Code and Codex usage limits from the Mac menu bar, understand reset windows and stale readings, and get optional warnings before interruptions.";
+const faqs = [
+  {
+    question: "Does Limit Lifeboat estimate token cost?",
+    answer:
+      "No. It focuses on subscription usage windows, remaining capacity, reset timing, reading age, and local history rather than translating subscription activity into API prices.",
+  },
+  {
+    question: "Why can an inactive account show an older reading?",
+    answer:
+      "Providers and local CLI data do not always expose every inactive account continuously. Limit Lifeboat keeps the last successful reading and shows its age rather than presenting stale data as live.",
+  },
+  {
+    question: "Does checking usage consume a meaningful part of the limit?",
+    answer:
+      "Ordinary Codex readings come from recent local session data. Claude uses provider usage services with a local Claude Code usage fallback. The app does not submit coding prompts to measure usage.",
+  },
+] as const;
+---
+
+<GuideLayout
+  title={title}
+  description={description}
+  eyebrow="AI coding usage guide"
+  introduction="Claude Code and Codex usage is easy to check once. The harder problem is seeing every work and personal account, noticing when a reading is stale, and understanding whether a new task fits before a limit interrupts it."
+  path="/guides/claude-code-codex-usage-monitor-mac"
+  imageAlt="Limit Lifeboat menu-bar dashboard showing session and weekly usage meters for three Claude Code accounts and one Codex CLI account."
+  readingTime="5 minute read"
+  faqs={faqs}
+>
+  <Fragment slot="nav">
+    <a href="#official-checks">Official checks</a>
+    <a href="#what-to-watch">What to watch</a>
+    <a href="#menu-bar">Menu-bar monitoring</a>
+    <a href="#privacy">Privacy and accuracy</a>
+    <a href="#questions">Questions</a>
+  </Fragment>
+
+  <section id="official-checks">
+    <h2>Use the provider’s own usage view as the source of truth</h2>
+    <p>In Claude Code, run <code>/usage</code> to view plan limits and rate-limit status. In Codex CLI, use <code>/usage</code> inside the interactive interface; OpenAI documents it as the command for account token activity and available rate-limit resets.</p>
+    <pre><code># Inside Claude Code
+/usage
+
+# Inside Codex CLI
+/usage</code></pre>
+    <p>OpenAI also directs users approaching a Codex limit to the Codex usage page or in-product limit banner. The amount consumed varies with task size, complexity, model, and where the task runs. See <a href="https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan">Using Codex with your ChatGPT plan</a>.</p>
+  </section>
+
+  <section id="what-to-watch">
+    <h2>A percentage needs context</h2>
+    <p>A useful Claude Code or Codex usage monitor should answer more than “how much is left?” Look for:</p>
+    <ul>
+      <li><strong>The active CLI identity</strong>, especially before work involving managed company or client accounts.</li>
+      <li><strong>Each available usage window</strong>, such as the current session and weekly allowance.</li>
+      <li><strong>The reset time</strong>, so you can decide whether a longer task fits now or should wait.</li>
+      <li><strong>The reading age</strong>, because a last-known value from an inactive or expired login is not live data.</li>
+      <li><strong>Recent pace</strong>, which shows whether current consumption is moving faster than the remaining time.</li>
+    </ul>
+    <p>Provider limits can change, and consumption is workload-dependent. Treat the provider’s own current display as authoritative whenever a local view differs.</p>
+  </section>
+
+  <section id="menu-bar">
+    <h2>Put all authorized accounts in one quiet view</h2>
+    <p>Limit Lifeboat is a native macOS menu-bar app for Claude Code and Codex CLI accounts. It shows the active identity, session and weekly readings, reset timing, and reading age for every saved account. Local history and pace warnings help make the number actionable without turning the app into another large dashboard.</p>
+    <p>Warnings are optional. You can be notified when an account approaches a configured limit or when a previously depleted account is likely available again. Manual switching is the default; an optional depleted-account switch remains off until you explicitly enable it.</p>
+    <p>If you do choose another account, the same menu-bar app performs a verified, reversible CLI authentication switch while leaving unrelated settings alone. Read the focused setup guides for <a href="/guides/switch-claude-code-accounts-mac">Claude Code accounts</a> and <a href="/guides/manage-multiple-codex-accounts-mac">Codex CLI accounts</a>.</p>
+  </section>
+
+  <section id="privacy">
+    <h2>Know where usage and credentials come from</h2>
+    <p>Claude usage is fetched with the saved account’s OAuth credentials, with Claude Code’s local usage view as a fallback. Codex usage is read from recent local Codex session data. Inactive accounts keep their last successful reading and display its age.</p>
+    <p>Profiles and history stay under your user Library. App-managed credential snapshots are encrypted by macOS Keychain. Limit Lifeboat has no product analytics, advertising, or telemetry, and the website has no analytics scripts or cookies set by the project.</p>
+    <p>Review the exact storage locations, network destinations, permissions, and recovery behavior in the <a href="/privacy">privacy documentation</a>. The source and release process are also public on GitHub.</p>
+  </section>
+</GuideLayout>

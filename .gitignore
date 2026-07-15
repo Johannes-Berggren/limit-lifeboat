@@ -3,7 +3,7 @@ dist/
 node_modules/
 .astro/
 .vercel/
-.env*.local
+.env*
 .DS_Store
 *.xcworkspace/
 *.xcodeproj/

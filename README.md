@@ -1,9 +1,16 @@
 # Limit Lifeboat
 
-[Limit Lifeboat](https://limitlifeboat.com) is a native macOS menu-bar app for
-people who use multiple Claude and Codex subscription accounts. It
-shows each account's remaining usage and can switch Claude Code or the Codex
-CLI to another saved account without replacing unrelated CLI or MCP settings.
+[Limit Lifeboat](https://limitlifeboat.com) is the safe Claude Code and Codex
+account switcher for Mac, with usage for every work and personal account. The
+native menu-bar app shows each account's remaining usage and can switch Claude
+Code or the Codex CLI to another saved account without replacing unrelated CLI
+or MCP settings.
+
+Switching is manual by default; optional switching from a depleted account is
+off until you explicitly enable it. Both paths change only the selected CLI
+login, verify the restored identity, and roll back if verification fails.
+Browser and desktop-app sessions remain separate, and Limit Lifeboat does not
+merge accounts or bypass provider limits.
 
 This monorepo contains the macOS app and its static Astro marketing site:
 
@@ -49,11 +56,13 @@ direct-download source for release artifacts.
   silently. Rejected logins retain their last reading and show a **Log In**
   action without opening a background dialog; Retry and Switch can offer to
   authenticate again.
-- **Switching is explicit and transactional.** A switch captures the current
-  login, stages private rollback material, restores and validates the selected
-  identity, then removes the temporary material. If another process changes a
-  credential during the operation, that external change wins. A recovery path
-  is retained and shown only when a safe rollback cannot be completed.
+- **Switching is transactional and user-controlled.** Manual switching is the
+  default, and switching from a depleted account is off until you enable it.
+  Every switch captures the current login, stages private rollback material,
+  restores and validates the selected identity, then removes the temporary
+  material. If another process changes a credential during the operation, that
+  external change wins. A recovery path is retained and shown only when a safe
+  rollback cannot be completed.
 - **Warnings are optional.** The app can notify you when an account is nearing
   a limit or when a previously depleted account is likely available again.
 - **Updates are user-controlled.** Sparkle checks the signed GitHub release

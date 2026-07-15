@@ -10,9 +10,9 @@ const dmgAsset = `Limit-Lifeboat-${version}-arm64.dmg`;
 
 export const product = {
   name: "Limit Lifeboat",
-  headline: "Keep every AI coding account afloat.",
+  headline: "See every Claude Code and Codex account. Switch safely.",
   shortDescription:
-    "A native macOS menu-bar app for seeing Claude and ChatGPT/Codex usage, getting timely warnings, and safely switching CLI accounts.",
+    "Monitor usage across work and personal Claude Code and Codex CLI accounts, then switch safely without replacing settings. Free, open-source Mac app.",
   siteUrl: "https://limitlifeboat.com",
   version,
   minimumMacOS: "macOS 14 Sonoma",
@@ -43,4 +43,5 @@ export const navigation = [
   { label: "Features", href: "/#features" },
   { label: "How it works", href: "/#setup" },
   { label: "Security", href: "/#security" },
+  { label: "Resources", href: "/#resources" },
 ] as const;
