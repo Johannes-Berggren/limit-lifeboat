@@ -230,7 +230,8 @@ struct MenuRootView: View {
                             Task { await state.switchCLI(to: profile) }
                         },
                         openDashboard: { state.openDashboard(for: profile) },
-                        beginCLILogin: { state.beginCLILogin(for: profile) },
+                        beginCLILogin: { state.beginCLILogin(for: profile, activateAfterLogin: true) },
+                        beginCLILoginWithoutSwitching: { state.beginCLILogin(for: profile, activateAfterLogin: false) },
                         captureCLI: { state.captureCLISnapshot(for: profile) },
                         rename: { state.renameProfile(profile.id, to: $0) },
                         remove: { state.removeProfile(profile.id) },
@@ -343,6 +344,9 @@ struct AccountRowView: View {
     let switchCLI: () -> Void
     let openDashboard: () -> Void
     let beginCLILogin: () -> Void
+    /// Re-authenticate this account without changing the active account. Only
+    /// meaningful for non-active rows; the plain `beginCLILogin` activates.
+    var beginCLILoginWithoutSwitching: () -> Void = {}
     let captureCLI: () -> Void
     let rename: (String) -> Void
     let remove: () -> Void
@@ -477,9 +481,14 @@ struct AccountRowView: View {
                 Divider()
             }
             Button("Open Dashboard…") { openDashboard() }
-            Button("Log In via Terminal") { beginCLILogin() }
             if profile.isActiveCLI {
+                Button("Log In via Terminal") { beginCLILogin() }
                 Button("Save CLI Snapshot Now") { captureCLI() }
+            } else {
+                Button("Log In via Terminal") { beginCLILoginWithoutSwitching() }
+                    .help("Re-authenticate this account in Terminal but keep the current account active.")
+                Button("Log In and Switch") { beginCLILogin() }
+                    .help("Log in and make this the active account.")
             }
             Divider()
             Button("Usage History…") { showsHistory = true }
