@@ -133,6 +133,10 @@ KEYCHAIN_PUBLIC_KEY="$("$GENERATE_KEYS" --account "$SPARKLE_ACCOUNT" -p)" \
   || fail "Could not read the Sparkle key from Keychain account '$SPARKLE_ACCOUNT'"
 [[ "$KEYCHAIN_PUBLIC_KEY" =~ ^[A-Za-z0-9+/]{43}=$ ]] \
   || fail "Keychain account '$SPARKLE_ACCOUNT' returned an invalid Sparkle public key"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/limit-lifeboat-publish.XXXXXX")"
+SPARKLE_PRIVATE_KEY_FILE="$WORK_DIR/sparkle-ed25519-private-key"
+"$GENERATE_KEYS" --account "$SPARKLE_ACCOUNT" -x "$SPARKLE_PRIVATE_KEY_FILE" >/dev/null \
+  || fail "Could not export the Sparkle private key from Keychain account '$SPARKLE_ACCOUNT'"
 
 echo "==> Revalidating release artifacts"
 (
@@ -149,7 +153,6 @@ grep -Fxq "TeamIdentifier=$TEAM_ID" <<< "$DMG_CODESIGN_DETAILS" \
 xcrun stapler validate "$DMG_PATH"
 spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG_PATH"
 
-WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/limit-lifeboat-publish.XXXXXX")"
 MOUNT_POINT="$WORK_DIR/mounted-dmg"
 mkdir -p "$MOUNT_POINT"
 hdiutil attach "$DMG_PATH" -readonly -nobrowse -mountpoint "$MOUNT_POINT" -quiet
@@ -194,7 +197,7 @@ hdiutil detach "$MOUNT_POINT" -quiet
 MOUNT_POINT=""
 
 xmllint --noout "$APPCAST_PATH"
-"$SIGN_UPDATE" --account "$SPARKLE_ACCOUNT" --verify "$APPCAST_PATH"
+"$SIGN_UPDATE" --ed-key-file "$SPARKLE_PRIVATE_KEY_FILE" --verify "$APPCAST_PATH"
 APPCAST_ITEM_COUNT="$(xmllint --xpath 'count(//*[local-name()="item"])' "$APPCAST_PATH")"
 APPCAST_ENCLOSURE_COUNT="$(xmllint --xpath 'count(//*[local-name()="enclosure"])' "$APPCAST_PATH")"
 APPCAST_DELTA_COUNT="$(xmllint --xpath 'count(//*[local-name()="deltaFrom"])' "$APPCAST_PATH")"
@@ -217,7 +220,7 @@ APPCAST_SIGNATURE="$(xmllint --xpath 'string(//*[local-name()="enclosure"]/@*[lo
 [[ "$APPCAST_URL" == "$PUBLIC_DOWNLOAD_ROOT/$DMG_BASENAME" ]] || fail "Appcast enclosure URL is incorrect"
 [[ "$APPCAST_LENGTH" == "$(stat -f '%z' "$DMG_PATH")" ]] || fail "Appcast enclosure length is incorrect"
 [[ -n "$APPCAST_SIGNATURE" ]] || fail "Appcast enclosure has no EdDSA signature"
-"$SIGN_UPDATE" --account "$SPARKLE_ACCOUNT" --verify "$DMG_PATH" "$APPCAST_SIGNATURE"
+"$SIGN_UPDATE" --ed-key-file "$SPARKLE_PRIVATE_KEY_FILE" --verify "$DMG_PATH" "$APPCAST_SIGNATURE"
 
 echo "==> Checking GitHub destination"
 gh auth status --hostname github.com >/dev/null
