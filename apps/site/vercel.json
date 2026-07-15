@@ -13,6 +13,28 @@
       ],
       "destination": "https://limitlifeboat.com/:path*",
       "permanent": true
+    },
+    {
+      "source": "/:path*",
+      "has": [
+        {
+          "type": "host",
+          "value": "limitlifeboat.app"
+        }
+      ],
+      "destination": "https://limitlifeboat.com/:path*",
+      "permanent": true
+    },
+    {
+      "source": "/:path*",
+      "has": [
+        {
+          "type": "host",
+          "value": "www.limitlifeboat.app"
+        }
+      ],
+      "destination": "https://limitlifeboat.com/:path*",
+      "permanent": true
     }
   ],
   "headers": [
