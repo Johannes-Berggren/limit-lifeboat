@@ -1,0 +1,77 @@
+---
+import GuideLayout from "../../layouts/GuideLayout.astro";
+
+const title = "How to Switch Between Claude Code Accounts on Mac";
+const description =
+  "Switch work and personal Claude Code accounts on Mac while keeping settings, MCP servers, instructions, and local history in place.";
+const faqs = [
+  {
+    question: "Does switching Claude Code accounts merge their usage limits?",
+    answer:
+      "No. Every account remains separate and Anthropic continues to enforce its own limit for that account. An account switch only changes which authorized identity the CLI uses.",
+  },
+  {
+    question: "Does the Claude browser or desktop app switch too?",
+    answer:
+      "No. Claude Code CLI authentication is separate from browser and Claude Desktop sessions. Check each surface independently before working with sensitive company or client material.",
+  },
+  {
+    question: "Can two Claude Code accounts run simultaneously through Limit Lifeboat?",
+    answer:
+      "No. Limit Lifeboat switches the global Claude Code CLI login one account at a time. It does not launch isolated simultaneous profiles. Optional switching from a depleted account is disabled by default and must be explicitly enabled.",
+  },
+] as const;
+---
+
+<GuideLayout
+  title={title}
+  description={description}
+  eyebrow="Claude Code account guide"
+  introduction="Claude Code can authenticate another account through its built-in login flow. The difficult part is keeping the active identity obvious and changing only authentication—not the settings and local history shared by your CLI."
+  path="/guides/switch-claude-code-accounts-mac"
+  imageAlt="Limit Lifeboat showing separate Personal, Work, and Client Claude Code accounts with usage meters and an active-account indicator."
+  readingTime="6 minute read"
+  faqs={faqs}
+>
+  <Fragment slot="nav">
+    <a href="#official-method">Official method</a>
+    <a href="#friction">Multi-account friction</a>
+    <a href="#safe-switch">A safer saved switch</a>
+    <a href="#boundaries">Account boundaries</a>
+    <a href="#questions">Questions</a>
+  </Fragment>
+
+  <section id="official-method">
+    <h2>Start with Claude Code’s official login flow</h2>
+    <p>Inside Claude Code, use <code>/login</code> to authenticate or switch accounts. Complete the provider’s browser flow, then use <code>/status</code> to confirm the account and <code>/usage</code> to inspect its current limits.</p>
+    <pre><code>/login
+/status
+/usage</code></pre>
+    <p>This is the source-of-truth path and the right fallback whenever a saved login has expired. Anthropic documents <code>/login</code>, <code>/status</code>, and <code>/usage</code> in the <a href="https://support.claude.com/en/articles/14553413-claude-code-cheatsheet">Claude Code command reference</a>.</p>
+  </section>
+
+  <section id="friction">
+    <h2>Why multiple Claude Code accounts become awkward</h2>
+    <p>The official flow handles one login, but it is not a profile manager. Moving repeatedly between a personal subscription and an employer-managed account can create three practical problems:</p>
+    <ul>
+      <li><strong>Identity uncertainty:</strong> a terminal may still be using a different account than the browser window beside it.</li>
+      <li><strong>Repeated authentication:</strong> switching manually means revisiting the browser flow and selecting the intended organization again.</li>
+      <li><strong>Over-broad profile workarounds:</strong> copying or replacing an entire Claude configuration directory can fragment history or duplicate settings, plugins, instructions, and MCP configuration.</li>
+    </ul>
+    <p>Before working with company or client code, verify the active identity rather than inferring it from the last browser account you used.</p>
+  </section>
+
+  <section id="safe-switch">
+    <h2>Save authentication, not the whole configuration</h2>
+    <p>Limit Lifeboat registers the account that is currently authenticated by Claude Code and stores an app-managed credential snapshot in macOS Keychain. Once work and personal accounts are registered, the menu-bar view shows their identities, current or last-known usage, and which account is active.</p>
+    <p>When you request a switch, the app captures the current login, prepares restricted rollback material, restores only the selected provider’s authentication fields, and verifies the resulting identity. Unrelated CLI and MCP settings remain in place. If verification fails, the app restores the previous state; if another process changes a credential during recovery, that external change wins and protected recovery material is retained.</p>
+    <p>Manual switching is the default. An optional setting can switch away from a depleted account, but it is off until you explicitly enable it and uses the same identity verification safeguards. To set up either path, install Limit Lifeboat, authenticate each account once with Claude Code’s official flow, and refresh the app after each login.</p>
+  </section>
+
+  <section id="boundaries">
+    <h2>Keep work, personal, and provider policy boundaries intact</h2>
+    <p>Use only accounts you are authorized to access. A work or enterprise account may be governed by organization retention, access, and acceptable-use policies that do not apply to a personal account. Switching the CLI does not move conversations, combine billing, transfer files, or merge provider-enforced usage limits.</p>
+    <p>Limit Lifeboat is not affiliated with Anthropic and does not make a blanket claim that every multi-subscription pattern is permitted. Follow the terms for each account and use Anthropic’s documented extra-usage or plan options when you need more capacity.</p>
+    <p>For the other supported provider, read <a href="/guides/manage-multiple-codex-accounts-mac">how to manage multiple Codex CLI accounts</a>. If the main problem is limit visibility, see the <a href="/guides/claude-code-codex-usage-monitor-mac">Claude Code and Codex usage-monitor guide</a>.</p>
+  </section>
+</GuideLayout>

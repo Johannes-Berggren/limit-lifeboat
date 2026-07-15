@@ -8,6 +8,16 @@ import BaseLayout from "../layouts/BaseLayout.astro";
 
 const faqs = [
   {
+    question: "Does Limit Lifeboat combine accounts or bypass usage limits?",
+    answer:
+      "No. Each account and its provider-enforced limits remain separate. Switching changes only the selected CLI login. Manual switching is the default; optional switching from a depleted account is off until you explicitly enable it.",
+  },
+  {
+    question: "Can I keep work and personal accounts separate?",
+    answer:
+      "Yes. Each saved account has its own identity, usage reading, and Keychain-protected credential snapshot. Use only accounts you are authorized to access and follow the provider and workplace policies that apply to them.",
+  },
+  {
     question: "Which accounts does Limit Lifeboat support?",
     answer:
       "It supports Claude subscription accounts used by Claude Code and ChatGPT subscription accounts used by the Codex CLI. You can use either provider or both.",
@@ -74,7 +84,11 @@ const structuredData = {
 };
 ---
 
-<BaseLayout structuredData={structuredData}>
+<BaseLayout
+  title="Claude Code & Codex Account Switcher for Mac"
+  description={product.shortDescription}
+  structuredData={structuredData}
+>
   <section class="hero">
     <div class="hero-orb hero-orb--one" aria-hidden="true"></div>
     <div class="hero-orb hero-orb--two" aria-hidden="true"></div>
@@ -84,10 +98,10 @@ const structuredData = {
           <span class="status-dot"></span>
           Native macOS menu-bar app
         </p>
-        <h1>Keep every AI coding account <span>afloat.</span></h1>
+        <h1>See every Claude Code and Codex account. <span>Switch safely.</span></h1>
         <p class="hero-lead">
-          See Claude and ChatGPT/Codex usage at a glance. Get warned before a limit catches you,
-          then switch the right CLI account without losing the rest of your setup.
+          Monitor usage across work and personal accounts, get warned before limits, and switch
+          CLI logins without replacing your settings.
         </p>
         <div class="hero-actions">
           <a class="button button--primary button--large" href={product.links.download}>
@@ -97,7 +111,7 @@ const structuredData = {
             Download for Mac
           </a>
           <a class="button button--secondary button--large" href={product.links.repository}>
-            View on GitHub
+            Inspect the source on GitHub
             <svg aria-hidden="true" viewBox="0 0 18 18" width="18" height="18">
               <path d="M5 13 13 5m0 0H6m7 0v7" />
             </svg>
@@ -144,19 +158,23 @@ const structuredData = {
       </div>
     </div>
     <div class="container proof-strip" aria-label="Product highlights">
-      <div><strong>2 providers</strong><span>Claude + ChatGPT/Codex</span></div>
+      <div><strong>Work + personal</strong><span>Every authorized account</span></div>
       <div><strong>One menu bar</strong><span>No dashboard juggling</span></div>
-      <div><strong>Zero telemetry</strong><span>No product analytics</span></div>
-      <div><strong>MIT licensed</strong><span>Open source on GitHub</span></div>
+      <div><strong>Verified switches</strong><span>Rollback when needed</span></div>
+      <div><strong>Zero telemetry</strong><span>Open source on GitHub</span></div>
     </div>
+    <p class="container account-boundary">
+      Accounts stay separate. Switching affects only the selected CLI and never merges quotas or
+      changes browser and desktop-app sessions. Optional automatic switching is off by default.
+    </p>
   </section>
 
   <section class="section" id="features">
     <div class="container">
       <SectionHeading
-        eyebrow="A calmer command center"
-        title="Know what is available before you need it."
-        copy="Limit Lifeboat turns scattered limits and logins into one quiet, dependable view—without becoming another dashboard you have to manage."
+        eyebrow="Built for more than one login"
+        title="The right account, without the login dance."
+        copy="Keep work and personal Claude Code and Codex accounts visible, understand what is available, and switch deliberately without rebuilding your CLI setup."
         align="center"
       />
       <div class="feature-grid">
@@ -165,9 +183,9 @@ const structuredData = {
             <span class="feature-icon feature-icon--violet">
               <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 18h16M6 15V9m6 6V5m6 10v-3" /></svg>
             </span>
-            <p class="card-kicker">Every account, one view</p>
-            <h3>Usage you can understand at a glance.</h3>
-            <p>See session and weekly limits, the active CLI identity, and the age of each reading without opening provider dashboards.</p>
+            <p class="card-kicker">Work + personal, one view</p>
+            <h3>Know which account is active before work begins.</h3>
+            <p>See every saved identity, its session and weekly limits, the active CLI account, and the age of each reading without opening provider dashboards.</p>
           </div>
           <div class="meter-demo" aria-hidden="true">
             <div class="demo-account"><span class="provider-glyph provider-glyph--claude">✦</span><strong>Claude</strong><span>3 accounts</span></div>
@@ -187,6 +205,20 @@ const structuredData = {
         </article>
 
         <article class="feature-card">
+          <span class="feature-icon feature-icon--cyan">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 7h11m0 0-3-3m3 3-3 3M16 17H5m0 0 3 3m-3-3 3-3" /></svg>
+          </span>
+          <p class="card-kicker">Safe CLI switching</p>
+          <h3>Change the login, not your configuration.</h3>
+          <p>Restore only the selected provider’s authentication fields, verify the identity, and roll back if the switch cannot be completed safely.</p>
+          <div class="switch-demo" aria-hidden="true">
+            <span><i class="avatar avatar--violet">P</i>Personal</span>
+            <svg viewBox="0 0 32 20"><path d="M3 7h23m0 0-5-5m5 5-5 5M29 13H6m0 0 5 5m-5-5 5-5" /></svg>
+            <span><i class="avatar avatar--blue">W</i>Work</span>
+          </div>
+        </article>
+
+        <article class="feature-card">
           <span class="feature-icon feature-icon--amber">
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 4a6 6 0 0 0-6 6c0 7-3 7-3 7h18s-3 0-3-7a6 6 0 0 0-6-6Zm-2 16h4" /></svg>
           </span>
@@ -195,21 +227,7 @@ const structuredData = {
           <p>Get a notification when an account is nearly depleted—or likely ready to use again. You choose which alerts are enabled.</p>
           <div class="notice-demo" aria-hidden="true">
             <BrandMark size={38} />
-            <span><strong>Claude Work is at 89%</strong>Consider switching before your next task.</span>
-          </div>
-        </article>
-
-        <article class="feature-card">
-          <span class="feature-icon feature-icon--cyan">
-            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 7h11m0 0-3-3m3 3-3 3M16 17H5m0 0 3 3m-3-3 3-3" /></svg>
-          </span>
-          <p class="card-kicker">Safe CLI switching</p>
-          <h3>Change accounts, not your configuration.</h3>
-          <p>Switch Claude Code or Codex deliberately. Unrelated settings stay intact, the restored identity is verified, and failed changes roll back.</p>
-          <div class="switch-demo" aria-hidden="true">
-            <span><i class="avatar avatar--violet">P</i>Personal</span>
-            <svg viewBox="0 0 32 20"><path d="M3 7h23m0 0-5-5m5 5-5 5M29 13H6m0 0 5 5m-5-5 5-5" /></svg>
-            <span><i class="avatar avatar--blue">W</i>Work</span>
+            <span><strong>Claude Work is at 89%</strong>Review your accounts before the next task.</span>
           </div>
         </article>
 
@@ -283,15 +301,46 @@ const structuredData = {
       </div>
       <div class="security-copy">
         <p class="eyebrow">Local-first by design</p>
-        <h2>Your credentials are cargo, not currency.</h2>
-        <p class="section-copy">Limit Lifeboat is built to handle sensitive CLI authentication material with a small footprint and clear boundaries.</p>
+        <h2>A narrow switch surface, with a way back.</h2>
+        <p class="section-copy">Limit Lifeboat handles sensitive CLI authentication material with explicit boundaries, identity checks, and protected recovery.</p>
         <ul class="check-list">
-          <li><span>✓</span><div><strong>Credentials protected by macOS Keychain</strong><p>App-managed snapshots are encrypted by the system credential store.</p></div></li>
-          <li><span>✓</span><div><strong>No analytics, ads, or product telemetry</strong><p>Your activity is not measured, profiled, or sold.</p></div></li>
-          <li><span>✓</span><div><strong>Network access only where features need it</strong><p>Provider usage and identity services, GitHub update checks, and dashboards you explicitly open.</p></div></li>
-          <li><span>✓</span><div><strong>Open source and inspectable</strong><p>The app is MIT licensed, with its implementation and release process on GitHub.</p></div></li>
+          <li><span>✓</span><div><strong>Only provider authentication fields change</strong><p>Unrelated CLI settings, MCP servers, instructions, and local history stay in place.</p></div></li>
+          <li><span>✓</span><div><strong>The restored identity is verified</strong><p>A switch completes only after the selected account is confirmed; failed changes roll back safely.</p></div></li>
+          <li><span>✓</span><div><strong>Snapshots are protected by macOS Keychain</strong><p>Temporary rollback material is restricted and removed after a verified switch or recovery.</p></div></li>
+          <li><span>✓</span><div><strong>No App Sandbox, for a specific reason</strong><p>Switching must update provider-owned CLI files. The release entitlement is limited to optional Terminal automation.</p></div></li>
         </ul>
         <a class="text-link" href="/privacy">Read the privacy details <span aria-hidden="true">→</span></a>
+      </div>
+    </div>
+  </section>
+
+  <section class="section resources-section" id="resources">
+    <div class="container">
+      <SectionHeading
+        eyebrow="Practical guides"
+        title="Understand the workflow before changing it."
+        copy="Start with the official CLI path, learn what changes during an account switch, and choose the setup that fits your work and personal accounts."
+        align="center"
+      />
+      <div class="resource-grid">
+        <a class="resource-card" href="/guides/switch-claude-code-accounts-mac">
+          <span>Claude Code</span>
+          <h3>How to switch between Claude Code accounts on Mac</h3>
+          <p>Compare the built-in login flow with a saved, verified account switch.</p>
+          <strong>Read the guide <i aria-hidden="true">→</i></strong>
+        </a>
+        <a class="resource-card" href="/guides/manage-multiple-codex-accounts-mac">
+          <span>Codex CLI</span>
+          <h3>How to use multiple Codex CLI accounts on Mac</h3>
+          <p>Keep CLI identity changes separate from ChatGPT browser and desktop sessions.</p>
+          <strong>Read the guide <i aria-hidden="true">→</i></strong>
+        </a>
+        <a class="resource-card" href="/guides/claude-code-codex-usage-monitor-mac">
+          <span>Usage</span>
+          <h3>How to monitor Claude Code and Codex usage on Mac</h3>
+          <p>See current windows, resets, reading age, and pace without dashboard juggling.</p>
+          <strong>Read the guide <i aria-hidden="true">→</i></strong>
+        </a>
       </div>
     </div>
   </section>
@@ -355,7 +404,7 @@ const structuredData = {
   <section class="closing-cta">
     <div class="container closing-cta-inner">
       <BrandMark size={64} />
-      <div><h2>One menu bar. Every account.</h2><p>Make the next limit a decision, not a surprise.</p></div>
+      <div><h2>Every account visible. Every switch deliberate.</h2><p>Keep work and personal CLI identities clear without rebuilding your setup.</p></div>
       <a class="button button--primary button--large" href={product.links.download}>Download for Mac</a>
     </div>
   </section>
