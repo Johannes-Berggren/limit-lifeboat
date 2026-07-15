@@ -1,10 +1,13 @@
+const version = "1.0.0";
+const dmgAsset = `Limit-Lifeboat-${version}-arm64.dmg`;
+
 export const product = {
   name: "Limit Lifeboat",
   headline: "Keep every AI coding account afloat.",
   shortDescription:
     "A native macOS menu-bar app for seeing Claude and ChatGPT/Codex usage, getting timely warnings, and safely switching CLI accounts.",
   siteUrl: "https://limitlifeboat.com",
-  version: "1.0.0",
+  version,
   minimumMacOS: "macOS 14 Sonoma",
   architecture: "Apple Silicon",
   bundleIdentifier: "com.limitlifeboat.app",
@@ -12,6 +15,8 @@ export const product = {
     "brew install --cask Johannes-Berggren/tap/limit-lifeboat",
   links: {
     repository: "https://github.com/Johannes-Berggren/limit-lifeboat",
+    download:
+      `https://github.com/Johannes-Berggren/limit-lifeboat/releases/download/v${version}/${dmgAsset}`,
     latestRelease:
       "https://github.com/Johannes-Berggren/limit-lifeboat/releases/latest",
     releases:
