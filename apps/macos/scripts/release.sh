@@ -229,6 +229,9 @@ KEYCHAIN_PUBLIC_KEY="$("$GENERATE_KEYS" --account "$SPARKLE_ACCOUNT" -p)" \
   || fail "Could not read the Sparkle EdDSA key from Keychain account '$SPARKLE_ACCOUNT'"
 [[ "$KEYCHAIN_PUBLIC_KEY" =~ ^[A-Za-z0-9+/]{43}=$ ]] \
   || fail "Keychain account '$SPARKLE_ACCOUNT' returned an invalid Sparkle public key"
+SPARKLE_PRIVATE_KEY_FILE="$WORK_DIR/sparkle-ed25519-private-key"
+"$GENERATE_KEYS" --account "$SPARKLE_ACCOUNT" -x "$SPARKLE_PRIVATE_KEY_FILE" >/dev/null \
+  || fail "Could not export the Sparkle private key from Keychain account '$SPARKLE_ACCOUNT'"
 
 echo "==> Building app"
 SKIP_ADHOC_SIGN=1 ARCHITECTURE="$ARCHITECTURE" VERSION="$RELEASE_VERSION" BUILD_NUMBER="$BUILD_NUMBER" \
@@ -407,7 +410,7 @@ APPCAST_SOURCE="$WORK_DIR/appcast-source"
 mkdir -p "$APPCAST_SOURCE"
 ditto "$DMG_PATH" "$APPCAST_SOURCE/$DMG_BASENAME"
 "$GENERATE_APPCAST" \
-  --account "$SPARKLE_ACCOUNT" \
+  --ed-key-file "$SPARKLE_PRIVATE_KEY_FILE" \
   --download-url-prefix "$PUBLIC_DOWNLOAD_ROOT/" \
   --full-release-notes-url "$RELEASE_NOTES_URL" \
   --link "https://limitlifeboat.com" \
@@ -417,7 +420,7 @@ ditto "$DMG_PATH" "$APPCAST_SOURCE/$DMG_BASENAME"
   "$APPCAST_SOURCE"
 
 xmllint --noout "$APPCAST_PATH"
-"$SIGN_UPDATE" --account "$SPARKLE_ACCOUNT" --verify "$APPCAST_PATH"
+"$SIGN_UPDATE" --ed-key-file "$SPARKLE_PRIVATE_KEY_FILE" --verify "$APPCAST_PATH"
 
 APPCAST_ITEM_COUNT="$(xmllint --xpath 'count(//*[local-name()="item"])' "$APPCAST_PATH")"
 APPCAST_ENCLOSURE_COUNT="$(xmllint --xpath 'count(//*[local-name()="enclosure"])' "$APPCAST_PATH")"
@@ -450,7 +453,7 @@ APPCAST_ENCLOSURE_SIGNATURE="$(xmllint --xpath 'string(//*[local-name()="enclosu
   || fail "Appcast enclosure length does not match the DMG"
 [[ -n "$APPCAST_ENCLOSURE_SIGNATURE" ]] \
   || fail "Appcast enclosure has no EdDSA signature"
-"$SIGN_UPDATE" --account "$SPARKLE_ACCOUNT" --verify \
+"$SIGN_UPDATE" --ed-key-file "$SPARKLE_PRIVATE_KEY_FILE" --verify \
   "$DMG_PATH" "$APPCAST_ENCLOSURE_SIGNATURE"
 
 echo "Release ready:"
