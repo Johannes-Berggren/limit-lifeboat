@@ -254,6 +254,52 @@ final class AccountRowPresentationTests: XCTestCase {
         XCTAssertTrue(presentation.footerNote?.text.contains("terminal") == true)
     }
 
+    func testSavedInactiveCodexAccountPromisesNextRefreshWithoutRequiringSwitch() {
+        let profile = AccountProfile(provider: .codex, label: "Saved")
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: nil,
+            hasStoredSnapshot: true,
+            refreshState: .idle,
+            adviceReason: nil
+        )
+
+        XCTAssertEqual(
+            presentation.footerNote?.text,
+            "Credentials saved — usage appears on the next refresh"
+        )
+    }
+
+    func testElapsedInactiveCodexReadingOffersLiveRefresh() {
+        let now = Date()
+        let profile = AccountProfile(provider: .codex, label: "Saved")
+        let window = UsageSnapshotFactory.window(
+            descriptor: UsageWindowDescriptor(id: "codex-10080", kind: .weekly, label: "Weekly"),
+            usedPercent: 80,
+            resetDate: now.addingTimeInterval(-60)
+        )
+        let snapshot = UsageSnapshotFactory.snapshot(
+            accountID: profile.id,
+            provider: .codex,
+            windows: [window],
+            source: "test",
+            lastRefreshed: now.addingTimeInterval(-3600),
+            message: "test"
+        )
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: snapshot,
+            hasStoredSnapshot: true,
+            refreshState: .ok,
+            adviceReason: nil,
+            now: now
+        )
+
+        XCTAssertEqual(presentation.footerNote?.text, "Reset window passed — refresh to confirm")
+        XCTAssertTrue(presentation.footerNote?.help.contains("Refresh usage") == true)
+        XCTAssertFalse(presentation.footerNote?.help.contains("run codex") == true)
+    }
+
     func testExpiredLoginShowsDirectLoginActionAndDoesNotHighlightSwitch() {
         let profile = AccountProfile(
             provider: .codex,

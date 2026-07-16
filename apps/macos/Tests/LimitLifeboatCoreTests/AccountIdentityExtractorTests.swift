@@ -63,8 +63,12 @@ final class AccountIdentityExtractorTests: XCTestCase {
         XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "free"), "Free")
         XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "plus"), "Plus")
         XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "pro"), "Pro")
+        XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "prolite"), "Pro Lite")
         XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "team"), "Team")
+        XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "self_serve_business_usage_based"), "Business")
+        XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "enterprise_cbp_usage_based"), "Enterprise")
         XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "enterprise"), "Enterprise")
+        XCTAssertNil(CodexIdentityReader.planLabel(forPlanType: "unknown"))
         // Unknown values pass through title-cased rather than being dropped.
         XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "founders"), "Founders")
         XCTAssertNil(CodexIdentityReader.planLabel(forPlanType: nil))

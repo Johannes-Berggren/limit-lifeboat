@@ -195,18 +195,24 @@ public struct CodexIdentityReader {
         switch raw.lowercased() {
         case "free":
             return "Free"
+        case "go":
+            return "Go"
         case "plus":
             return "Plus"
         case "pro":
             return "Pro"
+        case "prolite":
+            return "Pro Lite"
         case "team":
             return "Team"
-        case "business":
+        case "business", "self_serve_business_usage_based":
             return "Business"
-        case "enterprise":
+        case "enterprise", "enterprise_cbp_usage_based":
             return "Enterprise"
         case "edu":
             return "Edu"
+        case "unknown":
+            return nil
         default:
             return raw.capitalized
         }

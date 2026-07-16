@@ -13,12 +13,12 @@ const faqs = [
   {
     question: "Why can an inactive account show an older reading?",
     answer:
-      "Providers and local CLI data do not always expose every inactive account continuously. Limit Lifeboat keeps the last successful reading and shows its age rather than presenting stale data as live.",
+      "A saved login can expire, Keychain may deny background access, or a provider request can fail. Limit Lifeboat keeps the last successful reading and shows its age rather than presenting stale data as live.",
   },
   {
     question: "Does checking usage consume a meaningful part of the limit?",
     answer:
-      "Ordinary Codex readings come from recent local session data. Claude uses provider usage services with a local Claude Code usage fallback. The app does not submit coding prompts to measure usage.",
+      "No coding prompt or model turn is submitted. Codex readings use the locally installed Codex app server's rate-limit request, while Claude uses provider usage services with a local Claude Code usage fallback.",
   },
 ] as const;
 ---
@@ -74,7 +74,7 @@ const faqs = [
 
   <section id="privacy">
     <h2>Know where usage and credentials come from</h2>
-    <p>Claude usage is fetched with the saved account’s OAuth credentials, with Claude Code’s local usage view as a fallback. Codex usage is read from recent local Codex session data. Inactive accounts keep their last successful reading and display its age.</p>
+    <p>Claude usage is fetched with the saved account’s OAuth credentials, with Claude Code’s local usage view as a fallback. Codex usage is fetched for each saved account through the locally installed Codex app server, using an isolated temporary credential copy; recent local session data remains an active-account fallback. Failed accounts keep their last successful reading and display its age.</p>
     <p>Profiles and history stay under your user Library. App-managed credential snapshots are encrypted by macOS Keychain. Limit Lifeboat has no product analytics, advertising, or telemetry, and the website has no analytics scripts or cookies set by the project.</p>
     <p>Review the exact storage locations, network destinations, permissions, and recovery behavior in the <a href="/privacy">privacy documentation</a>. The source and release process are also public on GitHub.</p>
   </section>

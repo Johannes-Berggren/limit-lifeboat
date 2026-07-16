@@ -43,11 +43,11 @@ const description = `How ${product.name} handles credentials, usage data, networ
         <p>Network access is limited to services needed for the selected feature:</p>
         <ul>
           <li><strong>Anthropic</strong> for Claude account identity, token refresh, and usage.</li>
-          <li><strong>OpenAI</strong> when an isolated Codex verification needs to refresh or validate the selected account’s authentication.</li>
+          <li><strong>OpenAI</strong> through the locally installed Codex app server for isolated account verification, token refresh, and current usage readings.</li>
           <li><strong>GitHub</strong> for the signed daily update feed, update downloads, and release links. Automatic checks can be disabled in Settings; installing always requires confirmation.</li>
           <li><strong>Claude or ChatGPT web dashboards</strong> only when you explicitly open an embedded dashboard.</li>
         </ul>
-        <p>Codex usage readings come from local Codex session data. An embedded dashboard uses an isolated web data store inside the app and remains separate from your normal browser session.</p>
+        <p>Codex usage checks run in a private temporary Codex home populated from the selected account’s encrypted snapshot; the temporary files are removed after the request. Recent local Codex session data remains a fallback for the active account. An embedded dashboard uses an isolated web data store inside the app and remains separate from your normal browser session.</p>
       </section>
 
       <section id="website">
