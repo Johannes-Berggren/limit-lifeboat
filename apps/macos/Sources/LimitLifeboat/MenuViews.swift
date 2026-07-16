@@ -374,10 +374,9 @@ struct AccountRowView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: DS.Spacing.md) {
             header
-            featuredGauge
-            atAGlanceGauges
+            gauges
 
-            if isExpanded {
+            if isExpanded && hasExpandableDetails {
                 expandedDetails
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
@@ -393,8 +392,17 @@ struct AccountRowView: View {
         .onHover { isHovered = $0 }
         .animation(reduceMotion ? nil : DS.Motion.standard, value: isExpanded)
         .animation(reduceMotion ? nil : DS.Motion.quick, value: isHovered)
-        .accessibilityAction(named: isExpanded ? "Collapse usage details" : "Expand usage details") {
-            isExpanded.toggle()
+        .accessibilityActions {
+            if hasExpandableDetails {
+                Button(isExpanded ? "Collapse usage details" : "Expand usage details") {
+                    isExpanded.toggle()
+                }
+            }
+        }
+        .onChange(of: hasExpandableDetails) { _, hasDetails in
+            if !hasDetails {
+                isExpanded = false
+            }
         }
         .alert("Rename \(profile.label)", isPresented: $showsRenameAlert) {
             TextField("Account name", text: $renameText)
@@ -458,8 +466,8 @@ struct AccountRowView: View {
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .help(isExpanded ? "Hide usage details" : "Show all usage limits")
-                    .accessibilityLabel(isExpanded ? "Hide usage details" : "Show all usage limits")
+                    .help(isExpanded ? "Hide usage details" : "Show usage details")
+                    .accessibilityLabel(isExpanded ? "Hide usage details" : "Show usage details")
                 }
             }
 
@@ -517,14 +525,19 @@ struct AccountRowView: View {
     }
 
     @ViewBuilder
-    private var featuredGauge: some View {
-        let groups = presentation.gauges
-        if let featured = groups.featured {
-            UsageGauge(
-                window: featured,
-                estimate: estimates[featured.id],
-                isFeatured: true
-            )
+    private var gauges: some View {
+        let windows = presentation.gauges.visible
+        if !windows.isEmpty {
+            LazyVGrid(
+                columns: gaugeColumns(count: windows.count),
+                alignment: .leading,
+                spacing: 0
+            ) {
+                ForEach(windows) { window in
+                    UsageGauge(window: window, estimate: estimates[window.id])
+                }
+            }
+            .transition(.opacity.combined(with: .move(edge: .top)))
         } else {
             Label("Usage unavailable", systemImage: "gauge.with.dots.needle.33percent")
                 .font(.caption)
@@ -532,22 +545,8 @@ struct AccountRowView: View {
         }
     }
 
-    @ViewBuilder
-    private var atAGlanceGauges: some View {
-        let windows = presentation.gauges.atAGlanceAdditional
-        if !windows.isEmpty {
-            LazyVGrid(columns: compactGaugeColumns, alignment: .leading, spacing: DS.Spacing.md) {
-                ForEach(windows) { window in
-                    UsageGauge(window: window, estimate: estimates[window.id])
-                }
-            }
-            .transition(.opacity.combined(with: .move(edge: .top)))
-        }
-    }
-
     private var hasExpandableDetails: Bool {
-        !presentation.gauges.disclosedAdditional.isEmpty
-            || presentation.gauges.showsPreResetNote
+        presentation.gauges.showsPreResetNote
             || presentation.gauges.needsSessionCaptureNote
     }
 
@@ -556,18 +555,6 @@ struct AccountRowView: View {
         let groups = presentation.gauges
 
         VStack(alignment: .leading, spacing: DS.Spacing.md) {
-            if !groups.disclosedAdditional.isEmpty {
-                Rectangle()
-                    .fill(Color.primary.opacity(0.07))
-                    .frame(height: 1)
-
-                LazyVGrid(columns: gaugeColumns, alignment: .leading, spacing: DS.Spacing.md) {
-                    ForEach(groups.disclosedAdditional) { window in
-                        UsageGauge(window: window, estimate: estimates[window.id])
-                    }
-                }
-            }
-
             if groups.showsPreResetNote, let last = snapshot?.lastRefreshed {
                 Label(
                     "Last reading before reset — checked \(last.formatted(.relative(presentation: .named)))",
@@ -586,12 +573,15 @@ struct AccountRowView: View {
         }
     }
 
-    private var gaugeColumns: [GridItem] {
-        [GridItem(.adaptive(minimum: 220), spacing: DS.Spacing.lg, alignment: .top)]
-    }
-
-    private var compactGaugeColumns: [GridItem] {
-        [GridItem(.adaptive(minimum: 180), spacing: DS.Spacing.lg, alignment: .top)]
+    private func gaugeColumns(count: Int) -> [GridItem] {
+        Array(
+            repeating: GridItem(
+                .flexible(minimum: 0),
+                spacing: DS.Spacing.md,
+                alignment: .top
+            ),
+            count: count
+        )
     }
 
     // MARK: Actionable status strip (omitted for ordinary accounts)
@@ -775,20 +765,20 @@ struct BillingStatusView: View {
     }
 }
 
-/// A compact quota gauge used for both the featured limit and disclosed detail.
+/// A compact quota gauge sized to share one row with every limit on the account.
 struct UsageGauge: View {
     let window: UsageWindow
     var estimate: BurnRateEstimate? = nil
-    var isFeatured = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 60)) { context in
-            VStack(alignment: .leading, spacing: isFeatured ? 5 : 4) {
+            VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: DS.Spacing.xs) {
                     Text(window.label)
-                        .font(isFeatured ? .caption.weight(.medium) : .caption2.weight(.medium))
+                        .font(.caption2.weight(.medium))
                         .lineLimit(1)
+                        .truncationMode(.tail)
                         .help(window.label)
 
                     Spacer(minLength: 0)
@@ -802,12 +792,13 @@ struct UsageGauge: View {
                     Text(usageValue)
                         .font(
                             .system(
-                                size: isFeatured ? 12 : 11,
+                                size: 11,
                                 weight: .semibold,
                                 design: .rounded
                             )
                         )
                         .monospacedDigit()
+                        .fixedSize(horizontal: true, vertical: false)
                         .contentTransition(.numericText())
                         .animation(reduceMotion ? nil : DS.Motion.quick, value: usageValue)
                 }
@@ -822,7 +813,7 @@ struct UsageGauge: View {
                     }
                     .animation(reduceMotion ? nil : DS.Motion.progress, value: window.usedFraction)
                 }
-                .frame(height: isFeatured ? 7 : 5)
+                .frame(height: 5)
 
                 if let resetText = UsageResetTiming.compactText(
                     resetDate: window.resetDate,
@@ -1021,7 +1012,7 @@ struct AccountCardPreviewGallery: View {
             snapshot: snapshot,
             hasStoredSnapshot: hasStoredSnapshot,
             estimates: estimates,
-            isExpanded: .constant(id == 6),
+            isExpanded: .constant(false),
             historyRecords: { [] },
             switchCLI: {},
             openDashboard: {},
