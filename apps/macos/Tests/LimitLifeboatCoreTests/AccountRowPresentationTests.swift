@@ -65,19 +65,27 @@ final class AccountRowPresentationTests: XCTestCase {
         XCTAssertNotNil(presentation.footerNote)
     }
 
-    func testEveryScopedWindowRemainsAvailableForDisclosure() {
+    func testEveryWindowRemainsVisibleInStableDisplayOrder() {
         let profile = AccountProfile(provider: .claude, label: "Claude", isActiveCLI: true)
         let windows = [
+            UsageSnapshotFactory.window(
+                descriptor: UsageWindowDescriptor(id: "other", kind: .other, label: "Other"),
+                usedPercent: 5
+            ),
+            UsageSnapshotFactory.window(
+                descriptor: UsageWindowDescriptor(id: "weekly-zeta", kind: .weeklyScoped, label: "Weekly Zeta"),
+                usedPercent: 90
+            ),
             UsageSnapshotFactory.window(
                 descriptor: UsageWindowDescriptor(id: "session", kind: .session, label: "Session"),
                 usedPercent: 20
             ),
             UsageSnapshotFactory.window(
-                descriptor: UsageWindowDescriptor(id: "weekly-risk", kind: .weeklyScoped, label: "Weekly Risk"),
-                usedPercent: 90
+                descriptor: UsageWindowDescriptor(id: "weekly-all", kind: .weekly, label: "Weekly"),
+                usedPercent: 80
             ),
             UsageSnapshotFactory.window(
-                descriptor: UsageWindowDescriptor(id: "weekly-ok", kind: .weeklyScoped, label: "Weekly OK"),
+                descriptor: UsageWindowDescriptor(id: "weekly-alpha", kind: .weeklyScoped, label: "Weekly Alpha"),
                 usedPercent: 10
             )
         ]
@@ -98,15 +106,13 @@ final class AccountRowPresentationTests: XCTestCase {
             adviceReason: nil
         )
 
-        XCTAssertEqual(presentation.gauges.visible.map(\.id), ["session", "weekly-ok", "weekly-risk"])
-        XCTAssertEqual(presentation.gauges.featured?.id, "weekly-risk")
-        XCTAssertEqual(presentation.gauges.additional.map(\.id), ["session", "weekly-ok"])
-        XCTAssertEqual(presentation.gauges.atAGlanceAdditional.map(\.id), ["session", "weekly-ok"])
-        XCTAssertTrue(presentation.gauges.disclosedAdditional.isEmpty)
+        XCTAssertEqual(
+            presentation.gauges.visible.map(\.id),
+            ["session", "weekly-all", "weekly-alpha", "weekly-zeta", "other"]
+        )
     }
 
-    func testPrimaryWeeklyBecomesFeaturedWithoutHidingSessionOrScopedLimit() {
-        let profile = AccountProfile(provider: .claude, label: "Claude", isActiveCLI: true)
+    func testActiveAndInactiveProfilesExposeTheSameVisibleGauges() {
         let windows = [
             UsageSnapshotFactory.window(
                 descriptor: UsageWindowDescriptor(id: "session", kind: .session, label: "Session"),
@@ -121,72 +127,74 @@ final class AccountRowPresentationTests: XCTestCase {
                 usedPercent: 100
             )
         ]
-        let snapshot = UsageSnapshotFactory.snapshot(
-            accountID: profile.id,
-            provider: .claude,
-            windows: windows,
-            source: "test",
-            lastRefreshed: Date(),
-            message: "test"
-        )
+        func presentation(isActiveCLI: Bool) -> AccountRowPresentation {
+            let profile = AccountProfile(
+                provider: .claude,
+                label: isActiveCLI ? "Active" : "Inactive",
+                isActiveCLI: isActiveCLI
+            )
+            let snapshot = UsageSnapshotFactory.snapshot(
+                accountID: profile.id,
+                provider: .claude,
+                windows: windows,
+                source: "test",
+                lastRefreshed: Date(),
+                message: "test"
+            )
+            return AccountRowPresentation(
+                profile: profile,
+                snapshot: snapshot,
+                hasStoredSnapshot: true,
+                refreshState: .ok,
+                adviceReason: nil
+            )
+        }
 
-        let presentation = AccountRowPresentation(
-            profile: profile,
-            snapshot: snapshot,
-            hasStoredSnapshot: true,
-            refreshState: .ok,
-            adviceReason: nil
-        )
+        let activeIDs = presentation(isActiveCLI: true).gauges.visible.map(\.id)
+        let inactiveIDs = presentation(isActiveCLI: false).gauges.visible.map(\.id)
 
-        XCTAssertEqual(presentation.gauges.featured?.id, "weekly-all")
-        XCTAssertEqual(
-            presentation.gauges.atAGlanceAdditional.map(\.id),
-            ["session", "weekly-fable"]
-        )
+        XCTAssertEqual(activeIDs, ["session", "weekly-all", "weekly-fable"])
+        XCTAssertEqual(inactiveIDs, activeIDs)
     }
 
-    func testHealthyWeeklyDoesNotDisplaceSessionAsFeaturedGauge() {
-        let profile = AccountProfile(provider: .claude, label: "Claude", isActiveCLI: true)
-        let snapshot = UsageSnapshotFactory.snapshot(
-            accountID: profile.id,
-            provider: .claude,
-            windows: [
-                UsageSnapshotFactory.window(
-                    descriptor: UsageWindowDescriptor(id: "session", kind: .session, label: "Session"),
-                    usedPercent: 30
-                ),
-                UsageSnapshotFactory.window(
-                    descriptor: UsageWindowDescriptor(id: "weekly", kind: .weekly, label: "Weekly"),
-                    usedPercent: 70
-                )
-            ],
-            source: "test",
-            lastRefreshed: Date(),
-            message: "test"
+    func testExceptionalGaugeNotesRemainProfileSpecific() {
+        let now = Date()
+        let window = UsageSnapshotFactory.window(
+            descriptor: UsageWindowDescriptor(id: "weekly-all", kind: .weekly, label: "Weekly"),
+            usedPercent: 40,
+            resetDate: now.addingTimeInterval(-60)
         )
+        func presentation(isActiveCLI: Bool) -> AccountRowPresentation {
+            let profile = AccountProfile(
+                provider: .claude,
+                label: isActiveCLI ? "Active" : "Inactive",
+                isActiveCLI: isActiveCLI
+            )
+            let snapshot = UsageSnapshotFactory.snapshot(
+                accountID: profile.id,
+                provider: .claude,
+                windows: [window],
+                source: "test",
+                lastRefreshed: now,
+                message: "test"
+            )
+            return AccountRowPresentation(
+                profile: profile,
+                snapshot: snapshot,
+                hasStoredSnapshot: true,
+                refreshState: .ok,
+                adviceReason: nil,
+                now: now
+            )
+        }
 
-        let presentation = AccountRowPresentation(
-            profile: profile,
-            snapshot: snapshot,
-            hasStoredSnapshot: true,
-            refreshState: .ok,
-            adviceReason: nil
-        )
+        let active = presentation(isActiveCLI: true).gauges
+        XCTAssertTrue(active.needsSessionCaptureNote)
+        XCTAssertFalse(active.showsPreResetNote)
 
-        XCTAssertEqual(presentation.gauges.featured?.id, "session")
-        XCTAssertEqual(presentation.gauges.atAGlanceAdditional.map(\.id), ["weekly"])
-    }
-
-    func testFeaturedGaugeUsesStableOrderToBreakTies() {
-        let first = UsageWindow(id: "first", kind: .session, label: "First", usedPercent: 75)
-        let second = UsageWindow(id: "second", kind: .weekly, label: "Second", usedPercent: 75)
-        let groups = AccountGaugeGroups(
-            visible: [first, second],
-            needsSessionCaptureNote: false
-        )
-
-        XCTAssertEqual(groups.featured?.id, "first")
-        XCTAssertEqual(groups.additional.map(\.id), ["second"])
+        let inactive = presentation(isActiveCLI: false).gauges
+        XCTAssertFalse(inactive.needsSessionCaptureNote)
+        XCTAssertTrue(inactive.showsPreResetNote)
     }
 
     func testAdviceHighlightsAndLabelsSwitch() {
