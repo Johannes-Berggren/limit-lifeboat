@@ -50,8 +50,10 @@ direct-download source for release artifacts.
   macOS Keychain.
 - **Usage stays current.** Claude usage is fetched from Anthropic with the
   account's saved OAuth credentials, with Claude Code's local `/usage` view as
-  a fallback. Codex usage is read from recent local Codex session data.
-  Inactive accounts retain their last reading and show its age.
+  a fallback. Codex usage is fetched through the locally installed Codex app
+  server for every saved account, with recent local session data as an
+  active-account fallback. Failed accounts retain their last reading and show
+  its age.
 - **Expired logins stay actionable.** Recoverable Claude credentials refresh
   silently. Rejected logins retain their last reading and show a **Log In**
   action without opening a background dialog; Retry and Switch can offer to
@@ -91,15 +93,18 @@ are encrypted by macOS Keychain under the service
 
 The app reads Claude Code's provider-owned `Claude Code-credentials` Keychain
 item when necessary, but it does not create or take ownership of that item.
-Background refreshes do not display a Keychain authorization prompt or modify
-the live CLI login. If macOS requires authorization, the app keeps the last
-reading and waits for an explicit retry, capture, removal, or account switch.
+Background refreshes do not display a Keychain authorization prompt or switch
+the live CLI account. If Codex rotates the active account's token during an
+isolated usage check, the app merges it back only when the live credential
+fingerprint is unchanged. If macOS requires authorization, the app keeps the
+last reading and waits for an explicit retry, capture, removal, or account
+switch.
 
 Network access is limited to the services needed for the selected features:
 
 - Anthropic endpoints for Claude account identity, token refresh, and usage
-- OpenAI endpoints when isolated Codex identity verification needs account or
-  token refresh; ordinary Codex usage readings come from local session data
+- OpenAI endpoints through the locally installed Codex app server for isolated
+  account verification, token refresh, and current usage readings
 - GitHub Releases for the signed update feed and update downloads
 - Claude or ChatGPT web dashboards when you explicitly open one in the app
 

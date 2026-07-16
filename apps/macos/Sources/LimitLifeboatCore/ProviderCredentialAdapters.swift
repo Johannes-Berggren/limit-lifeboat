@@ -27,7 +27,7 @@ struct CodexCredentialAdapter: ProviderCredentialAdapter {
         return try snapshot(from: data, at: authURL)
     }
 
-    private func snapshot(from data: Data, at authURL: URL) throws -> CredentialSnapshot {
+    func snapshot(from data: Data, at authURL: URL) throws -> CredentialSnapshot {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw CLISwitcherError.invalidJSON(authURL.path)
         }

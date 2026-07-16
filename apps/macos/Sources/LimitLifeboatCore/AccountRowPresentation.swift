@@ -200,26 +200,27 @@ public struct AccountRowPresentation: Equatable, Sendable {
             let text: String
             if !hasStoredSnapshot {
                 text = "Log in via the terminal to link this account"
-            } else if profile.isActiveCLI {
-                text = profile.provider == .codex
-                    ? "Active — usage appears after you run codex"
-                    : "Active — usage appears on the next refresh"
             } else {
-                text = "Credentials saved — usage appears after switching to it"
+                text = profile.isActiveCLI
+                    ? "Active — usage appears on the next refresh"
+                    : "Credentials saved — usage appears on the next refresh"
             }
             return AccountRowMessage(text: text, icon: "person.crop.circle.badge.questionmark", tone: .secondary)
         }
 
         // Gated on *every* window rolling over (not just the most-constrained
-        // one) so a short reset doesn't mask a still-live weekly, and framed as
-        // an estimate — for an inactive Codex account there is no live source to
-        // confirm it against.
+        // one) so a short reset doesn't mask a still-live weekly. Codex saved
+        // accounts can now be measured live on refresh; other stale sources keep
+        // the older estimate wording.
         if !profile.isActiveCLI, snapshot.allWindowsResetElapsed(asOf: now) {
-            let help = profile.provider == .codex
-                ? "Estimated, not measured: Codex only reports usage for the active CLI login. This is inferred from the last reading's reset time — switch to this account and run codex to see live numbers."
+            let isLiveCodex = profile.provider == .codex && hasStoredSnapshot
+            let help = isLiveCodex
+                ? "This reading predates the reset. Refresh usage to fetch the account's current Codex limits."
                 : "Estimated from the last reading's reset time, not a live measurement. Switch to this account to confirm."
             return AccountRowMessage(
-                text: "Reset window passed — quota likely restored (estimate)",
+                text: isLiveCodex
+                    ? "Reset window passed — refresh to confirm"
+                    : "Reset window passed — quota likely restored (estimate)",
                 icon: "arrow.counterclockwise.circle",
                 tone: .success,
                 help: help

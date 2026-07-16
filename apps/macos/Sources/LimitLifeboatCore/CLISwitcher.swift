@@ -421,6 +421,46 @@ public final class CLISwitcher {
         return true
     }
 
+    /// Merges refreshed Codex-owned auth fields into the live auth document
+    /// only while it still has the exact semantic fingerprint that was copied
+    /// into an isolated app-server check. Unknown sibling fields are retained,
+    /// and a concurrent CLI/account change always wins.
+    @discardableResult
+    public func replaceLiveCodexAuthJSON(
+        _ authJSON: Data,
+        ifCredentialFingerprintMatches expectedFingerprint: String
+    ) throws -> Bool {
+        let authURL = homeDirectory
+            .appendingPathComponent(".codex", isDirectory: true)
+            .appendingPathComponent("auth.json")
+        guard fileManager.fileExists(atPath: authURL.path) else { return false }
+
+        let baseline = try Data(contentsOf: authURL)
+        let baselineSnapshot = try codexCredentials.snapshot(from: baseline, at: authURL)
+        guard CredentialFingerprint.make(for: baselineSnapshot) == expectedFingerprint,
+              let liveObject = try JSONSerialization.jsonObject(with: baseline) as? [String: Any],
+              let refreshedObject = try JSONSerialization.jsonObject(with: authJSON) as? [String: Any] else {
+            return false
+        }
+
+        var merged = liveObject
+        for key in CodexCredentialAdapter.ownedKeys {
+            merged.removeValue(forKey: key)
+            if let value = refreshedObject[key] {
+                merged[key] = value
+            }
+        }
+        let updated = try JSONSerialization.data(withJSONObject: merged, options: [.prettyPrinted, .sortedKeys])
+
+        // Re-read at the final mutation boundary. This is the same best-effort
+        // compare-and-swap used for live Claude credentials: a byte change made
+        // by Codex after our baseline read is preserved instead of overwritten.
+        guard try Data(contentsOf: authURL) == baseline else { return false }
+        try updated.write(to: authURL, options: .atomic)
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: authURL.path)
+        return true
+    }
+
     private static func isCodexAuthItem(_ item: CredentialSnapshotItem) -> Bool {
         (item.kind == .jsonFields || item.kind == .fullFile)
             && item.relativePath == ".codex/auth.json"

@@ -38,6 +38,7 @@ final class AppState: ObservableObject {
     private let identityExtractor = AccountIdentityExtractor()
     private let syncPlanner = CLIAccountSyncPlanner()
     private let codexLocalUsageReader = CodexLocalUsageReader()
+    private let codexUsageService = CodexAccountUsageService()
     private let claudeCodeUsageReader = ClaudeCodeUsageReader()
     private let claudeUsageService: ClaudeAccountUsageService
     private let codexAuthPreflightService = CodexAuthPreflightService()
@@ -60,13 +61,14 @@ final class AppState: ObservableObject {
     /// Popover-open refreshes are throttled on attempts, not outcomes — an
     /// account whose fetch keeps failing must not re-trigger on every open.
     private var lastClaudeRefreshAttempt: Date?
+    private var lastCodexRefreshAttempt: Date?
     /// Auto-switch guards, per provider so a Claude switch never blocks a Codex
     /// one: a failed attempt must not retry every cycle, and a deliberate manual
     /// switch onto a constrained account must not be immediately reverted.
     private var lastAutoSwitchAttempt: [Provider: Date] = [:]
     private var lastManualSwitchAt: [Provider: Date] = [:]
     /// When each Codex account last became the active CLI login — the freshness
-    /// gate for the account-blind Codex session logs (see refreshCodexUsage).
+    /// gate for the account-blind Codex session-log fallback.
     /// In-memory: after a relaunch the worst case is one stale attribution for
     /// an account switched-to-but-not-yet-used last session (documented
     /// follow-up: persist this).
@@ -208,10 +210,9 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Called when the popover opens: Codex is a cheap local file scan and is
-    /// always re-read; Claude accounts refresh (sub-second usage API call,
-    /// with the slow CLI probe only as fallback) when any of them has
-    /// outlived the refresh interval.
+    /// Called when the popover opens. Reconcile both live logins immediately
+    /// and start network-backed usage checks only when either provider has
+    /// outlived the configured interval.
     func refreshIfStale() {
         // Both providers can be changed by another app. Reconcile them before
         // rendering or attributing usage, even when usage itself is still fresh.
@@ -221,8 +222,7 @@ final class AppState: ObservableObject {
             AppLog.credentials.error("Popover Codex reconcile failed: \(error.localizedDescription, privacy: .public)")
         }
         Task { await reconcileStableExternalChange(provider: .claude, origin: .popover) }
-        refreshCodexUsage()
-        if shouldRefreshClaudeNow() {
+        if shouldRefreshClaudeNow() || shouldRefreshCodexNow() {
             Task { await refreshAll() }
         } else {
             updateMenuBarSummary()
@@ -249,6 +249,17 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func shouldRefreshCodexNow() -> Bool {
+        guard !isRefreshing else { return false }
+        if let lastAttempt = lastCodexRefreshAttempt,
+           Date().timeIntervalSince(lastAttempt) < TimeInterval(settings.refreshIntervalMinutes * 60) {
+            return false
+        }
+        return profiles.contains {
+            $0.provider == .codex && ($0.isActiveCLI || hasStoredSnapshot(for: $0))
+        }
+    }
+
     // MARK: - Refresh (local-first)
 
     func refreshAll() async {
@@ -271,12 +282,11 @@ final class AppState: ObservableObject {
             await reconcileStableExternalChange(provider: provider, origin: .scheduledRefresh)
         }
 
-        // Claude usage comes from the account-wide usage API for every
-        // profile with a captured token; Codex reads the active account's
-        // local logs (gated to its own reading) and derives plan/identity for
-        // every Codex account from captured credentials.
+        // Both providers now use account-specific live usage sources for every
+        // captured profile. Codex's account-blind local logs remain only as an
+        // active-account fallback for old CLIs and transient network failures.
         await refreshClaudeUsage()
-        refreshCodexUsage()
+        await refreshCodexUsage()
         notifyElapsedResets()
         updateSwitchAdvice()
         updateMenuBarSummary()
@@ -650,63 +660,139 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Reads the active Codex account's usage (gated to its own reading — the
-    /// session logs are account-blind), and derives plan tier + identity for
-    /// every Codex account, active or not, from its captured credentials.
-    private func refreshCodexUsage() {
-        // The `~/.codex/sessions` logs carry no account identity, so the newest
-        // rate-limit event can only be safely attributed to the active account
-        // when it is the sole Codex account. With two or more, the newest event
-        // may belong to whichever account last ran `codex`, so it is trusted
-        // only when produced after this account became the live login — and if
-        // there is no such event yet, the row is cleared rather than showing
-        // another account's numbers. (A lone Codex account keeps the simpler
-        // "the newest event is mine" behavior, unchanged.)
-        let now = Date()
-        let hasMultipleCodex = profiles.filter { $0.provider == .codex }.count > 1
-
-        for profile in profiles where profile.provider == .codex {
-            refreshCodexUsage(for: profile, now: now, hasMultipleCodex: hasMultipleCodex)
-        }
-    }
-
-    private func refreshCodexUsage(
-        for profile: AccountProfile,
-        now: Date = Date(),
-        hasMultipleCodex: Bool? = nil
-    ) {
-        let hasMultipleCodex = hasMultipleCodex
-            ?? (profiles.filter { $0.provider == .codex }.count > 1)
-        if profile.isActiveCLI {
-            // The in-memory activation time does not survive an app restart;
-            // anchor it before accepting account-blind session events.
-            if hasMultipleCodex, codexActiveSince[profile.id] == nil {
-                codexActiveSince[profile.id] = now
+    /// Polls every captured Codex account through the stable app-server rate
+    /// limit API. Accounts are serialized (active first) so copied refresh
+    /// tokens are never used concurrently by this app.
+    private func refreshCodexUsage() async {
+        lastCodexRefreshAttempt = Date()
+        let codexProfiles = profiles
+            .filter { $0.provider == .codex }
+            .sorted { $0.isActiveCLI && !$1.isActiveCLI }
+        guard let executablePath = cliSwitcher.resolveExecutablePath(command: Provider.codex.commandName) else {
+            for profile in codexProfiles {
+                failCodexUsageRefresh(
+                    for: profile,
+                    reason: "The Codex executable could not be found."
+                )
             }
-            let gate = hasMultipleCodex ? codexActiveSince[profile.id] : nil
-            if let snapshot = codexLocalUsageReader.readUsage(for: profile, producedAfter: gate, now: now) {
-                applySnapshot(snapshot, for: profile)
-            } else if hasMultipleCodex {
-                clearCodexSnapshot(for: profile.id)
-            }
-        }
-        // A gated-out active read (no genuine post-activation event yet) or an
-        // inactive account keeps its last-known snapshot. Enrichment remains
-        // account-specific so row-level Retry never touches sibling accounts.
-        enrichCodexAccountInfo(for: profile)
-    }
-
-    /// Drops an active Codex account's reading when it can't be attributed to
-    /// that account (multi-account setup with no post-activation event), so the
-    /// row shows its "run codex" placeholder instead of another account's data.
-    private func clearCodexSnapshot(for profileID: UUID) {
-        guard snapshots[profileID] != nil else {
             return
         }
-        snapshots[profileID] = nil
-        burnRateEstimates[profileID] = nil
-        saveSnapshots()
-        updateMenuBarSummary()
+        let executableURL = URL(fileURLWithPath: executablePath)
+        for profile in codexProfiles {
+            await refreshCodexUsage(for: profile, executableURL: executableURL)
+        }
+    }
+
+    private func refreshCodexUsage(for profile: AccountProfile, executableURL: URL) async {
+        refreshStates[profile.id] = .refreshing
+        for _ in 0..<2 {
+            do {
+                guard let fingerprint = try cliSwitcher.storedCredentialFingerprint(for: profile.id),
+                      let authJSON = try cliSwitcher.storedCodexAuthJSON(for: profile.id) else {
+                    if !refreshCodexLocalFallback(for: profile) {
+                        refreshStates[profile.id] = .needsLogin(
+                            reason: "No saved Codex credentials are available for live usage checks."
+                        )
+                    }
+                    return
+                }
+
+                let result = try await codexUsageService.fetchSnapshot(
+                    for: profile,
+                    authJSON: authJSON,
+                    executableURL: executableURL,
+                    expectedIdentity: profile.identity
+                )
+
+                if result.updatedAuthJSON != authJSON {
+                    guard try cliSwitcher.replaceStoredCodexAuthJSON(
+                        result.updatedAuthJSON,
+                        for: profile.id,
+                        ifSnapshotFingerprintMatches: fingerprint
+                    ) else {
+                        // A concurrent capture won. Re-read that newer snapshot
+                        // once instead of persisting credentials derived from an
+                        // older refresh token.
+                        continue
+                    }
+                    storedSnapshotStatuses[profile.id] = .present
+
+                    // Keep the live login in sync only when it still has the
+                    // exact credentials copied for this check and the same
+                    // profile remains active. Any outside account/CLI change
+                    // wins this compare-and-swap.
+                    if let current = profiles.first(where: { $0.id == profile.id }),
+                       current.isActiveCLI,
+                       try cliSwitcher.replaceLiveCodexAuthJSON(
+                           result.updatedAuthJSON,
+                           ifCredentialFingerprintMatches: fingerprint
+                       ) {
+                        _ = try reconcileLiveCredentials(
+                            provider: .codex,
+                            origin: .scheduledRefresh
+                        )
+                    }
+                }
+
+                applyCodexAccountInfo(result.accountInfo, for: profile)
+                applySnapshot(result.snapshot, for: profile)
+                return
+            } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
+                storedSnapshotStatuses[profile.id] = .locked
+                refreshStates[profile.id] = .keychainLocked
+                return
+            } catch let error as CodexAccountUsageError {
+                switch error {
+                case .requiresLogin(let reason):
+                    refreshStates[profile.id] = .needsLogin(reason: reason)
+                case .unavailable(let reason):
+                    failCodexUsageRefresh(for: profile, reason: reason)
+                }
+                return
+            } catch {
+                failCodexUsageRefresh(for: profile, reason: error.localizedDescription)
+                return
+            }
+        }
+
+        failCodexUsageRefresh(
+            for: profile,
+            reason: "Saved Codex credentials changed during the usage check. Try again."
+        )
+    }
+
+    private func failCodexUsageRefresh(for profile: AccountProfile, reason: String) {
+        if !refreshCodexLocalFallback(for: profile) {
+            refreshStates[profile.id] = .readFailed(reason: reason)
+        }
+        AppLog.usage.error(
+            "Codex usage fetch failed for account \(profile.id, privacy: .public): \(reason, privacy: .public)"
+        )
+    }
+
+    /// Compatibility fallback for older Codex versions and transient network
+    /// failures. Session events have no identity, so only the active account is
+    /// eligible and multi-account reads retain the post-activation freshness
+    /// gate. A missing fallback never deletes a previously valid API snapshot.
+    @discardableResult
+    private func refreshCodexLocalFallback(for profile: AccountProfile, now: Date = Date()) -> Bool {
+        guard let current = profiles.first(where: { $0.id == profile.id }),
+              current.isActiveCLI else {
+            enrichCodexAccountInfo(for: profile)
+            return false
+        }
+        let hasMultipleCodex = profiles.filter { $0.provider == .codex }.count > 1
+        if hasMultipleCodex, codexActiveSince[current.id] == nil {
+            codexActiveSince[current.id] = now
+        }
+        let gate = hasMultipleCodex ? codexActiveSince[current.id] : nil
+        guard let snapshot = codexLocalUsageReader.readUsage(for: current, producedAfter: gate, now: now) else {
+            enrichCodexAccountInfo(for: current)
+            return false
+        }
+        applySnapshot(snapshot, for: current)
+        enrichCodexAccountInfo(for: current)
+        return true
     }
 
     /// Plan tier + identity for a Codex account, from the live `auth.json` when
@@ -730,6 +816,10 @@ final class AppState: ObservableObject {
         guard let info else {
             return
         }
+        applyCodexAccountInfo(info, for: profile)
+    }
+
+    private func applyCodexAccountInfo(_ info: CodexAccountInfo, for profile: AccountProfile) {
         accountInfoFetched.insert(profile.id)
 
         if AccountProfileUpdater.enrich(
@@ -1305,19 +1395,14 @@ final class AppState: ObservableObject {
                 }
             }
         case .codex:
-            if profile.isActiveCLI {
-                refreshCodexUsage(for: profile)
-                refreshStates[profile.id] = .ok
+            lastCodexRefreshAttempt = Date()
+            if let executablePath = cliSwitcher.resolveExecutablePath(command: Provider.codex.commandName) {
+                await refreshCodexUsage(
+                    for: profile,
+                    executableURL: URL(fileURLWithPath: executablePath)
+                )
             } else {
-                switch await preflightCodexSwitchTarget(profile) {
-                case .ready:
-                    refreshCodexUsage(for: profile)
-                    refreshStates[profile.id] = .ok
-                case .requiresLogin(let reason):
-                    refreshStates[profile.id] = .needsLogin(reason: reason)
-                case .temporarilyUnavailable(let reason):
-                    refreshStates[profile.id] = .readFailed(reason: reason)
-                }
+                failCodexUsageRefresh(for: profile, reason: "The Codex executable could not be found.")
             }
         }
 

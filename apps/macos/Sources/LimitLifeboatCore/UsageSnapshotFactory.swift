@@ -114,6 +114,30 @@ public enum ClaudeUsageWindowCatalog {
     }
 }
 
+/// Stable identifiers and labels shared by Codex's app-server and local-log
+/// fallback sources. Duration determines semantics because recent plans may
+/// expose only a weekly primary window rather than a primary/secondary pair.
+public enum CodexUsageWindowCatalog {
+    public static func descriptor(name: String, windowMinutes: Int?) -> UsageWindowDescriptor {
+        let kind: UsageWindowKind
+        if let windowMinutes {
+            kind = windowMinutes <= 60 * 24 ? .session : .weekly
+        } else {
+            kind = name == "secondary" ? .weekly : .session
+        }
+        let base = kind == .weekly ? "Weekly" : "Session"
+        let label = windowMinutes.map { "\(base) (\(shortDuration(minutes: $0)))" } ?? base
+        let id = windowMinutes.map { "codex-\($0)" } ?? "codex-\(name)"
+        return UsageWindowDescriptor(id: id, kind: kind, label: label, windowMinutes: windowMinutes)
+    }
+
+    private static func shortDuration(minutes: Int) -> String {
+        if minutes < 60 { return "\(minutes)m" }
+        if minutes < 60 * 24 { return "\(minutes / 60)h" }
+        return "\(minutes / (60 * 24))d"
+    }
+}
+
 /// Centralizes the invariants shared by every usage source. Readers remain
 /// responsible only for parsing and source-specific labels/messages.
 public enum UsageSnapshotFactory {

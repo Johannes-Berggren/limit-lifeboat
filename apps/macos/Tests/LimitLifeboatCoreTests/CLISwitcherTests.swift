@@ -4,6 +4,64 @@ import XCTest
 @testable import LimitLifeboatCore
 
 final class CLISwitcherTests: XCTestCase {
+    func testGuardedLiveCodexRefreshMergesOwnedFieldsAndPreservesUnknownSiblings() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let authURL = fixture.home.appendingPathComponent(".codex/auth.json")
+        try FileManager.default.createDirectory(at: authURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(#"{"auth_mode":"chatgpt","tokens":{"access_token":"old","refresh_token":"refresh-old"},"future_machine_state":"keep"}"#.utf8).write(to: authURL)
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: MemoryCredentialStore(),
+            claudeCLICredentialSource: FakeClaudeCLICredentialSource()
+        )
+        let fingerprint = try XCTUnwrap(
+            switcher.liveObservation(provider: .codex).credentialFingerprint
+        )
+        let refreshed = Data(#"{"auth_mode":"chatgpt","tokens":{"access_token":"new","refresh_token":"refresh-new"},"last_refresh":"today"}"#.utf8)
+
+        XCTAssertTrue(
+            try switcher.replaceLiveCodexAuthJSON(
+                refreshed,
+                ifCredentialFingerprintMatches: fingerprint
+            )
+        )
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: authURL)) as? [String: Any])
+        let tokens = try XCTUnwrap(object["tokens"] as? [String: Any])
+        XCTAssertEqual(tokens["access_token"] as? String, "new")
+        XCTAssertEqual(object["future_machine_state"] as? String, "keep")
+        XCTAssertEqual(object["last_refresh"] as? String, "today")
+        let mode = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: authURL.path)[.posixPermissions] as? Int)
+        XCTAssertEqual(mode & 0o777, 0o600)
+    }
+
+    func testGuardedLiveCodexRefreshPreservesConcurrentAccountChange() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let authURL = fixture.home.appendingPathComponent(".codex/auth.json")
+        try FileManager.default.createDirectory(at: authURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(#"{"auth_mode":"chatgpt","tokens":{"access_token":"old","refresh_token":"refresh-old"}}"#.utf8).write(to: authURL)
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: MemoryCredentialStore(),
+            claudeCLICredentialSource: FakeClaudeCLICredentialSource()
+        )
+        let fingerprint = try XCTUnwrap(
+            switcher.liveObservation(provider: .codex).credentialFingerprint
+        )
+        try Data(#"{"auth_mode":"chatgpt","tokens":{"access_token":"external","refresh_token":"refresh-external"}}"#.utf8).write(to: authURL)
+
+        XCTAssertFalse(
+            try switcher.replaceLiveCodexAuthJSON(
+                Data(#"{"auth_mode":"chatgpt","tokens":{"access_token":"new","refresh_token":"refresh-new"}}"#.utf8),
+                ifCredentialFingerprintMatches: fingerprint
+            )
+        )
+        XCTAssertEqual(try codexAccessToken(at: authURL), "external")
+    }
+
     func testCodexCaptureAndRestoreCleansTemporaryRollbackMaterial() throws {
         let fixture = try TemporaryFixture()
         defer { fixture.cleanup() }
