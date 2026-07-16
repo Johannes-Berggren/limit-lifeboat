@@ -17,7 +17,7 @@ enum ClaudeCodeUsageReaderError: Error, LocalizedError {
         case .cliNotFound:
             return "The claude command could not be found. Install Claude Code or make sure `claude` is on your PATH."
         case .timedOut:
-            return "Claude Code /usage timed out."
+            return "Claude Code /usage timed out. If macOS showed a keychain dialog for claude, run scripts/fix-keychain-prompts.sh (see Troubleshooting in the README)."
         case .launchFailed(let details):
             return "Claude Code /usage failed: \(details)"
         case .noUsageFound:
@@ -42,8 +42,8 @@ struct ClaudeCodeUsageReader {
         self.timeoutSeconds = timeoutSeconds
     }
 
-    func readUsage() async throws -> ClaudeCodeUsageReport {
-        let output = try await runUsageProbe()
+    func readUsage(oauthToken: String? = nil) async throws -> ClaudeCodeUsageReport {
+        let output = try await runUsageProbe(oauthToken: oauthToken)
         guard let report = parser.parse(text: output) else {
             // Never log the raw output — the rendered TUI can contain account
             // details. The size alone tells apart "nothing rendered" from
@@ -54,12 +54,13 @@ struct ClaudeCodeUsageReader {
         return report
     }
 
-    private func runUsageProbe() async throws -> String {
+    private func runUsageProbe(oauthToken: String?) async throws -> String {
         try await Task.detached(priority: .utility) {
             try runExpectProbe(
                 homeDirectory: homeDirectory,
                 fileManager: fileManager,
-                timeoutSeconds: timeoutSeconds
+                timeoutSeconds: timeoutSeconds,
+                oauthToken: oauthToken
             )
         }.value
     }
@@ -68,7 +69,8 @@ struct ClaudeCodeUsageReader {
 private func runExpectProbe(
     homeDirectory: URL,
     fileManager: FileManager,
-    timeoutSeconds: TimeInterval
+    timeoutSeconds: TimeInterval,
+    oauthToken: String?
 ) throws -> String {
     let expectURL = URL(fileURLWithPath: "/usr/bin/expect")
     guard fileManager.fileExists(atPath: expectURL.path) else {
@@ -81,7 +83,7 @@ private func runExpectProbe(
         homeDirectory: homeDirectory,
         fileManager: fileManager
     )
-    let environment = environment(homeDirectory: homeDirectory)
+    let environment = environment(homeDirectory: homeDirectory, oauthToken: oauthToken)
     process.environment = environment
     let claudeCommand = try resolveClaudeCommand(
         homeDirectory: homeDirectory,
@@ -303,7 +305,7 @@ private func tclQuotedString(_ value: String) -> String {
     return "\"\(escaped)\""
 }
 
-private func environment(homeDirectory: URL) -> [String: String] {
+private func environment(homeDirectory: URL, oauthToken: String?) -> [String: String] {
     var values = ProcessInfo.processInfo.environment
     let fallbackPath = "\(homeDirectory.path)/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     if let existingPath = values["PATH"], !existingPath.isEmpty {
@@ -313,6 +315,13 @@ private func environment(homeDirectory: URL) -> [String: String] {
     }
     values["NO_COLOR"] = "1"
     values["TERM"] = "xterm-256color"
+    if let oauthToken {
+        // Lets the spawned CLI authenticate without reading its own keychain
+        // item, which pops a SecurityAgent dialog on systems where claude's
+        // code signature is not durably authorized for it (see
+        // scripts/fix-keychain-prompts.sh).
+        values["CLAUDE_CODE_OAUTH_TOKEN"] = oauthToken
+    }
     return values
 }
 

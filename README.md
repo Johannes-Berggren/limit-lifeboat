@@ -162,6 +162,38 @@ RUN_KEYCHAIN_INTEROP_TESTS=1 swift test --package-path apps/macos \
   --filter testSecurityToolInteroperability
 ```
 
+### Troubleshooting keychain prompts
+
+**`claude` demands your login keychain password on every run.** Newer Claude
+Code builds read the `Claude Code-credentials` item natively (team
+`Q6L2SF6YDW`) instead of via `/usr/bin/security`, but the item's keychain
+partition list typically only allows `apple-tool:` and the team that has been
+granted before — so macOS asks for the keychain password each time and
+"Always Allow" never sticks. Fix it once:
+
+```bash
+apps/macos/scripts/fix-keychain-prompts.sh
+```
+
+Enter your login keychain password when asked, then click **Always Allow** on
+the next claude dialog. That grant is stored against Claude Code's
+identifier+team code requirement, so it survives claude updates. The app's
+`/usage` fallback probe also passes the current token to the CLI it spawns
+(`CLAUDE_CODE_OAUTH_TOKEN`), so the probe itself never triggers the CLI's
+keychain read.
+
+**Dev builds re-prompt after every rebuild.** Ad-hoc signed bundles get a
+per-build `cdhash` grant that dies with the next build. `package-app.sh`
+auto-picks an Apple Development identity (or honors `SIGN_IDENTITY`), which
+keeps the code requirement stable across rebuilds. The tell for past ad-hoc
+grants: `security dump-keychain -a` shows `requirement: cdhash H"..."`
+entries with `(status -67068)` for deleted bundle paths.
+
+**Never replace a running bundle.** `manage-workspace-app.sh check` refuses
+to overwrite a live app; quit it first. Swapping the binary under a running
+process breaks keychain code-signature verification (`errSecCS*` errors and
+"Quit and relaunch" messaging).
+
 Install website dependencies and run the static Astro site with:
 
 ```bash
