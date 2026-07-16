@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// The credential surface `ClaudeAccountUsageService` needs; `CLISwitcher`
 /// is the production implementation, tests use an in-memory fake.
@@ -248,21 +249,29 @@ public struct ClaudeAccountUsageService {
         // means the item changed owner mid-flight (the user switched
         // accounts during the await), and the old profile's tokens must not
         // overwrite the new live item.
-        _ = try? credentials.replaceStoredClaudeOAuthCredentials(
-            refreshed,
-            for: profile.id,
-            ifAccessTokenMatches: stale.accessToken,
-            accessMode: accessMode
-        )
+        do {
+            _ = try credentials.replaceStoredClaudeOAuthCredentials(
+                refreshed,
+                for: profile.id,
+                ifAccessTokenMatches: stale.accessToken,
+                accessMode: accessMode
+            )
+        } catch {
+            AppLog.credentials.info("Could not persist the refreshed token for account \(profile.id, privacy: .public); it will refresh again next cycle: \(error.localizedDescription, privacy: .public)")
+        }
         // A scheduled/background usage refresh must never mutate the CLI's
         // live login. Only an explicit user action (Retry, manual switch, or
         // capture workflow) may write refreshed tokens back to Claude Code.
         if updateLiveItem, accessMode == .userInitiated {
-            _ = try? credentials.replaceLiveClaudeOAuthCredentials(
-                refreshed,
-                ifAccessTokenMatches: stale.accessToken,
-                accessMode: accessMode
-            )
+            do {
+                _ = try credentials.replaceLiveClaudeOAuthCredentials(
+                    refreshed,
+                    ifAccessTokenMatches: stale.accessToken,
+                    accessMode: accessMode
+                )
+            } catch {
+                AppLog.credentials.info("Could not write the refreshed token back to the live Claude Code item: \(error.localizedDescription, privacy: .public)")
+            }
         }
         return refreshed
     }

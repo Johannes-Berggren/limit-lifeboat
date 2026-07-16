@@ -1,9 +1,11 @@
 import Darwin
 import Foundation
 import LimitLifeboatCore
+import os
 
 enum ClaudeCodeUsageReaderError: Error, LocalizedError {
     case expectUnavailable
+    case cliNotFound
     case timedOut
     case launchFailed(String)
     case noUsageFound
@@ -12,12 +14,14 @@ enum ClaudeCodeUsageReaderError: Error, LocalizedError {
         switch self {
         case .expectUnavailable:
             return "/usr/bin/expect is not available, so Claude Code /usage cannot be automated."
+        case .cliNotFound:
+            return "The claude command could not be found. Install Claude Code or make sure `claude` is on your PATH."
         case .timedOut:
             return "Claude Code /usage timed out."
         case .launchFailed(let details):
             return "Claude Code /usage failed: \(details)"
         case .noUsageFound:
-            return "Claude Code opened, but /usage output was not recognized."
+            return "Claude Code ran, but its /usage output was not recognized. A Claude Code update may have changed the format."
         }
     }
 }
@@ -41,6 +45,10 @@ struct ClaudeCodeUsageReader {
     func readUsage() async throws -> ClaudeCodeUsageReport {
         let output = try await runUsageProbe()
         guard let report = parser.parse(text: output) else {
+            // Never log the raw output — the rendered TUI can contain account
+            // details. The size alone tells apart "nothing rendered" from
+            // "rendered but the format changed".
+            AppLog.usage.error("Claude Code /usage output was not recognized (\(output.count, privacy: .public) characters captured)")
             throw ClaudeCodeUsageReaderError.noUsageFound
         }
         return report
@@ -75,15 +83,15 @@ private func runExpectProbe(
     )
     let environment = environment(homeDirectory: homeDirectory)
     process.environment = environment
+    let claudeCommand = try resolveClaudeCommand(
+        homeDirectory: homeDirectory,
+        fileManager: fileManager,
+        environment: environment
+    )
+    AppLog.usage.info("Starting the Claude Code /usage probe via \(claudeCommand.executableURL.path, privacy: .public)")
     process.arguments = [
         "-c",
-        try expectScript(
-            command: resolveClaudeCommand(
-                homeDirectory: homeDirectory,
-                fileManager: fileManager,
-                environment: environment
-            )
-        )
+        try expectScript(command: claudeCommand)
     ]
 
     let outputPipe = Pipe()
@@ -105,6 +113,7 @@ private func runExpectProbe(
     }
 
     if waitGroup.wait(timeout: .now() + timeoutSeconds) == .timedOut {
+        AppLog.usage.error("The Claude Code /usage probe timed out after \(Int(timeoutSeconds), privacy: .public)s; killing it and its helper")
         terminate(process)
         throw ClaudeCodeUsageReaderError.timedOut
     }
@@ -147,9 +156,24 @@ private func resolveClaudeCommand(
         )
     }
 
-    return ClaudeCommand(
+    // None of the well-known install locations hit; fall back to PATH lookup
+    // (the environment already carries the fallback directories). A missing
+    // executable must fail here as `.cliNotFound` — launching a bare `env
+    // claude` would only surface as an unrecognized-output error later.
+    let resolved = commandOutput(
         executableURL: URL(fileURLWithPath: "/usr/bin/env"),
-        arguments: ["claude"]
+        arguments: ["which", "claude"],
+        environment: environment
+    )
+    guard let path = resolved.split(whereSeparator: \.isNewline).first.map(String.init),
+          fileManager.isExecutableFile(atPath: path) else {
+        throw ClaudeCodeUsageReaderError.cliNotFound
+    }
+    let executableURL = URL(fileURLWithPath: path)
+    let help = commandOutput(executableURL: executableURL, arguments: ["--help"], environment: environment)
+    return ClaudeCommand(
+        executableURL: executableURL,
+        arguments: supportedArguments(fromHelp: help)
     )
 }
 
@@ -292,29 +316,39 @@ private func environment(homeDirectory: URL) -> [String: String] {
     return values
 }
 
+/// Kills a timed-out expect probe and the claude helper it spawned. The
+/// helper is found by walking the live process tree under the probe's PID
+/// (collected before the parent dies and its children are reparented), so
+/// only processes this probe started are ever touched — a claude session the
+/// user is running themselves is never a candidate.
 private func terminate(_ process: Process) {
-    guard process.isRunning else {
-        killHelperClaudeProcesses()
-        return
-    }
-
-    process.terminate()
-    usleep(300_000)
+    let descendants = descendantProcessIDs(of: process.processIdentifier)
     if process.isRunning {
-        kill(process.processIdentifier, SIGKILL)
+        process.terminate()
+        usleep(300_000)
+        if process.isRunning {
+            kill(process.processIdentifier, SIGKILL)
+        }
     }
-    killHelperClaudeProcesses()
+    for pid in descendants {
+        kill(pid, SIGKILL)
+    }
 }
 
-private func killHelperClaudeProcesses() {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-    process.arguments = [
-        "-f",
-        "claude .*--ax-screen-reader.*--no-chrome.*--permission-mode default"
-    ]
-    process.standardOutput = Pipe()
-    process.standardError = Pipe()
-    try? process.run()
-    process.waitUntilExit()
+private func descendantProcessIDs(of pid: pid_t) -> [pid_t] {
+    var result: [pid_t] = []
+    var frontier: [pid_t] = [pid]
+    while let current = frontier.popLast() {
+        let output = commandOutput(
+            executableURL: URL(fileURLWithPath: "/usr/bin/pgrep"),
+            arguments: ["-P", String(current)],
+            environment: ProcessInfo.processInfo.environment
+        )
+        let children = output
+            .split(whereSeparator: \.isNewline)
+            .compactMap { pid_t($0.trimmingCharacters(in: .whitespaces)) }
+        result.append(contentsOf: children)
+        frontier.append(contentsOf: children)
+    }
+    return result
 }
