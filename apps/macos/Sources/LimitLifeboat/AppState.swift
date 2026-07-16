@@ -646,8 +646,18 @@ final class AppState: ObservableObject {
         refreshStage = "Reading Claude Code /usage — can take ~20 seconds…"
         defer { refreshStage = nil }
 
+        // Hand the CLI the live token so it never reads its own keychain item
+        // (a SecurityAgent prompt on systems where claude's signature isn't
+        // durably authorized). An expired token is withheld rather than
+        // refreshed: a background probe must not mutate the live login.
+        var oauthToken: String?
+        if let credentials = (try? cliSwitcher.liveClaudeOAuthCredentials()) ?? nil,
+           !credentials.isExpired() {
+            oauthToken = credentials.accessToken
+        }
+
         do {
-            let report = try await claudeCodeUsageReader.readUsage()
+            let report = try await claudeCodeUsageReader.readUsage(oauthToken: oauthToken)
             if let identity = report.identity {
                 updateIdentity(identity, for: profile)
             }
