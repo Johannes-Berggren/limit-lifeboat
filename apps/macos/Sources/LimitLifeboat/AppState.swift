@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import Foundation
 import LimitLifeboatCore
+import os
 import WebKit
 
 @MainActor
@@ -83,7 +84,14 @@ final class AppState: ObservableObject {
         self.updater = AppUpdater()
         self.profiles = try repository.loadProfiles()
         self.snapshots = try repository.loadUsageSnapshots()
-        self.historyStore = try? UsageHistoryStore(applicationSupportDirectory: repository.applicationSupportDirectory)
+        // History is an enhancement (burn-rate estimates), so a failed store
+        // never blocks launch — but the failure must be visible in the log.
+        do {
+            self.historyStore = try UsageHistoryStore(applicationSupportDirectory: repository.applicationSupportDirectory)
+        } catch {
+            self.historyStore = nil
+            AppLog.history.error("Could not open the usage history store: \(error.localizedDescription, privacy: .public)")
+        }
         refreshStoredSnapshotStatuses()
         updateMenuBarSummary()
         // History can be tens of thousands of lines; load it off the launch
@@ -93,7 +101,11 @@ final class AppState: ObservableObject {
             guard let self else {
                 return
             }
-            try? self.historyStore?.load()
+            do {
+                try self.historyStore?.load()
+            } catch {
+                AppLog.history.error("Could not load usage history: \(error.localizedDescription, privacy: .public)")
+            }
             self.recomputeAllEstimates()
         }
         usageAlertController.requestAuthorization()
@@ -203,7 +215,11 @@ final class AppState: ObservableObject {
     func refreshIfStale() {
         // Both providers can be changed by another app. Reconcile them before
         // rendering or attributing usage, even when usage itself is still fresh.
-        _ = try? reconcileLiveCredentials(provider: .codex, origin: .popover)
+        do {
+            _ = try reconcileLiveCredentials(provider: .codex, origin: .popover)
+        } catch {
+            AppLog.credentials.error("Popover Codex reconcile failed: \(error.localizedDescription, privacy: .public)")
+        }
         Task { await reconcileStableExternalChange(provider: .claude, origin: .popover) }
         refreshCodexUsage()
         if shouldRefreshClaudeNow() {
@@ -353,6 +369,11 @@ final class AppState: ObservableObject {
                 // snapshot (a missing token is expected until the account has
                 // been the active login once).
                 let fetchError = (error as? ClaudeAccountUsageFetchError) ?? .transport(error)
+                if case .noCredentials = fetchError {
+                    AppLog.usage.debug("No captured token yet for account \(profile.id, privacy: .public); skipping its usage fetch")
+                } else {
+                    AppLog.usage.error("Usage fetch failed for account \(profile.id, privacy: .public): \(fetchError.localizedDescription, privacy: .public)")
+                }
                 let outcome = RefreshOutcomePolicy.outcome(for: fetchError, isActiveCLI: profile.isActiveCLI)
                 if outcome.attemptTUIFallback {
                     await refreshActiveClaudeCodeUsage(onFailure: outcome.state, for: profile)
@@ -370,11 +391,15 @@ final class AppState: ObservableObject {
         guard !accountInfoFetched.contains(profile.id) else {
             return
         }
-        guard let info = try? await claudeUsageService.fetchAccountInfo(
-            for: profile,
-            isActiveCLI: profile.isActiveCLI
-        ) else {
+        let info: ClaudeAPIAccountInfo
+        do {
+            info = try await claudeUsageService.fetchAccountInfo(
+                for: profile,
+                isActiveCLI: profile.isActiveCLI
+            )
+        } catch {
             // Thrown errors (network, missing token) retry next cycle.
+            AppLog.usage.debug("Account info fetch failed for account \(profile.id, privacy: .public); retrying next cycle: \(error.localizedDescription, privacy: .public)")
             return
         }
         accountInfoFetched.insert(profile.id)
@@ -576,6 +601,7 @@ final class AppState: ObservableObject {
                 }
                 return
             }
+            AppLog.credentials.error("Could not reconcile \(provider.displayName, privacy: .public) credentials (origin: \(String(describing: origin), privacy: .public)): \(error.localizedDescription, privacy: .public)")
             statusMessage = "Could not reconcile \(provider.displayName) credentials: \(error.localizedDescription)"
         }
     }
@@ -619,6 +645,7 @@ final class AppState: ObservableObject {
             applySnapshot(snapshot, for: profile)
         } catch {
             refreshStates[profile.id] = failureState
+            AppLog.usage.error("Claude Code /usage probe failed for account \(profile.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             statusMessage = "Claude Code /usage unavailable: \(error.localizedDescription)"
         }
     }
@@ -717,7 +744,11 @@ final class AppState: ObservableObject {
     private func applySnapshot(_ snapshot: UsageSnapshot, for profile: AccountProfile) {
         snapshots[profile.id] = snapshot
         refreshStates[profile.id] = .ok
-        _ = try? historyStore?.append(snapshot)
+        do {
+            _ = try historyStore?.append(snapshot)
+        } catch {
+            AppLog.history.error("Could not record a usage reading for account \(profile.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
         recomputeEstimates(for: profile, snapshot: snapshot)
         updateMenuBarSummary()
         // Near-limit alerts stay active-account-only: an inactive account
@@ -856,7 +887,11 @@ final class AppState: ObservableObject {
         snapshots[profile.id] = nil
         refreshStates[profile.id] = nil
         storedSnapshotStatuses[profile.id] = nil
-        try? historyStore?.removeAccount(profile.id)
+        do {
+            try historyStore?.removeAccount(profile.id)
+        } catch {
+            AppLog.history.error("Could not delete usage history for account \(profile.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
         burnRateEstimates[profile.id] = nil
         usageAlertController.forgetProfile(profile.id)
         persistProfiles()
@@ -991,6 +1026,7 @@ final class AppState: ObservableObject {
             )
 
             statusMessage = "Switched \(profile.provider.displayName) CLI to \(profile.label)."
+            AppLog.switching.notice("Switched \(profile.provider.displayName, privacy: .public) CLI to account \(profile.id, privacy: .public) (interactive: \(interactive, privacy: .public))")
             refreshStates[profile.id] = .ok
             if interactive {
                 lastManualSwitchAt[profile.provider] = Date()
@@ -1000,12 +1036,17 @@ final class AppState: ObservableObject {
             }
             return true
         } catch {
+            AppLog.switching.error("Switch to account \(profile.id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
             if let storeError = error as? CredentialStoreError, case .decodeFailed = storeError {
                 // The stored snapshot is unreadable (e.g. written by an older
                 // build). Clear it so this account falls back to the re-capture
                 // path, and tell the user how to restore it. The current login
                 // was already captured above, so nothing is lost.
-                try? cliSwitcher.deleteStoredSnapshot(for: profile.id)
+                do {
+                    try cliSwitcher.deleteStoredSnapshot(for: profile.id)
+                } catch {
+                    AppLog.credentials.error("Could not clear the unreadable snapshot for account \(profile.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                }
                 storedSnapshotStatuses[profile.id] = .absent
                 statusMessage = "Cleared unreadable credentials for \(profile.label)."
                 reportSwitchProblem(
@@ -1512,7 +1553,11 @@ final class AppState: ObservableObject {
         guard let previousActiveID,
               let previous = profiles.first(where: { $0.id == previousActiveID }),
               hasStoredSnapshot(for: previous) else {
-            _ = try? reconcileLiveCredentials(provider: provider, origin: .login, observation: current, preferredLoginProfileID: profileID)
+            do {
+                _ = try reconcileLiveCredentials(provider: provider, origin: .login, observation: current, preferredLoginProfileID: profileID)
+            } catch {
+                AppLog.credentials.error("Post-login reconcile failed for \(provider.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
             statusMessage = "Logged into \(resolved.label). Could not restore the previous account, so it is now active."
             await CredentialAccess.nonInteractive { await refreshAll() }
             return true
@@ -1540,7 +1585,12 @@ final class AppState: ObservableObject {
             // Restore-back failed — the live session still belongs to the new
             // account. Reconcile to that reality so the app never claims an
             // active account that isn't live, then tell the user plainly.
-            _ = try? reconcileLiveCredentials(provider: provider, origin: .login, observation: current, preferredLoginProfileID: profileID)
+            AppLog.switching.error("Restore-back to account \(previous.id, privacy: .public) after a non-activating login failed: \(error.localizedDescription, privacy: .public)")
+            do {
+                _ = try reconcileLiveCredentials(provider: provider, origin: .login, observation: current, preferredLoginProfileID: profileID)
+            } catch {
+                AppLog.credentials.error("Post-login reconcile failed for \(provider.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
             showError(
                 message: "Logged into \(resolved.label), but could not switch back to \(previous.label)",
                 details: "\(resolved.label) is now the active \(provider.displayName) account. \(error.localizedDescription)"
@@ -1629,6 +1679,7 @@ final class AppState: ObservableObject {
         do {
             try repository.saveProfiles(profiles)
         } catch {
+            AppLog.persistence.error("Could not save accounts: \(error.localizedDescription, privacy: .public)")
             statusMessage = "Could not save accounts: \(error.localizedDescription)"
         }
     }
@@ -1637,6 +1688,7 @@ final class AppState: ObservableObject {
         do {
             try repository.saveUsageSnapshots(snapshots)
         } catch {
+            AppLog.persistence.error("Could not save usage snapshots: \(error.localizedDescription, privacy: .public)")
             statusMessage = "Could not save usage snapshots: \(error.localizedDescription)"
         }
     }

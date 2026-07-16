@@ -77,6 +77,7 @@ struct SettingsView: View {
 
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
     @State private var launchAtLoginMessage: String?
+    @State private var diagnosticsMessage: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -163,6 +164,26 @@ struct SettingsView: View {
                         }
                         .disabled(!updater.canCheckForUpdates)
                     }
+
+                    Section("Troubleshooting") {
+                        Button("Copy Diagnostics") {
+                            copyDiagnostics()
+                        }
+                        Label(
+                            "Copies this session's app logs for a bug report. Logs identify accounts by internal IDs only — never credentials, emails, or account names.",
+                            systemImage: "info.circle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        if let diagnosticsMessage {
+                            StatusBanner(
+                                text: diagnosticsMessage,
+                                systemImage: "doc.on.clipboard",
+                                color: DS.accent
+                            )
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                        }
+                    }
                 }
                 .formStyle(.grouped)
                 .scrollContentBackground(.hidden)
@@ -173,6 +194,28 @@ struct SettingsView: View {
         .tint(DS.accent)
         .animation(reduceMotion ? nil : DS.Motion.standard, value: launchAtLoginMessage)
         .animation(reduceMotion ? nil : DS.Motion.standard, value: updater.availableVersion)
+        .animation(reduceMotion ? nil : DS.Motion.standard, value: diagnosticsMessage)
+    }
+
+    private func copyDiagnostics() {
+        Task {
+            let message: String
+            do {
+                // Reading the log store can take a moment; keep it off the
+                // main actor so the window stays responsive.
+                let report = try await Task.detached(priority: .userInitiated) {
+                    try DiagnosticsReport.generate()
+                }.value
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(report, forType: .string)
+                message = "Diagnostics copied to the clipboard."
+            } catch {
+                message = "Could not read the app's logs: \(error.localizedDescription)"
+            }
+            withAnimation(reduceMotion ? nil : DS.Motion.quick) {
+                diagnosticsMessage = message
+            }
+        }
     }
 
     private func applyLaunchAtLogin(_ enabled: Bool) {
