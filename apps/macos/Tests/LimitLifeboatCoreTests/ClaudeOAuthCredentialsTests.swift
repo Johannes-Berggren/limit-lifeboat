@@ -10,6 +10,7 @@ final class ClaudeOAuthCredentialsTests: XCTestCase {
             "accessToken": "test-access-token",
             "refreshToken": "test-refresh-token",
             "expiresAt": 1800000000000,
+            "refreshTokenExpiresAt": 1802500000000,
             "scopes": ["user:inference", "user:profile"],
             "subscriptionType": "max",
             "rateLimitTier": "default_max_20x",
@@ -30,6 +31,10 @@ final class ClaudeOAuthCredentialsTests: XCTestCase {
         XCTAssertEqual(credentials.refreshToken, "test-refresh-token")
         // expiresAt is stored in epoch milliseconds.
         XCTAssertEqual(credentials.expiresAt, Date(timeIntervalSince1970: 1_800_000_000))
+        XCTAssertEqual(
+            credentials.refreshTokenExpiresAt,
+            Date(timeIntervalSince1970: 1_802_500_000)
+        )
         XCTAssertEqual(credentials.scopes, ["user:inference", "user:profile"])
         XCTAssertEqual(credentials.subscriptionType, "max")
         XCTAssertEqual(credentials.rateLimitTier, "default_max_20x")
@@ -84,6 +89,42 @@ final class ClaudeOAuthCredentialsTests: XCTestCase {
 
         let noExpiry = try makeCredentials(fields: ["accessToken": "token"])
         XCTAssertFalse(noExpiry.isExpired(asOf: now))
+    }
+
+    func testLoginExpiryUsesRefreshTokenLifetimeWithoutLeeway() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let valid = try makeCredentials(fields: [
+            "accessToken": "token",
+            "refreshTokenExpiresAt": Int64((now.addingTimeInterval(1).timeIntervalSince1970 * 1000).rounded())
+        ])
+        XCTAssertFalse(valid.isLoginExpired(asOf: now))
+
+        let expired = try makeCredentials(fields: [
+            "accessToken": "token",
+            "refreshTokenExpiresAt": Int64((now.timeIntervalSince1970 * 1000).rounded())
+        ])
+        XCTAssertTrue(expired.isLoginExpired(asOf: now))
+    }
+
+    func testCredentialFreshnessPrefersRenewedLoginThenNewerAccessToken() throws {
+        let olderLogin = try makeCredentials(fields: [
+            "accessToken": "older-login",
+            "expiresAt": 1_900_000_000_000,
+            "refreshTokenExpiresAt": 1_810_000_000_000
+        ])
+        let renewedLogin = try makeCredentials(fields: [
+            "accessToken": "renewed-login",
+            "expiresAt": 1_800_000_000_000,
+            "refreshTokenExpiresAt": 1_820_000_000_000
+        ])
+        XCTAssertTrue(renewedLogin.isFresher(than: olderLogin))
+
+        let newerAccess = try makeCredentials(fields: [
+            "accessToken": "newer-access",
+            "expiresAt": 1_805_000_000_000,
+            "refreshTokenExpiresAt": 1_820_000_000_000
+        ])
+        XCTAssertTrue(newerAccess.isFresher(than: renewedLogin))
     }
 
     func testMergeClaudeAiOauthPreservesSiblingKeys() throws {

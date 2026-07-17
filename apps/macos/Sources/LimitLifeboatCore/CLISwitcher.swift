@@ -90,15 +90,28 @@ public final class CLISwitcher {
             throw CLISwitcherError.credentialConflict("live \(profile.provider.displayName) identity")
         }
 
-        // A logged-out terminal must not erase the profile's captured OAuth
-        // token: when the fresh capture has no keychain item but the stored
-        // snapshot does, carry the stored item over (it belonged to this
-        // same profile).
         if profile.provider == .claude,
-           !snapshot.items.contains(where: { $0.kind == .keychainJSONFields }),
            let stored = try credentialStore.loadSnapshot(for: profile.id, accessMode: accessMode),
-           let keychainItem = stored.items.first(where: { $0.kind == .keychainJSONFields }) {
-            snapshot.items.append(keychainItem)
+           let storedItem = stored.items.first(where: { $0.kind == .keychainJSONFields }) {
+            if let liveIndex = snapshot.items.firstIndex(where: { $0.kind == .keychainJSONFields }) {
+                // Background usage can leave a rotated token in the private
+                // snapshot while the provider-owned live Keychain item still
+                // carries the previous generation. Never let polling copy the
+                // older generation back over the recoverable one.
+                if let storedCredentials = ClaudeOAuthCredentials(
+                    claudeAiOauthJSON: storedItem.contents
+                ),
+                   let liveCredentials = ClaudeOAuthCredentials(
+                    claudeAiOauthJSON: snapshot.items[liveIndex].contents
+                   ),
+                   storedCredentials.isFresher(than: liveCredentials) {
+                    snapshot.items[liveIndex] = storedItem
+                }
+            } else {
+                // A logged-out terminal must not erase the profile's captured
+                // OAuth token. The stored item belonged to this same profile.
+                snapshot.items.append(storedItem)
+            }
         }
 
         try credentialStore.save(snapshot: snapshot, for: profile.id, accessMode: accessMode)

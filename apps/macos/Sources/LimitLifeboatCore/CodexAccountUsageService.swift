@@ -55,6 +55,7 @@ protocol CodexUsageAppServerRunning {
     func readUsage(
         executableURL: URL,
         codexHome: URL,
+        forceRefresh: Bool,
         timeout: TimeInterval
     ) async -> CodexUsageAppServerOutcome
 }
@@ -125,20 +126,35 @@ public struct CodexAccountUsageService {
             )
         }
 
-        let accountEmail: String?
-        let rateLimits: CodexRateLimitReading
-        switch await runner.readUsage(
-            executableURL: executableURL,
-            codexHome: temporaryHome,
-            timeout: timeout
-        ) {
-        case .success(let returnedEmail, let reading):
-            accountEmail = returnedEmail
-            rateLimits = reading
-        case .requiresLogin(let reason):
-            throw CodexAccountUsageError.requiresLogin(reason: reason)
-        case .unavailable(let reason):
-            throw CodexAccountUsageError.unavailable(reason: reason)
+        var forceRefresh = false
+        var successfulResult: (accountEmail: String?, rateLimits: CodexRateLimitReading)?
+        while successfulResult == nil {
+            switch await runner.readUsage(
+                executableURL: executableURL,
+                codexHome: temporaryHome,
+                forceRefresh: forceRefresh,
+                timeout: timeout
+            ) {
+            case .success(let returnedEmail, let reading):
+                successfulResult = (returnedEmail, reading)
+            case .requiresLogin(let reason):
+                if !forceRefresh {
+                    // A normal account/rate-limit read can reject an expired
+                    // access token even while its refresh token is healthy.
+                    // Ask Codex to rotate once before declaring the login dead.
+                    forceRefresh = true
+                    continue
+                }
+                throw CodexAccountUsageError.requiresLogin(reason: reason)
+            case .unavailable(let reason):
+                throw CodexAccountUsageError.unavailable(reason: reason)
+            }
+        }
+        let accountEmail = successfulResult?.accountEmail
+        guard let rateLimits = successfulResult?.rateLimits else {
+            throw CodexAccountUsageError.unavailable(
+                reason: "Codex account recovery ended without a usage result."
+            )
         }
 
         let updatedAuthJSON: Data
@@ -422,6 +438,7 @@ struct CodexUsageAppServerProcessRunner: CodexUsageAppServerRunning {
     func readUsage(
         executableURL: URL,
         codexHome: URL,
+        forceRefresh: Bool,
         timeout: TimeInterval
     ) async -> CodexUsageAppServerOutcome {
         await withCheckedContinuation { continuation in
@@ -430,6 +447,7 @@ struct CodexUsageAppServerProcessRunner: CodexUsageAppServerRunning {
                     returning: runSynchronously(
                         executableURL: executableURL,
                         codexHome: codexHome,
+                        forceRefresh: forceRefresh,
                         timeout: timeout
                     )
                 )
@@ -440,6 +458,7 @@ struct CodexUsageAppServerProcessRunner: CodexUsageAppServerRunning {
     private func runSynchronously(
         executableURL: URL,
         codexHome: URL,
+        forceRefresh: Bool,
         timeout: TimeInterval
     ) -> CodexUsageAppServerOutcome {
         let process = Process()
@@ -498,7 +517,7 @@ struct CodexUsageAppServerProcessRunner: CodexUsageAppServerRunning {
                 ]
             ],
             ["method": "initialized", "params": [:]],
-            ["method": "account/read", "id": 2, "params": ["refreshToken": false]],
+            ["method": "account/read", "id": 2, "params": ["refreshToken": forceRefresh]],
             ["method": "account/rateLimits/read", "id": 3]
         ]
         for message in messages {

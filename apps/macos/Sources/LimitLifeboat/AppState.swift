@@ -32,6 +32,9 @@ final class AppState: ObservableObject {
     /// this app's team, so the UI can highlight the manual "Fix Repeated
     /// Keychain Prompts…" action. Cleared once a live probe confirms it.
     @Published var keychainRepairSuggested = false
+    /// Claude's fixed per-device login expiry, cached alongside snapshot
+    /// presence so SwiftUI never reads Keychain-backed credentials in `body`.
+    @Published private(set) var claudeLoginExpirations: [UUID: Date] = [:]
 
     let settings: SettingsStore
     let updater: AppUpdater
@@ -374,6 +377,7 @@ final class AppState: ObservableObject {
                     for: profile,
                     isActiveCLI: profile.isActiveCLI
                 )
+                refreshClaudeLoginExpiration(for: profile)
                 applySnapshot(snapshot, for: profile)
                 await enrichAccountInfoIfMissing(for: profile)
             } catch {
@@ -411,6 +415,7 @@ final class AppState: ObservableObject {
                 for: profile,
                 isActiveCLI: profile.isActiveCLI
             )
+            refreshClaudeLoginExpiration(for: profile)
         } catch {
             // Thrown errors (network, missing token) retry next cycle.
             AppLog.usage.debug("Account info fetch failed for account \(profile.id, privacy: .public); retrying next cycle: \(error.localizedDescription, privacy: .public)")
@@ -578,6 +583,7 @@ final class AppState: ObservableObject {
             do {
                 _ = try cliSwitcher.storeObservation(observation, for: active)
                 storedSnapshotStatuses[active.id] = .present
+                refreshClaudeLoginExpiration(for: active)
             } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
                 storedSnapshotStatuses[active.id] = .locked
                 throw error
@@ -973,7 +979,7 @@ final class AppState: ObservableObject {
         alert.informativeText = details
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else {
+        guard alert.runModalActivating() == .alertFirstButtonReturn else {
             return
         }
 
@@ -994,6 +1000,7 @@ final class AppState: ObservableObject {
         snapshots[profile.id] = nil
         refreshStates[profile.id] = nil
         storedSnapshotStatuses[profile.id] = nil
+        claudeLoginExpirations[profile.id] = nil
         do {
             try historyStore?.removeAccount(profile.id)
         } catch {
@@ -1068,7 +1075,7 @@ final class AppState: ObservableObject {
             alert.informativeText = "\(reason) You can switch anyway, but the CLI may ask you to log in."
             alert.addButton(withTitle: "Switch Anyway")
             alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else {
+            guard alert.runModalActivating() == .alertFirstButtonReturn else {
                 return false
             }
         }
@@ -1079,7 +1086,7 @@ final class AppState: ObservableObject {
             alert.informativeText = "The account will be switched for new credential reads. Existing sessions may keep credentials they already loaded."
             alert.addButton(withTitle: "Switch")
             alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else {
+            guard alert.runModalActivating() == .alertFirstButtonReturn else {
                 return false
             }
         }
@@ -1235,6 +1242,7 @@ final class AppState: ObservableObject {
                     isActiveCLI: profile.isActiveCLI,
                     accessMode: CredentialAccess.currentMode
                 )
+                refreshClaudeLoginExpiration(for: profile)
                 applySnapshot(snapshot, for: profile)
                 return .ready
             } catch {
@@ -1325,7 +1333,7 @@ final class AppState: ObservableObject {
         alert.informativeText = reason
         alert.addButton(withTitle: "Log In Again")
         alert.addButton(withTitle: "Cancel")
-        if alert.runModal() == .alertFirstButtonReturn {
+        if alert.runModalActivating() == .alertFirstButtonReturn {
             beginCLILogin(for: profile)
         }
     }
@@ -1585,12 +1593,39 @@ final class AppState: ObservableObject {
         storedSnapshotStatuses[profile.id] ?? .absent
     }
 
+    func loginExpiresAt(for profile: AccountProfile) -> Date? {
+        guard profile.provider == .claude else { return nil }
+        return claudeLoginExpirations[profile.id]
+    }
+
     private func refreshStoredSnapshotStatuses() {
         var statuses: [UUID: StoredSnapshotStatus] = [:]
+        var expirations: [UUID: Date] = [:]
         for profile in profiles {
             statuses[profile.id] = readStoredSnapshotStatus(for: profile)
+            if profile.provider == .claude,
+               let credentials = try? cliSwitcher.storedClaudeOAuthCredentials(for: profile.id),
+               let expiresAt = credentials.refreshTokenExpiresAt {
+                expirations[profile.id] = expiresAt
+            }
         }
         storedSnapshotStatuses = statuses
+        claudeLoginExpirations = expirations
+    }
+
+    private func refreshClaudeLoginExpiration(for profile: AccountProfile) {
+        guard profile.provider == .claude else {
+            claudeLoginExpirations[profile.id] = nil
+            return
+        }
+        do {
+            claudeLoginExpirations[profile.id] = try cliSwitcher
+                .storedClaudeOAuthCredentials(for: profile.id)?
+                .refreshTokenExpiresAt
+        } catch {
+            // Keep an existing cached warning through a transient Keychain
+            // denial; the credential status reports that problem separately.
+        }
     }
 
     private func readStoredSnapshotStatus(for profile: AccountProfile) -> StoredSnapshotStatus {
@@ -1641,6 +1676,7 @@ final class AppState: ObservableObject {
                     for: profile,
                     isActiveCLI: profile.isActiveCLI
                 )
+                refreshClaudeLoginExpiration(for: profile)
                 applySnapshot(snapshot, for: profile)
                 await enrichAccountInfoIfMissing(for: profile)
             } catch {
@@ -1992,6 +2028,7 @@ final class AppState: ObservableObject {
         do {
             _ = try cliSwitcher.storeObservation(observation, for: resolved)
             storedSnapshotStatuses[resolvedID] = .present
+            refreshClaudeLoginExpiration(for: resolved)
         } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
             storedSnapshotStatuses[resolvedID] = .locked
             throw error
@@ -2043,7 +2080,7 @@ final class AppState: ObservableObject {
         let alert = NSAlert()
         alert.messageText = message
         alert.informativeText = details
-        alert.runModal()
+        alert.runModalActivating()
     }
 
     // MARK: - Menu bar summary

@@ -8,7 +8,7 @@ final class ClaudeOAuthTokenRefresherTests: XCTestCase {
         let httpClient = MockHTTPClient()
         httpClient.stub(
             status: 200,
-            bodyText: #"{"access_token": "new-access", "refresh_token": "new-refresh", "expires_in": 28800}"#
+            bodyText: #"{"access_token": "new-access", "refresh_token": "new-refresh", "expires_in": 28800, "refresh_token_expires_in": 604800}"#
         )
         let refresher = ClaudeOAuthTokenRefresher(httpClient: httpClient)
 
@@ -31,6 +31,7 @@ final class ClaudeOAuthTokenRefresherTests: XCTestCase {
         XCTAssertEqual(refreshed.refreshToken, "new-refresh")
         // expires_in is seconds from now; expiresAt lands 8 hours out.
         XCTAssertEqual(refreshed.expiresAt, now.addingTimeInterval(28_800))
+        XCTAssertEqual(refreshed.refreshTokenExpiresAt, now.addingTimeInterval(604_800))
 
         // The raw claudeAiOauth JSON keeps unmodeled fields and stores the
         // new expiry back in epoch milliseconds.
@@ -40,6 +41,10 @@ final class ClaudeOAuthTokenRefresherTests: XCTestCase {
         XCTAssertEqual(raw["accessToken"] as? String, "new-access")
         XCTAssertEqual(raw["refreshToken"] as? String, "new-refresh")
         XCTAssertEqual((raw["expiresAt"] as? NSNumber)?.int64Value, 1_783_028_800_000)
+        XCTAssertEqual(
+            (raw["refreshTokenExpiresAt"] as? NSNumber)?.int64Value,
+            1_783_604_800_000
+        )
         XCTAssertEqual(raw["customField"] as? String, "survives")
         XCTAssertEqual(raw["subscriptionType"] as? String, "max")
         XCTAssertEqual(refreshed.subscriptionType, "max")
@@ -118,6 +123,24 @@ final class ClaudeOAuthTokenRefresherTests: XCTestCase {
         XCTAssertTrue(httpClient.requests.isEmpty)
     }
 
+    func testExpiredRefreshTokenFailsWithoutTouchingTheNetwork() async throws {
+        let httpClient = MockHTTPClient()
+        let refresher = ClaudeOAuthTokenRefresher(httpClient: httpClient)
+        let credentials = try makeCredentials(extraFields: [
+            "refreshTokenExpiresAt": Int64((now.addingTimeInterval(-1).timeIntervalSince1970 * 1000).rounded())
+        ])
+
+        do {
+            _ = try await refresher.refresh(credentials, now: now)
+            XCTFail("Expected expired login")
+        } catch let error as ClaudeOAuthError {
+            guard case .refreshTokenExpired = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+        XCTAssertTrue(httpClient.requests.isEmpty)
+    }
+
     func testThrowsMalformedResponseWhenAccessTokenMissing() async throws {
         let httpClient = MockHTTPClient()
         httpClient.stub(status: 200, bodyText: #"{"token_type": "Bearer"}"#)
@@ -137,6 +160,7 @@ final class ClaudeOAuthTokenRefresherTests: XCTestCase {
 
     func testOnlyAuthenticationSpecificRefreshRejectionsRequireLogin() {
         XCTAssertTrue(ClaudeOAuthError.missingRefreshToken.requiresLogin)
+        XCTAssertTrue(ClaudeOAuthError.refreshTokenExpired.requiresLogin)
         XCTAssertTrue(
             ClaudeOAuthError.refreshRejected(
                 status: 400,

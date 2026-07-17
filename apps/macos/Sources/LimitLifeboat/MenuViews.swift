@@ -238,6 +238,7 @@ struct MenuRootView: View {
                         refreshState: storedStatus == .locked
                             ? .keychainLocked
                             : (state.refreshStates[profile.id] ?? .idle),
+                        loginExpiresAt: state.loginExpiresAt(for: profile),
                         estimates: state.burnRateEstimates[profile.id] ?? [:],
                         adviceReason: advisedID == profile.id ? state.switchAdvice[provider]?.reason : nil,
                         showOrganizationName: settings.showOrganizationNames,
@@ -352,6 +353,7 @@ struct AccountRowView: View {
     let snapshot: UsageSnapshot?
     let hasStoredSnapshot: Bool
     var refreshState: AccountRefreshState = .idle
+    var loginExpiresAt: Date? = nil
     let estimates: [String: BurnRateEstimate]
     /// Non-nil exactly when this account is the advised switch target.
     var adviceReason: String? = nil
@@ -383,6 +385,7 @@ struct AccountRowView: View {
             hasStoredSnapshot: hasStoredSnapshot,
             refreshState: refreshState,
             adviceReason: adviceReason,
+            loginExpiresAt: loginExpiresAt,
             showOrganizationName: showOrganizationName
         )
     }
@@ -626,6 +629,12 @@ struct AccountRowView: View {
                                 retry()
                             case .login:
                                 beginCLILogin()
+                            case .renew:
+                                if presentation.renewalActivatesAccount {
+                                    beginCLILogin()
+                                } else {
+                                    beginCLILoginWithoutSwitching()
+                                }
                             }
                         }
                             .buttonStyle(.borderless)
