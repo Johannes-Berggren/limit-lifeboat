@@ -176,13 +176,14 @@ public final class CLISwitcher {
                 "saved \(profile.provider.displayName) account snapshot"
             )
         }
+        // The live-fingerprint compare-and-swap that used to run here was a
+        // duplicate of the identical validateExpectedLiveFingerprint check
+        // CredentialRestoreTransaction.restore performs as its first step (via
+        // the expectedLiveFingerprint forwarded below). Reading the shared
+        // "Claude Code-credentials" item twice back-to-back only multiplied the
+        // OS password prompts, so the read now happens once, inside the
+        // transaction.
         let shouldEnforceLiveState = enforceExpectedLiveState || expectedLiveFingerprint != nil
-        if shouldEnforceLiveState {
-            let actual = try liveObservation(provider: profile.provider, accessMode: accessMode).credentialFingerprint
-            guard actual == expectedLiveFingerprint else {
-                throw CLISwitcherError.credentialConflict("live \(profile.provider.displayName) credentials")
-            }
-        }
         let targetFingerprint = CredentialFingerprint.make(for: snapshot)
         var verifiedObservation: LiveCredentialObservation?
         let touchedPaths = try CredentialRestoreTransaction(

@@ -28,6 +28,10 @@ final class AppState: ObservableObject {
     /// perform a Keychain query. The cache is populated non-interactively at
     /// launch and updated at every credential mutation boundary.
     @Published private(set) var storedSnapshotStatuses: [UUID: StoredSnapshotStatus] = [:]
+    /// Set when the shared Claude keychain item's partition list may be missing
+    /// this app's team, so the UI can highlight the manual "Fix Repeated
+    /// Keychain Prompts…" action. Cleared once a live probe confirms it.
+    @Published var keychainRepairSuggested = false
     /// Claude's fixed per-device login expiry, cached alongside snapshot
     /// presence so SwiftUI never reads Keychain-backed credentials in `body`.
     @Published private(set) var claudeLoginExpirations: [UUID: Date] = [:]
@@ -615,6 +619,9 @@ final class AppState: ObservableObject {
                 if let active = activeProfile(for: provider) {
                     refreshStates[active.id] = .keychainLocked
                 }
+                if provider == .claude {
+                    markKeychainRepairSuggested()
+                }
                 return
             }
             AppLog.credentials.error("Could not reconcile \(provider.displayName, privacy: .public) credentials (origin: \(String(describing: origin), privacy: .public)): \(error.localizedDescription, privacy: .public)")
@@ -1013,13 +1020,21 @@ final class AppState: ObservableObject {
     /// skips confirmation dialogs and reports problems via status/notification
     /// text instead of modals. Returns whether the switch happened.
     @discardableResult
-    func switchCLI(to profile: AccountProfile, interactive: Bool = true) async -> Bool {
+    func switchCLI(
+        to profile: AccountProfile,
+        interactive: Bool = true,
+        allowKeychainRepairRetry: Bool = true
+    ) async -> Bool {
         if interactive, CredentialAccess.currentMode != .userInitiated {
             return await CredentialAccess.userInitiated(
                 reason: "switch the CLI to \(profile.label)"
             ) {
                 storedSnapshotStatuses[profile.id] = readStoredSnapshotStatus(for: profile)
-                return await switchCLI(to: profile, interactive: true)
+                return await switchCLI(
+                    to: profile,
+                    interactive: true,
+                    allowKeychainRepairRetry: allowKeychainRepairRetry
+                )
             }
         }
 
@@ -1076,6 +1091,19 @@ final class AppState: ObservableObject {
             }
         }
 
+        // Proactively repair the Claude keychain partition list before the
+        // first SecItem read of the switch. The OS access dialog appears
+        // synchronously mid-read, so fixing it up front turns a burst of
+        // password prompts into one. Gated on the cached flag (the probe is a
+        // slow whole-keychain dump, so it must not run on every switch);
+        // proceed regardless of the user's choice — declining only means the OS
+        // dialog may still appear.
+        if interactive, profile.provider == .claude, keychainRepairSuggested {
+            await repairClaudeKeychainPartitionList(
+                reason: "so switching to \(profile.label) no longer asks for your password every time"
+            )
+        }
+
         // Capture the currently active login first so nothing is lost.
         let outgoingObservation: LiveCredentialObservation
         let liveAlreadyTargetsProfile: Bool
@@ -1098,6 +1126,14 @@ final class AppState: ObservableObject {
                 )
             }
         } catch {
+            if interactive, profile.provider == .claude, allowKeychainRepairRetry, isKeychainAccessDenied(error) {
+                markKeychainRepairSuggested()
+                if await repairClaudeKeychainPartitionList(
+                    reason: "so \(profile.label) can be switched without repeated prompts"
+                ) {
+                    return await switchCLI(to: profile, interactive: true, allowKeychainRepairRetry: false)
+                }
+            }
             statusMessage = "Switch cancelled: \(error.localizedDescription)"
             reportSwitchProblem(
                 interactive: interactive,
@@ -1174,6 +1210,15 @@ final class AppState: ObservableObject {
                         await CredentialAccess.nonInteractive { await refreshAll() }
                     }
                 }
+            } else if interactive, profile.provider == .claude, allowKeychainRepairRetry, isKeychainAccessDenied(error) {
+                markKeychainRepairSuggested()
+                if await repairClaudeKeychainPartitionList(
+                    reason: "so switching to \(profile.label) stops asking for your password"
+                ) {
+                    return await switchCLI(to: profile, interactive: true, allowKeychainRepairRetry: false)
+                }
+                statusMessage = "Switch failed for \(profile.label): \(error.localizedDescription)"
+                reportSwitchProblem(interactive: interactive, message: "Switch failed", details: error.localizedDescription)
             } else {
                 statusMessage = "Switch failed for \(profile.label): \(error.localizedDescription)"
                 reportSwitchProblem(interactive: interactive, message: "Switch failed", details: error.localizedDescription)
@@ -1299,6 +1344,209 @@ final class AppState: ObservableObject {
         } else {
             statusMessage = "\(message). \(details)"
         }
+    }
+
+    // MARK: - Keychain partition-list repair
+
+    private func makeKeychainPartitionRepair() -> KeychainPartitionRepair {
+        KeychainPartitionRepair(
+            requiredPartitions: DistributionIdentity.requiredClaudeKeychainPartitions
+        )
+    }
+
+    private func confirmKeychainPartitionComplete() {
+        keychainRepairSuggested = false
+    }
+
+    /// A live keychain denial means the last observed complete item may have
+    /// been replaced. Flag the action immediately; the metadata probe confirms
+    /// the current item's ACL without prompting.
+    private func markKeychainRepairSuggested() {
+        keychainRepairSuggested = true
+    }
+
+    /// Non-interactive launch probe: highlights the manual repair action when
+    /// the shared Claude keychain item's partition list is missing this app's
+    /// team. It runs once per launch and after a newly observed Claude login,
+    /// while access denials immediately mark the action as potentially needed.
+    /// No result is persisted across launches, and the probe never prompts.
+    func refreshKeychainRepairSuggestion() async {
+        switch await claudeKeychainPartitionStatus() {
+        case .complete:
+            confirmKeychainPartitionComplete()
+        case .missing:
+            keychainRepairSuggested = true
+        case .unparseable, .itemNotFound, .none:
+            // Not logged in yet, or the probe failed: nothing actionable to flag.
+            keychainRepairSuggested = false
+        }
+    }
+
+    /// Reads the partition-list status of the shared `Claude Code-credentials`
+    /// item off the main actor. This never prompts for a password. Returns nil
+    /// if the probe itself failed (treated as "don't interrupt the user").
+    private func claudeKeychainPartitionStatus() async -> KeychainPartitionStatus? {
+        let repair = makeKeychainPartitionRepair()
+        return await Task.detached(priority: .userInitiated) {
+            try? repair.status()
+        }.value
+    }
+
+    /// True for errors that mean the Keychain denied access (rather than a
+    /// missing item), unwrapping the switch/transaction error wrappers.
+    private func isKeychainAccessDenied(_ error: Error) -> Bool {
+        if let error = error as? ClaudeCodeCredentialsKeychainError {
+            return error.isKeychainAccessDenied
+        }
+        if let error = error as? CredentialStoreError {
+            return error.isKeychainAccessDenied
+        }
+        if let error = error as? CLISwitcherError, case .backupFailed(_, let underlying) = error {
+            return isKeychainAccessDenied(underlying)
+        }
+        return false
+    }
+
+    private struct KeychainRepairAttempt: Sendable {
+        var outcome: KeychainPartitionRepairOutcome?
+        var wrongPassword = false
+        var message: String?
+    }
+
+    /// Applies an already-computed safe write plan on a background task,
+    /// mapping thrown errors to a Sendable result.
+    private func runKeychainRepair(
+        _ repair: KeychainPartitionRepair,
+        csv: String,
+        added: [String],
+        password: String
+    ) async -> KeychainRepairAttempt {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let outcome = try repair.apply(csv: csv, added: added, password: password)
+                return KeychainRepairAttempt(outcome: outcome)
+            } catch let error as KeychainPartitionRepairError {
+                if case .wrongPassword = error {
+                    return KeychainRepairAttempt(wrongPassword: true, message: error.localizedDescription)
+                }
+                return KeychainRepairAttempt(message: error.localizedDescription)
+            } catch {
+                return KeychainRepairAttempt(message: error.localizedDescription)
+            }
+        }.value
+    }
+
+    /// Shared entry point for the proactive switch gate, the reactive fallback,
+    /// and the manual menu item. Adds this app's team to the item's partition
+    /// list so `Always Allow` finally sticks. Returns true when the list ends up
+    /// complete (already-complete or newly repaired). Prompts for the login
+    /// password only when a write is actually required.
+    @discardableResult
+    func repairClaudeKeychainPartitionList(reason: String) async -> Bool {
+        let repair = makeKeychainPartitionRepair()
+
+        // One slow dump (it enumerates the whole keychain) to decide everything
+        // before prompting; surface progress so the pause is not a silent hang.
+        statusMessage = "Checking keychain access…"
+        guard let plan = await Task.detached(priority: .userInitiated, operation: {
+            try? repair.plan()
+        }).value else {
+            statusMessage = "Could not inspect keychain access."
+            showError(
+                message: "Could not inspect the keychain item",
+                details: "The existing keychain access list could not be read, so no password was requested and no changes were made."
+            )
+            return false
+        }
+        let csv: String
+        let added: [String]
+        switch plan {
+        case .complete:
+            confirmKeychainPartitionComplete()
+            statusMessage = "Keychain access is already set up — no changes needed."
+            return true
+        case .itemNotFound:
+            statusMessage = "No Claude Code keychain item was found."
+            showError(
+                message: "Claude Code isn't logged in yet",
+                details: "There's no Claude Code keychain item to repair. Log in with `claude` (/login) first, then try again."
+            )
+            return false
+        case .unparseable:
+            statusMessage = "Could not safely read the keychain access list."
+            showError(
+                message: "Could not safely inspect keychain access",
+                details: "The existing partition list could not be parsed. No password was requested and no changes were made."
+            )
+            return false
+        case .needsWrite(let plannedCSV, let plannedAdded):
+            csv = plannedCSV
+            added = plannedAdded
+        }
+
+        guard var password = promptForLoginKeychainPassword(
+            message: "Enter your macOS login password once \(reason). It's used only to authorize this one keychain change and is never stored."
+        ) else {
+            statusMessage = "Keychain repair cancelled."
+            return false
+        }
+
+        statusMessage = "Updating keychain access…"
+        for attempt in 0..<3 {
+            let result = await runKeychainRepair(
+                repair,
+                csv: csv,
+                added: added,
+                password: password
+            )
+            if let outcome = result.outcome {
+                confirmKeychainPartitionComplete()
+                switch outcome {
+                case .alreadyComplete:
+                    statusMessage = "Keychain access is already set up — no changes needed."
+                case .repaired:
+                    statusMessage = "Fixed repeated keychain prompts — switching accounts won't ask for your password anymore."
+                }
+                return true
+            }
+            if result.wrongPassword, attempt < 2 {
+                guard let retry = promptForLoginKeychainPassword(
+                    message: "That login password was not correct. Enter your macOS login password to authorize the keychain change."
+                ) else {
+                    statusMessage = "Keychain repair cancelled."
+                    return false
+                }
+                password = retry
+                continue
+            }
+            showError(
+                message: "Could not stop the keychain prompts",
+                details: result.message ?? "The keychain partition list could not be updated."
+            )
+            statusMessage = "Could not update keychain access."
+            return false
+        }
+        return false
+    }
+
+    /// Modal secure-entry prompt for the login-keychain password. The value is
+    /// read straight into the repair call and is never stored on `self` or
+    /// logged.
+    private func promptForLoginKeychainPassword(message: String) -> String? {
+        let alert = NSAlert()
+        alert.messageText = "Stop repeated keychain prompts"
+        alert.informativeText = message
+        alert.addButton(withTitle: "Authorize")
+        alert.addButton(withTitle: "Cancel")
+
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        field.placeholderString = "macOS login password"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let value = field.stringValue
+        return value.isEmpty ? nil : value
     }
 
     func captureCLISnapshot(for profile: AccountProfile) {
@@ -1629,6 +1877,9 @@ final class AppState: ObservableObject {
         let credentialsChanged = current.credentialFingerprint != initialObservation?.credentialFingerprint
         guard identityChanged || credentialsChanged else {
             return false
+        }
+        if provider == .claude {
+            await refreshKeychainRepairSuggestion()
         }
         guard activateAfterLogin else {
             return await handleNonActivatingLoginCompletion(

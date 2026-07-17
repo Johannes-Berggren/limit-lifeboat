@@ -115,6 +115,22 @@ struct MenuRootView: View {
 
             Spacer(minLength: DS.Spacing.md)
 
+            Menu {
+                Button("Fix Repeated Keychain Prompts…") {
+                    Task { await state.repairClaudeKeychainPartitionList(reason: "on request") }
+                }
+            } label: {
+                Image(systemName: state.keychainRepairSuggested ? "exclamationmark.circle" : "ellipsis.circle")
+                    .frame(width: 20, height: 20)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .foregroundStyle(state.keychainRepairSuggested ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.secondary))
+            .help(state.keychainRepairSuggested
+                ? "Switching accounts keeps asking for your password — click to fix"
+                : "More actions")
+
             Button {
                 state.openSettings()
             } label: {
