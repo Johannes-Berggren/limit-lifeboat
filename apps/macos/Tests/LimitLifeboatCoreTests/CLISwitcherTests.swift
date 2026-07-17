@@ -158,6 +158,41 @@ final class CLISwitcherTests: XCTestCase {
         XCTAssertTrue(backupDirectories.isEmpty)
     }
 
+    func testEnforcedClaudeRestoreDoesNotRereadLiveItemRedundantly() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+
+        let store = MemoryCredentialStore()
+        let source = fakeClaudeSource()
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: store,
+            claudeCLICredentialSource: source
+        )
+        let profile = AccountProfile(provider: .claude, label: "Claude")
+        let captured = try switcher.captureAndStoreSnapshot(for: profile)
+        let expected = CredentialFingerprint.make(for: captured)
+
+        let baseline = source.readCount
+        _ = try switcher.restoreSnapshot(
+            for: profile,
+            expectedLiveFingerprint: expected,
+            enforceExpectedLiveState: true
+        )
+        let restoreReads = source.readCount - baseline
+
+        // An enforced Claude restore used to read the shared keychain item 6
+        // times because restoreSnapshot ran its own live-fingerprint check that
+        // the transaction immediately repeated. That duplicate is gone; pin an
+        // upper bound so re-introducing it (which multiplies OS password
+        // prompts) fails here. The intentional reads — backup baseline, the
+        // compare-and-swap re-check, the merge read, and the post-write verify —
+        // must still happen.
+        XCTAssertGreaterThan(restoreReads, 0)
+        XCTAssertLessThanOrEqual(restoreReads, 5)
+    }
+
     func testRestoreAbortsWithoutWritingWhenBackupFails() throws {
         let fixture = try TemporaryFixture()
         defer { fixture.cleanup() }
@@ -1058,9 +1093,11 @@ private final class FakeClaudeCLICredentialSource: ClaudeCLICredentialSource, @u
     var readError: Error?
     private(set) var writes: [Data] = []
     private(set) var accessModes: [CredentialAccessMode] = []
+    private(set) var readCount = 0
 
     func readLiveItemJSON(accessMode: CredentialAccessMode) throws -> Data? {
         accessModes.append(accessMode)
+        readCount += 1
         if let readError {
             throw readError
         }

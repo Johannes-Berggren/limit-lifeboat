@@ -78,6 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task {
                 await state.refreshAll()
                 state.startBackgroundRefresh()
+                await state.refreshKeychainRepairSuggestion()
             }
         } catch {
             let alert = NSAlert()
