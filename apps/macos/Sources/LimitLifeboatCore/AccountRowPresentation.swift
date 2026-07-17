@@ -12,6 +12,7 @@ public enum AccountRowAction: Equatable, Sendable {
     case none
     case retry
     case login
+    case renew
 
     public var title: String? {
         switch self {
@@ -21,6 +22,8 @@ public enum AccountRowAction: Equatable, Sendable {
             return "Retry"
         case .login:
             return "Log In"
+        case .renew:
+            return "Renew"
         }
     }
 }
@@ -92,6 +95,9 @@ public struct AccountRowPresentation: Equatable, Sendable {
     public var switchTitle: String
     public var switchHelp: String
     public var highlightsSwitch: Bool
+    /// Active-account renewal uses the normal login path. Inactive renewal
+    /// uses the non-activating flow so the current CLI account is restored.
+    public var renewalActivatesAccount: Bool
 
     public init(
         profile: AccountProfile,
@@ -99,15 +105,19 @@ public struct AccountRowPresentation: Equatable, Sendable {
         hasStoredSnapshot: Bool,
         refreshState: AccountRefreshState,
         adviceReason: String?,
+        loginExpiresAt: Date? = nil,
         showOrganizationName: Bool = true,
         now: Date = Date()
     ) {
         self.identityText = Self.identityText(profile, showOrganizationName: showOrganizationName)
         self.riskLevel = snapshot?.riskLevel ?? .unknown
+        self.renewalActivatesAccount = profile.isActiveCLI
         self.refreshProblem = Self.refreshProblem(
             state: refreshState,
             profile: profile,
-            hasSnapshot: snapshot != nil
+            hasSnapshot: snapshot != nil,
+            loginExpiresAt: loginExpiresAt,
+            now: now
         )
         self.footerNote = Self.footerNote(
             profile: profile,
@@ -120,8 +130,11 @@ public struct AccountRowPresentation: Equatable, Sendable {
 
         let resetElapsed = snapshot?.allWindowsResetElapsed(asOf: now) == true
         self.switchTitle = adviceReason == nil ? "Switch" : "Best"
-        self.highlightsSwitch = !refreshState.requiresLogin && (resetElapsed || adviceReason != nil)
-        if refreshState.requiresLogin {
+        let loginIsExpired = loginExpiresAt.map { now >= $0 } == true
+        self.highlightsSwitch = !refreshState.requiresLogin
+            && !loginIsExpired
+            && (resetElapsed || adviceReason != nil)
+        if refreshState.requiresLogin || loginIsExpired {
             self.switchHelp = "Log in to this account again before switching the CLI to it"
         } else if !hasStoredSnapshot {
             self.switchHelp = "Log into this account once in the terminal so its credentials can be captured"
@@ -155,11 +168,13 @@ public struct AccountRowPresentation: Equatable, Sendable {
     private static func refreshProblem(
         state: AccountRefreshState,
         profile: AccountProfile,
-        hasSnapshot: Bool
+        hasSnapshot: Bool,
+        loginExpiresAt: Date?,
+        now: Date
     ) -> AccountRowMessage? {
         switch state {
         case .idle, .refreshing, .ok:
-            return nil
+            break
         case .readFailed(let reason):
             return AccountRowMessage(
                 text: "Couldn't refresh",
@@ -188,6 +203,37 @@ public struct AccountRowPresentation: Equatable, Sendable {
                 action: .retry
             )
         }
+
+        guard profile.provider == .claude,
+              let loginExpiresAt,
+              loginExpiresAt <= now.addingTimeInterval(5 * 24 * 60 * 60) else {
+            return nil
+        }
+        if loginExpiresAt <= now {
+            return AccountRowMessage(
+                text: "Login expired — sign in again",
+                icon: "person.crop.circle.badge.questionmark",
+                tone: .warning,
+                help: "This Claude login expired on this Mac. Other Macs keep their own device-local logins.",
+                action: .login
+            )
+        }
+
+        let remaining = loginExpiresAt.timeIntervalSince(now)
+        let text: String
+        if remaining < 24 * 60 * 60 {
+            text = "Login expires today"
+        } else {
+            let days = Int(ceil(remaining / (24 * 60 * 60)))
+            text = "Login expires in \(days) days"
+        }
+        return AccountRowMessage(
+            text: text,
+            icon: "clock.badge.exclamationmark",
+            tone: .warning,
+            help: "Renew this Claude login before it expires. Renewal affects this Mac only.",
+            action: .renew
+        )
     }
 
     private static func footerNote(

@@ -81,7 +81,7 @@ final class ClaudeAccountUsageServiceTests: XCTestCase {
         XCTAssertEqual(store.stored[profile.id]?.accessToken, "fresh")
     }
 
-    func testBackgroundActiveRefreshNeverMutatesLiveLogin() async throws {
+    func testBackgroundActiveExpiredTokenDefersWithoutNetworkOrMutation() async throws {
         let store = FakeCredentialProvider()
         let stale = makeCredentials(
             accessToken: "stale",
@@ -90,21 +90,88 @@ final class ClaudeAccountUsageServiceTests: XCTestCase {
         )
         store.live = stale
         store.stored[profile.id] = stale
-        let http = ScriptedHTTPClient(responses: [
-            (refreshJSON(accessToken: "fresh"), 200),
-            (usageJSON, 200)
-        ])
+        let http = ScriptedHTTPClient(responses: [])
+
+        let service = makeService(http: http, credentials: store)
+        do {
+            _ = try await service.fetchSnapshot(
+                for: profile,
+                isActiveCLI: true,
+                now: now,
+                accessMode: .nonInteractive
+            )
+            XCTFail("Expected background rotation to be deferred")
+        } catch let error as ClaudeAccountUsageFetchError {
+            guard case .interactiveRefreshRequired = error else {
+                return XCTFail("Expected interactiveRefreshRequired, got \(error)")
+            }
+        }
+
+        XCTAssertEqual(store.live?.accessToken, "stale")
+        XCTAssertEqual(store.stored[profile.id]?.accessToken, "stale")
+        XCTAssertTrue(http.requests.isEmpty)
+    }
+
+    func testBackgroundActiveUnauthorizedDoesNotSpendRefreshToken() async throws {
+        let store = FakeCredentialProvider()
+        let current = makeCredentials(
+            accessToken: "rejected",
+            refreshToken: "refresh-1",
+            expiresAt: now.addingTimeInterval(3600)
+        )
+        store.live = current
+        store.stored[profile.id] = current
+        let http = ScriptedHTTPClient(responses: [(Data("{}".utf8), 401)])
+
+        let service = makeService(http: http, credentials: store)
+        do {
+            _ = try await service.fetchSnapshot(
+                for: profile,
+                isActiveCLI: true,
+                now: now,
+                accessMode: .nonInteractive
+            )
+            XCTFail("Expected background refresh to require explicit Retry")
+        } catch let error as ClaudeAccountUsageFetchError {
+            guard case .interactiveRefreshRequired = error else {
+                return XCTFail("Expected interactiveRefreshRequired, got \(error)")
+            }
+        }
+
+        XCTAssertEqual(http.requests.count, 1)
+        XCTAssertEqual(store.live?.refreshToken, "refresh-1")
+        XCTAssertEqual(store.stored[profile.id]?.refreshToken, "refresh-1")
+    }
+
+    func testUserInitiatedActiveRetryRepairsLiveFromFresherStoredCredential() async throws {
+        let store = FakeCredentialProvider()
+        store.live = makeCredentials(
+            accessToken: "stale-live",
+            refreshToken: "stale-refresh",
+            expiresAt: now.addingTimeInterval(3600)
+        )
+        store.stored[profile.id] = makeCredentials(
+            accessToken: "fresh-stored",
+            refreshToken: "fresh-refresh",
+            expiresAt: now.addingTimeInterval(7200)
+        )
+        let http = ScriptedHTTPClient(responses: [(usageJSON, 200)])
 
         let service = makeService(http: http, credentials: store)
         _ = try await service.fetchSnapshot(
             for: profile,
             isActiveCLI: true,
             now: now,
-            accessMode: .nonInteractive
+            accessMode: .userInitiated
         )
 
-        XCTAssertEqual(store.live?.accessToken, "stale")
-        XCTAssertEqual(store.stored[profile.id]?.accessToken, "fresh")
+        XCTAssertEqual(
+            http.requests.first?.value(forHTTPHeaderField: "Authorization"),
+            "Bearer fresh-stored"
+        )
+        XCTAssertEqual(store.live?.accessToken, "fresh-stored")
+        XCTAssertEqual(store.live?.refreshToken, "fresh-refresh")
+        XCTAssertEqual(http.requests.count, 1, "Repairing a valid stored generation must not rotate again")
     }
 
     func testUnauthorizedTriggersExactlyOneRefreshRetry() async throws {

@@ -319,6 +319,93 @@ final class AccountRowPresentationTests: XCTestCase {
         XCTAssertFalse(presentation.highlightsSwitch)
     }
 
+    func testClaudeLoginWithinFiveDaysOffersPerMacRenewal() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let profile = AccountProfile(provider: .claude, label: "Claude", isActiveCLI: true)
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: nil,
+            hasStoredSnapshot: true,
+            refreshState: .ok,
+            adviceReason: nil,
+            loginExpiresAt: now.addingTimeInterval(4.2 * 24 * 60 * 60),
+            now: now
+        )
+
+        XCTAssertEqual(presentation.refreshProblem?.text, "Login expires in 5 days")
+        XCTAssertEqual(presentation.refreshProblem?.action, .renew)
+        XCTAssertEqual(presentation.refreshProblem?.action.title, "Renew")
+        XCTAssertTrue(presentation.refreshProblem?.help.contains("this Mac only") == true)
+        XCTAssertTrue(presentation.renewalActivatesAccount)
+    }
+
+    func testInactiveClaudeRenewalPreservesCurrentCLIAccount() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let profile = AccountProfile(provider: .claude, label: "Claude")
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: nil,
+            hasStoredSnapshot: true,
+            refreshState: .ok,
+            adviceReason: nil,
+            loginExpiresAt: now.addingTimeInterval(2 * 24 * 60 * 60),
+            now: now
+        )
+
+        XCTAssertEqual(presentation.refreshProblem?.action, .renew)
+        XCTAssertFalse(presentation.renewalActivatesAccount)
+    }
+
+    func testClaudeLoginBeyondFiveDaysDoesNotShowRenewal() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let profile = AccountProfile(provider: .claude, label: "Claude")
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: nil,
+            hasStoredSnapshot: true,
+            refreshState: .ok,
+            adviceReason: nil,
+            loginExpiresAt: now.addingTimeInterval(5 * 24 * 60 * 60 + 1),
+            now: now
+        )
+
+        XCTAssertNil(presentation.refreshProblem)
+    }
+
+    func testMetadataExpiredClaudeLoginRequiresLoginAndDisablesSwitchHighlight() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let profile = AccountProfile(provider: .claude, label: "Claude")
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: nil,
+            hasStoredSnapshot: true,
+            refreshState: .ok,
+            adviceReason: "More quota available",
+            loginExpiresAt: now,
+            now: now
+        )
+
+        XCTAssertEqual(presentation.refreshProblem?.text, "Login expired — sign in again")
+        XCTAssertEqual(presentation.refreshProblem?.action, .login)
+        XCTAssertFalse(presentation.highlightsSwitch)
+    }
+
+    func testCodexIgnoresClaudeLoginExpiryMetadata() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let profile = AccountProfile(provider: .codex, label: "Codex")
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: nil,
+            hasStoredSnapshot: true,
+            refreshState: .ok,
+            adviceReason: nil,
+            loginExpiresAt: now,
+            now: now
+        )
+
+        XCTAssertNil(presentation.refreshProblem)
+    }
+
     func testActiveStaleAccountSurfacesStaleness() {
         let now = Date()
         let profile = AccountProfile(provider: .claude, label: "Active", isActiveCLI: true)

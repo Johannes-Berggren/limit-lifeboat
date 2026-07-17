@@ -26,6 +26,18 @@ final class RefreshOutcomePolicyTests: XCTestCase {
         }
     }
 
+    func testActiveBackgroundRotationRequirementIsRetryableWithoutCLIFallback() {
+        let outcome = RefreshOutcomePolicy.outcome(
+            for: .interactiveRefreshRequired,
+            isActiveCLI: true
+        )
+        guard case .readFailed(let reason) = outcome.state else {
+            return XCTFail("Expected a retryable read failure, got \(outcome.state)")
+        }
+        XCTAssertTrue(reason.contains("explicit Retry"))
+        XCTAssertFalse(outcome.attemptTUIFallback)
+    }
+
     func testTransportFailureIsReadFailedAndActiveFallsBack() {
         let error = ClaudeAccountUsageFetchError.transport(URLError(.timedOut))
         let active = RefreshOutcomePolicy.outcome(for: error, isActiveCLI: true)

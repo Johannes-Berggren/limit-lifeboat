@@ -126,6 +126,44 @@ final class CLISwitcherTests: XCTestCase {
         XCTAssertEqual(tokenCache["accessToken"] as? String, "one")
     }
 
+    func testClaudeReconciliationDoesNotOverwriteFresherStoredRotation() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let store = MemoryCredentialStore()
+        let source = fakeClaudeSource(accessToken: "stale-live")
+        source.itemJSON = Data(
+            #"{"claudeAiOauth":{"accessToken":"stale-live","refreshToken":"refresh-1","expiresAt":1783000000000,"refreshTokenExpiresAt":1785000000000}}"#.utf8
+        )
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: store,
+            claudeCLICredentialSource: source
+        )
+        let profile = AccountProfile(provider: .claude, label: "Claude")
+        _ = try switcher.captureAndStoreSnapshot(for: profile)
+
+        let fresher = try XCTUnwrap(
+            ClaudeOAuthCredentials(
+                claudeAiOauthJSON: Data(
+                    #"{"accessToken":"fresh-stored","refreshToken":"refresh-2","expiresAt":1784000000000,"refreshTokenExpiresAt":1785000000000}"#.utf8
+                )
+            )
+        )
+        try switcher.updateStoredClaudeOAuthCredentials(fresher, for: profile.id)
+
+        _ = try switcher.captureAndStoreSnapshot(for: profile)
+
+        XCTAssertEqual(
+            try switcher.storedClaudeOAuthCredentials(for: profile.id)?.accessToken,
+            "fresh-stored"
+        )
+        XCTAssertEqual(
+            try switcher.storedClaudeOAuthCredentials(for: profile.id)?.refreshToken,
+            "refresh-2"
+        )
+    }
+
     func testSuccessfulClaudeRestoreCleansAllTemporaryRollbackMaterial() throws {
         let fixture = try TemporaryFixture()
         defer { fixture.cleanup() }

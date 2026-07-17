@@ -181,6 +181,82 @@ final class CodexAccountUsageServiceTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(runner.codexHome).path))
     }
 
+    func testAuthenticationFailureForcesOneRefreshBeforeReturningUsage() async throws {
+        let updated = try authJSON(
+            accountID: "acct-1",
+            accessToken: "fresh-access",
+            refreshToken: "fresh-refresh"
+        )
+        let runner = FakeCodexUsageRunner(
+            outcomes: [
+                .requiresLogin(reason: "Access token expired"),
+                .success(accountEmail: "user@example.com", rateLimits: reading(usedPercent: 31))
+            ],
+            updatedAuthJSON: updated
+        )
+        let service = CodexAccountUsageService(runner: runner)
+        let profile = AccountProfile(
+            provider: .codex,
+            label: "Codex",
+            identity: AccountIdentity(accountID: "acct-1", source: .codexIDToken)
+        )
+
+        let result = try await service.fetchSnapshot(
+            for: profile,
+            authJSON: try authJSON(accountID: "acct-1"),
+            executableURL: URL(fileURLWithPath: "/usr/bin/true"),
+            expectedIdentity: profile.identity
+        )
+
+        XCTAssertEqual(runner.forceRefreshValues, [false, true])
+        XCTAssertEqual(result.updatedAuthJSON, updated)
+        XCTAssertEqual(result.snapshot.windows.first?.usedPercent, 31)
+    }
+
+    func testRepeatedAuthenticationFailureRequiresLoginAfterOneForcedRefresh() async throws {
+        let runner = FakeCodexUsageRunner(outcomes: [
+            .requiresLogin(reason: "Access token expired"),
+            .requiresLogin(reason: "Refresh token rejected")
+        ])
+        let service = CodexAccountUsageService(runner: runner)
+        let profile = AccountProfile(provider: .codex, label: "Codex")
+
+        do {
+            _ = try await service.fetchSnapshot(
+                for: profile,
+                authJSON: try authJSON(accountID: "acct-1"),
+                executableURL: URL(fileURLWithPath: "/usr/bin/true"),
+                expectedIdentity: nil
+            )
+            XCTFail("Expected rejected forced refresh to require login")
+        } catch let error as CodexAccountUsageError {
+            XCTAssertEqual(error, .requiresLogin(reason: "Refresh token rejected"))
+        }
+        XCTAssertEqual(runner.forceRefreshValues, [false, true])
+    }
+
+    func testServerFailureAfterForcedRefreshRemainsRetryable() async throws {
+        let runner = FakeCodexUsageRunner(outcomes: [
+            .requiresLogin(reason: "Access token expired"),
+            .unavailable(reason: "Codex server unavailable")
+        ])
+        let service = CodexAccountUsageService(runner: runner)
+        let profile = AccountProfile(provider: .codex, label: "Codex")
+
+        do {
+            _ = try await service.fetchSnapshot(
+                for: profile,
+                authJSON: try authJSON(accountID: "acct-1"),
+                executableURL: URL(fileURLWithPath: "/usr/bin/true"),
+                expectedIdentity: nil
+            )
+            XCTFail("Expected a retryable server failure")
+        } catch let error as CodexAccountUsageError {
+            XCTAssertEqual(error, .unavailable(reason: "Codex server unavailable"))
+        }
+        XCTAssertEqual(runner.forceRefreshValues, [false, true])
+    }
+
     func testProcessRunnerSendsStableRequestsAndParsesResponses() async throws {
         let fixture = try UsageExecutableScriptFixture(contents: """
         #!/bin/sh
@@ -197,6 +273,7 @@ final class CodexAccountUsageServiceTests: XCTestCase {
         let outcome = await CodexUsageAppServerProcessRunner().readUsage(
             executableURL: fixture.executable,
             codexHome: fixture.directory,
+            forceRefresh: false,
             timeout: 2
         )
 
@@ -217,6 +294,7 @@ final class CodexAccountUsageServiceTests: XCTestCase {
         let outcome = await CodexUsageAppServerProcessRunner().readUsage(
             executableURL: fixture.executable,
             codexHome: fixture.directory,
+            forceRefresh: false,
             timeout: 0.05
         )
 
@@ -224,6 +302,34 @@ final class CodexAccountUsageServiceTests: XCTestCase {
             return XCTFail("Expected unavailable, got \(outcome)")
         }
         XCTAssertTrue(reason.contains("timed out"))
+    }
+
+    func testProcessRunnerSendsForcedRefreshRequestWhenRequested() async throws {
+        let fixture = try UsageExecutableScriptFixture(contents: """
+        #!/bin/sh
+        IFS= read -r initialize
+        IFS= read -r initialized
+        IFS= read -r account_read
+        IFS= read -r rate_limits
+        printf '%s' "$account_read" > "$CODEX_HOME/account-read.json"
+        printf '%s\\n' '{"id":1,"result":{}}'
+        printf '%s\\n' '{"id":2,"result":{"account":{"type":"chatgpt","email":"user@example.com"},"requiresOpenaiAuth":true}}'
+        printf '%s\\n' '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300}}}}'
+        """)
+        defer { fixture.cleanup() }
+
+        _ = await CodexUsageAppServerProcessRunner().readUsage(
+            executableURL: fixture.executable,
+            codexHome: fixture.directory,
+            forceRefresh: true,
+            timeout: 2
+        )
+
+        let request = try String(
+            contentsOf: fixture.directory.appendingPathComponent("account-read.json"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(request.contains(#""refreshToken":true"#))
     }
 
     func testProcessRunnerEarlyExitIsTransient() async throws {
@@ -236,6 +342,7 @@ final class CodexAccountUsageServiceTests: XCTestCase {
         let outcome = await CodexUsageAppServerProcessRunner().readUsage(
             executableURL: fixture.executable,
             codexHome: fixture.directory,
+            forceRefresh: false,
             timeout: 2
         )
 
@@ -290,23 +397,31 @@ final class CodexAccountUsageServiceTests: XCTestCase {
 }
 
 private final class FakeCodexUsageRunner: CodexUsageAppServerRunning, @unchecked Sendable {
-    let outcome: CodexUsageAppServerOutcome
+    private var outcomes: [CodexUsageAppServerOutcome]
     let updatedAuthJSON: Data?
     private(set) var codexHome: URL?
     private(set) var initialAuthJSON: Data?
     private(set) var homePermissions: Int?
     private(set) var authPermissions: Int?
+    private(set) var forceRefreshValues: [Bool] = []
 
     init(outcome: CodexUsageAppServerOutcome, updatedAuthJSON: Data? = nil) {
-        self.outcome = outcome
+        self.outcomes = [outcome]
+        self.updatedAuthJSON = updatedAuthJSON
+    }
+
+    init(outcomes: [CodexUsageAppServerOutcome], updatedAuthJSON: Data? = nil) {
+        self.outcomes = outcomes
         self.updatedAuthJSON = updatedAuthJSON
     }
 
     func readUsage(
         executableURL: URL,
         codexHome: URL,
+        forceRefresh: Bool,
         timeout: TimeInterval
     ) async -> CodexUsageAppServerOutcome {
+        forceRefreshValues.append(forceRefresh)
         self.codexHome = codexHome
         let authURL = codexHome.appendingPathComponent("auth.json")
         initialAuthJSON = try? Data(contentsOf: authURL)
@@ -315,7 +430,10 @@ private final class FakeCodexUsageRunner: CodexUsageAppServerRunning, @unchecked
         if let updatedAuthJSON {
             try? updatedAuthJSON.write(to: authURL, options: .atomic)
         }
-        return outcome
+        guard !outcomes.isEmpty else {
+            return .unavailable(reason: "Fake runner exhausted")
+        }
+        return outcomes.removeFirst()
     }
 
     private func permissions(at url: URL) -> Int? {

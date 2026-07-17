@@ -18,6 +18,10 @@ public struct ClaudeOAuthCredentials: Equatable, Sendable {
     /// The item stores `expiresAt` in epoch milliseconds; this is the same
     /// instant as a `Date`.
     public var expiresAt: Date?
+    /// The fixed lifetime of the login created by `/login`, also stored in
+    /// epoch milliseconds. Refreshing the access token does not extend it;
+    /// the user must renew the login before this instant.
+    public var refreshTokenExpiresAt: Date?
     public var scopes: [String]
     public var subscriptionType: String?
     public var rateLimitTier: String?
@@ -39,6 +43,9 @@ public struct ClaudeOAuthCredentials: Equatable, Sendable {
         self.accessToken = accessToken
         self.refreshToken = object["refreshToken"] as? String
         self.expiresAt = (object["expiresAt"] as? NSNumber).map {
+            Date(timeIntervalSince1970: $0.doubleValue / 1000)
+        }
+        self.refreshTokenExpiresAt = (object["refreshTokenExpiresAt"] as? NSNumber).map {
             Date(timeIntervalSince1970: $0.doubleValue / 1000)
         }
         self.scopes = object["scopes"] as? [String] ?? []
@@ -66,5 +73,28 @@ public struct ClaudeOAuthCredentials: Equatable, Sendable {
             return false
         }
         return now.addingTimeInterval(leeway) >= expiresAt
+    }
+
+    public func isLoginExpired(asOf now: Date = Date()) -> Bool {
+        guard let refreshTokenExpiresAt else {
+            return false
+        }
+        return now >= refreshTokenExpiresAt
+    }
+
+    /// Orders two captures from the same account without inspecting their
+    /// secret bytes. A renewed login wins first, then a later access-token
+    /// generation. This lets reconciliation keep a rotated stored credential
+    /// instead of replacing it with an older live Keychain value.
+    func isFresher(than other: ClaudeOAuthCredentials) -> Bool {
+        let ownLoginExpiry = refreshTokenExpiresAt ?? .distantPast
+        let otherLoginExpiry = other.refreshTokenExpiresAt ?? .distantPast
+        if ownLoginExpiry != otherLoginExpiry {
+            return ownLoginExpiry > otherLoginExpiry
+        }
+
+        let ownAccessExpiry = expiresAt ?? .distantPast
+        let otherAccessExpiry = other.expiresAt ?? .distantPast
+        return ownAccessExpiry > otherAccessExpiry
     }
 }
