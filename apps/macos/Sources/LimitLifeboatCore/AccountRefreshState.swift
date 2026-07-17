@@ -66,6 +66,13 @@ public enum RefreshOutcomePolicy {
             )
         case .keychainLocked:
             return RefreshOutcome(state: .keychainLocked, attemptTUIFallback: false)
+        case .interactiveRefreshRequired:
+            return RefreshOutcome(
+                state: .readFailed(
+                    reason: "The active Claude login needs an explicit Retry before Limit Lifeboat can rotate it safely."
+                ),
+                attemptTUIFallback: false
+            )
         case .unauthorized:
             // The API already tried one forced token refresh. A second
             // rejection confirms that this saved login needs user recovery;

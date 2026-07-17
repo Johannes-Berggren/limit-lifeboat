@@ -2,6 +2,7 @@ import Foundation
 
 public enum ClaudeOAuthError: Error, LocalizedError {
     case missingRefreshToken
+    case refreshTokenExpired
     case refreshRejected(status: Int, body: String)
     case network(Error)
     case malformedResponse
@@ -10,6 +11,8 @@ public enum ClaudeOAuthError: Error, LocalizedError {
         switch self {
         case .missingRefreshToken:
             return "The stored Claude credentials have no refresh token; sign in with claude auth login again."
+        case .refreshTokenExpired:
+            return "The stored Claude login has expired; sign in with claude auth login again."
         case .refreshRejected(let status, let body):
             let detail = body.isEmpty ? "no response body" : body
             return "Claude token refresh was rejected with status \(status) (\(detail))."
@@ -26,7 +29,7 @@ public enum ClaudeOAuthError: Error, LocalizedError {
     /// sign in again.
     public var requiresLogin: Bool {
         switch self {
-        case .missingRefreshToken:
+        case .missingRefreshToken, .refreshTokenExpired:
             return true
         case .refreshRejected(let status, let body):
             guard status != 408, status != 429, (400..<500).contains(status) else {
@@ -69,6 +72,9 @@ public struct ClaudeOAuthTokenRefresher: Sendable {
         guard let refreshToken = credentials.refreshToken, !refreshToken.isEmpty else {
             throw ClaudeOAuthError.missingRefreshToken
         }
+        guard !credentials.isLoginExpired(asOf: now) else {
+            throw ClaudeOAuthError.refreshTokenExpired
+        }
 
         var request = URLRequest(url: ClaudeOAuthConstants.tokenEndpoint)
         request.httpMethod = "POST"
@@ -109,12 +115,16 @@ public struct ClaudeOAuthTokenRefresher: Sendable {
         let expiresAt = (object["expires_in"] as? NSNumber).map {
             now.addingTimeInterval($0.doubleValue)
         }
+        let refreshTokenExpiresAt = (object["refresh_token_expires_in"] as? NSNumber).map {
+            now.addingTimeInterval($0.doubleValue)
+        } ?? credentials.refreshTokenExpiresAt
 
         let updatedRaw = updatedRawClaudeAiOauth(
             from: credentials.rawClaudeAiOauth,
             accessToken: accessToken,
             refreshToken: rotatedRefreshToken,
-            expiresAt: expiresAt
+            expiresAt: expiresAt,
+            refreshTokenExpiresAt: refreshTokenExpiresAt
         )
         guard let updated = ClaudeOAuthCredentials(claudeAiOauthJSON: updatedRaw) else {
             throw ClaudeOAuthError.malformedResponse
@@ -129,13 +139,19 @@ public struct ClaudeOAuthTokenRefresher: Sendable {
         from raw: Data,
         accessToken: String,
         refreshToken: String,
-        expiresAt: Date?
+        expiresAt: Date?,
+        refreshTokenExpiresAt: Date?
     ) -> Data {
         var object = (try? JSONSerialization.jsonObject(with: raw) as? [String: Any]) ?? [:]
         object["accessToken"] = accessToken
         object["refreshToken"] = refreshToken
         if let expiresAt {
             object["expiresAt"] = Int64((expiresAt.timeIntervalSince1970 * 1000).rounded())
+        }
+        if let refreshTokenExpiresAt {
+            object["refreshTokenExpiresAt"] = Int64(
+                (refreshTokenExpiresAt.timeIntervalSince1970 * 1000).rounded()
+            )
         }
         return (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? raw
     }

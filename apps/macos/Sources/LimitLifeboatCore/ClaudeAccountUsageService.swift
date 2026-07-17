@@ -43,6 +43,9 @@ public enum ClaudeAccountUsageFetchError: Error, LocalizedError {
     /// `noCredentials` so the UI can prompt to grant access instead of
     /// treating the account as unlinked.
     case keychainLocked
+    /// The active CLI credential needs rotation, but a background task must
+    /// not consume its refresh token out from under Claude Code.
+    case interactiveRefreshRequired
     case refreshFailed(Error)
     case unauthorized
     case transport(Error)
@@ -53,6 +56,8 @@ public enum ClaudeAccountUsageFetchError: Error, LocalizedError {
             return "No captured OAuth token for this account yet."
         case .keychainLocked:
             return "The macOS Keychain denied access to this account's saved credentials."
+        case .interactiveRefreshRequired:
+            return "The active Claude login needs an explicit Retry before its access token can be refreshed."
         case .refreshFailed(let underlying):
             return "Could not refresh the access token (\(underlying.localizedDescription))."
         case .unauthorized:
@@ -87,7 +92,7 @@ public struct ClaudeAccountUsageService {
         now: Date = Date(),
         accessMode: CredentialAccessMode = CredentialAccess.currentMode
     ) async throws -> UsageSnapshot {
-        let (active, cameFromLiveItem) = try await resolveCredentials(
+        let resolution = try await resolveCredentials(
             for: profile,
             isActiveCLI: isActiveCLI,
             now: now,
@@ -96,9 +101,8 @@ public struct ClaudeAccountUsageService {
 
         do {
             let usage = try await fetchUsage(
-                with: active,
+                with: resolution,
                 for: profile,
-                updateLiveItem: cameFromLiveItem,
                 now: now,
                 accessMode: accessMode
             )
@@ -125,7 +129,7 @@ public struct ClaudeAccountUsageService {
         now: Date = Date(),
         accessMode: CredentialAccessMode = CredentialAccess.currentMode
     ) async throws -> ClaudeAPIAccountInfo {
-        let (active, _) = try await resolveCredentials(
+        let resolution = try await resolveCredentials(
             for: profile,
             isActiveCLI: isActiveCLI,
             now: now,
@@ -133,9 +137,28 @@ public struct ClaudeAccountUsageService {
         )
 
         do {
-            return try await apiClient.fetchAccountInfo(accessToken: active.accessToken, now: now)
+            return try await apiClient.fetchAccountInfo(
+                accessToken: resolution.credentials.accessToken,
+                now: now
+            )
         } catch ClaudeUsageAPIError.unauthorized {
-            throw ClaudeAccountUsageFetchError.unauthorized
+            guard !resolution.wasRefreshed else {
+                throw ClaudeAccountUsageFetchError.unauthorized
+            }
+            let refreshed = try await refreshAndPersist(
+                resolution,
+                for: profile,
+                now: now,
+                accessMode: accessMode
+            )
+            do {
+                return try await apiClient.fetchAccountInfo(
+                    accessToken: refreshed.accessToken,
+                    now: now
+                )
+            } catch ClaudeUsageAPIError.unauthorized {
+                throw ClaudeAccountUsageFetchError.unauthorized
+            }
         } catch let error as ClaudeAccountUsageFetchError {
             throw error
         } catch {
@@ -143,79 +166,136 @@ public struct ClaudeAccountUsageService {
         }
     }
 
-    /// The active profile prefers the live keychain item — the CLI keeps it
-    /// fresh, so a valid live token must never be refreshed out from under
-    /// it. Inactive profiles resolve their stored snapshot token. Expired
-    /// tokens get one persisted refresh.
+    private struct CredentialResolution {
+        var credentials: ClaudeOAuthCredentials
+        var liveAccessTokenAtRead: String?
+        var storedAccessTokenAtRead: String?
+        var isActiveCLI: Bool
+        var wasRefreshed: Bool
+    }
+
+    /// Active profiles consider both copies and use the credential generation
+    /// with the later login/access expiry. Reading a newer stored generation
+    /// is safe; rotating either active copy in the background is not. Inactive
+    /// snapshots have a single owner and continue to refresh normally.
     private func resolveCredentials(
         for profile: AccountProfile,
         isActiveCLI: Bool,
         now: Date,
         accessMode: CredentialAccessMode
-    ) async throws -> (credentials: ClaudeOAuthCredentials, cameFromLiveItem: Bool) {
-        var cameFromLiveItem = false
-        var current: ClaudeOAuthCredentials?
+    ) async throws -> CredentialResolution {
+        var live: ClaudeOAuthCredentials?
         if isActiveCLI {
             do {
-                if let live = try credentials.liveClaudeOAuthCredentials(accessMode: accessMode) {
-                    current = live
-                    cameFromLiveItem = true
-                }
+                live = try credentials.liveClaudeOAuthCredentials(accessMode: accessMode)
             } catch let error as ClaudeCodeCredentialsKeychainError where error.isKeychainAccessDenied {
                 throw ClaudeAccountUsageFetchError.keychainLocked
             } catch {
-                current = nil
-            }
-        }
-        if current == nil {
-            do {
-                current = try credentials.storedClaudeOAuthCredentials(
-                    for: profile.id,
-                    accessMode: accessMode
-                )
-            } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
-                // A locked/denied Keychain is not the same as "no credentials":
-                // surface it so the UI can prompt to grant access.
-                throw ClaudeAccountUsageFetchError.keychainLocked
-            } catch {
-                // A decode failure or other read error leaves the account with
-                // no usable token this cycle; it keeps its last snapshot.
-                current = nil
+                live = nil
             }
         }
 
-        guard var active = current else {
+        let stored: ClaudeOAuthCredentials?
+        do {
+            stored = try credentials.storedClaudeOAuthCredentials(
+                for: profile.id,
+                accessMode: accessMode
+            )
+        } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
+            if live == nil {
+                throw ClaudeAccountUsageFetchError.keychainLocked
+            }
+            stored = nil
+        } catch {
+            // A decode failure leaves the account with no usable stored token
+            // this cycle, but a readable live credential can still be used.
+            stored = nil
+        }
+
+        let selected: ClaudeOAuthCredentials?
+        if isActiveCLI, let live, let stored {
+            selected = stored.isFresher(than: live) ? stored : live
+        } else if isActiveCLI {
+            selected = live ?? stored
+        } else {
+            selected = stored
+        }
+
+        guard var active = selected else {
             throw ClaudeAccountUsageFetchError.noCredentials
         }
+        var effectiveLiveAccessToken = live?.accessToken
+        var effectiveStoredAccessToken = stored?.accessToken
+        var wasRefreshed = false
 
         if active.isExpired(asOf: now) {
+            guard !isActiveCLI || accessMode == .userInitiated else {
+                throw ClaudeAccountUsageFetchError.interactiveRefreshRequired
+            }
             active = try await refreshAndPersist(
-                active,
+                CredentialResolution(
+                    credentials: active,
+                    liveAccessTokenAtRead: live?.accessToken,
+                    storedAccessTokenAtRead: stored?.accessToken,
+                    isActiveCLI: isActiveCLI,
+                    wasRefreshed: false
+                ),
                 for: profile,
-                updateLiveItem: cameFromLiveItem,
                 now: now,
                 accessMode: accessMode
             )
+            wasRefreshed = true
+            effectiveStoredAccessToken = active.accessToken
+            if isActiveCLI, accessMode == .userInitiated, live != nil {
+                effectiveLiveAccessToken = active.accessToken
+            }
+        } else if isActiveCLI,
+                  accessMode == .userInitiated,
+                  let liveAccessToken = live?.accessToken,
+                  liveAccessToken != active.accessToken {
+            // An earlier build may have saved a rotated generation without
+            // repairing the live item. An explicit Retry heals that split
+            // without spending the fresh refresh token again.
+            do {
+                if try credentials.replaceLiveClaudeOAuthCredentials(
+                    active,
+                    ifAccessTokenMatches: liveAccessToken,
+                    accessMode: accessMode
+                ) {
+                    effectiveLiveAccessToken = active.accessToken
+                }
+            } catch {
+                AppLog.credentials.info("Could not repair the active Claude Code credential from the fresher saved snapshot: \(error.localizedDescription, privacy: .public)")
+            }
         }
-        return (active, cameFromLiveItem)
+
+        return CredentialResolution(
+            credentials: active,
+            liveAccessTokenAtRead: effectiveLiveAccessToken,
+            storedAccessTokenAtRead: effectiveStoredAccessToken,
+            isActiveCLI: isActiveCLI,
+            wasRefreshed: wasRefreshed
+        )
     }
 
     private func fetchUsage(
-        with credentials: ClaudeOAuthCredentials,
+        with resolution: CredentialResolution,
         for profile: AccountProfile,
-        updateLiveItem: Bool,
         now: Date,
         accessMode: CredentialAccessMode
     ) async throws -> ClaudeAPIUsage {
         do {
-            return try await apiClient.fetchUsage(accessToken: credentials.accessToken)
+            return try await apiClient.fetchUsage(accessToken: resolution.credentials.accessToken)
         } catch ClaudeUsageAPIError.unauthorized {
             // The token can be revoked before its recorded expiry; one forced
-            // refresh is the only retry.
+            // refresh is the only retry. Active background work defers this to
+            // an explicit Retry so it cannot race Claude Code's own rotation.
+            guard !resolution.wasRefreshed else {
+                throw ClaudeAccountUsageFetchError.unauthorized
+            }
             let refreshed = try await refreshAndPersist(
-                credentials,
+                resolution,
                 for: profile,
-                updateLiveItem: updateLiveItem,
                 now: now,
                 accessMode: accessMode
             )
@@ -228,12 +308,16 @@ public struct ClaudeAccountUsageService {
     }
 
     private func refreshAndPersist(
-        _ stale: ClaudeOAuthCredentials,
+        _ resolution: CredentialResolution,
         for profile: AccountProfile,
-        updateLiveItem: Bool,
         now: Date,
         accessMode: CredentialAccessMode
     ) async throws -> ClaudeOAuthCredentials {
+        guard !resolution.isActiveCLI || accessMode == .userInitiated else {
+            throw ClaudeAccountUsageFetchError.interactiveRefreshRequired
+        }
+
+        let stale = resolution.credentials
         let refreshed: ClaudeOAuthCredentials
         do {
             refreshed = try await refresher.refresh(stale, now: now)
@@ -241,37 +325,40 @@ public struct ClaudeAccountUsageService {
             throw ClaudeAccountUsageFetchError.refreshFailed(error)
         }
 
-        // Persistence is best-effort: a failed write costs one extra refresh
-        // on the next cycle, never the reading we just paid for. The live
-        // item is only rewritten when the stale token came from it, so a
-        // logged-out terminal is never silently logged back in — and only
-        // when the live token is still the one we refreshed. Anything else
-        // means the item changed owner mid-flight (the user switched
-        // accounts during the await), and the old profile's tokens must not
-        // overwrite the new live item.
-        do {
-            _ = try credentials.replaceStoredClaudeOAuthCredentials(
-                refreshed,
-                for: profile.id,
-                ifAccessTokenMatches: stale.accessToken,
-                accessMode: accessMode
-            )
-        } catch {
-            AppLog.credentials.info("Could not persist the refreshed token for account \(profile.id, privacy: .public); it will refresh again next cycle: \(error.localizedDescription, privacy: .public)")
-        }
-        // A scheduled/background usage refresh must never mutate the CLI's
-        // live login. Only an explicit user action (Retry, manual switch, or
-        // capture workflow) may write refreshed tokens back to Claude Code.
-        if updateLiveItem, accessMode == .userInitiated {
+        // For an active explicit Retry, protect the provider-owned live login
+        // first. Both writes are compare-and-swap operations; an account or
+        // credential change during the network request always wins.
+        if resolution.isActiveCLI,
+           accessMode == .userInitiated,
+           let expectedLiveAccessToken = resolution.liveAccessTokenAtRead {
             do {
                 _ = try credentials.replaceLiveClaudeOAuthCredentials(
                     refreshed,
-                    ifAccessTokenMatches: stale.accessToken,
+                    ifAccessTokenMatches: expectedLiveAccessToken,
                     accessMode: accessMode
                 )
             } catch {
                 AppLog.credentials.info("Could not write the refreshed token back to the live Claude Code item: \(error.localizedDescription, privacy: .public)")
             }
+        }
+
+        do {
+            if let expectedStoredAccessToken = resolution.storedAccessTokenAtRead {
+                _ = try credentials.replaceStoredClaudeOAuthCredentials(
+                    refreshed,
+                    for: profile.id,
+                    ifAccessTokenMatches: expectedStoredAccessToken,
+                    accessMode: accessMode
+                )
+            } else {
+                try credentials.updateStoredClaudeOAuthCredentials(
+                    refreshed,
+                    for: profile.id,
+                    accessMode: accessMode
+                )
+            }
+        } catch {
+            AppLog.credentials.info("Could not persist the refreshed token for account \(profile.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
         return refreshed
     }
