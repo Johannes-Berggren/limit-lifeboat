@@ -966,7 +966,7 @@ final class AppState: ObservableObject {
         alert.informativeText = details
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else {
+        guard alert.runModalActivating() == .alertFirstButtonReturn else {
             return
         }
 
@@ -1053,7 +1053,7 @@ final class AppState: ObservableObject {
             alert.informativeText = "\(reason) You can switch anyway, but the CLI may ask you to log in."
             alert.addButton(withTitle: "Switch Anyway")
             alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else {
+            guard alert.runModalActivating() == .alertFirstButtonReturn else {
                 return false
             }
         }
@@ -1064,7 +1064,7 @@ final class AppState: ObservableObject {
             alert.informativeText = "The account will be switched for new credential reads. Existing sessions may keep credentials they already loaded."
             alert.addButton(withTitle: "Switch")
             alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else {
+            guard alert.runModalActivating() == .alertFirstButtonReturn else {
                 return false
             }
         }
@@ -1280,7 +1280,7 @@ final class AppState: ObservableObject {
         alert.informativeText = reason
         alert.addButton(withTitle: "Log In Again")
         alert.addButton(withTitle: "Cancel")
-        if alert.runModal() == .alertFirstButtonReturn {
+        if alert.runModalActivating() == .alertFirstButtonReturn {
             beginCLILogin(for: profile)
         }
     }
@@ -1792,7 +1792,7 @@ final class AppState: ObservableObject {
         let alert = NSAlert()
         alert.messageText = message
         alert.informativeText = details
-        alert.runModal()
+        alert.runModalActivating()
     }
 
     // MARK: - Menu bar summary
