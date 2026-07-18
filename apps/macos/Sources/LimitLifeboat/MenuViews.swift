@@ -385,6 +385,7 @@ struct AccountRowView: View {
             hasStoredSnapshot: hasStoredSnapshot,
             refreshState: refreshState,
             adviceReason: adviceReason,
+            estimates: estimates,
             loginExpiresAt: loginExpiresAt,
             showOrganizationName: showOrganizationName
         )
@@ -609,9 +610,11 @@ struct AccountRowView: View {
     private var statusStrip: some View {
         // A failed refresh takes precedence over the quiet note: the account is
         // showing stale or absent numbers for a reason the user can act on.
+        // A live depletion forecast outranks the quiet note the same way.
         let problem = presentation.refreshProblem
-        let note = problem == nil ? presentation.footerNote : nil
-        if problem != nil || note != nil {
+        let pace = problem == nil ? presentation.paceForecast : nil
+        let note = (problem == nil && pace == nil) ? presentation.footerNote : nil
+        if problem != nil || pace != nil || note != nil {
             HStack(spacing: DS.Spacing.sm) {
                 if let problem {
                     Label(problem.text, systemImage: problem.icon)
@@ -640,6 +643,12 @@ struct AccountRowView: View {
                             .buttonStyle(.borderless)
                             .controlSize(.small)
                     }
+                } else if let pace {
+                    Label(paceText(pace), systemImage: "clock.badge.exclamationmark")
+                        .font(.caption)
+                        .foregroundStyle(DS.presentationColor(.warning))
+                        .lineLimit(2)
+                        .help(paceHelp(pace))
                 } else if let note {
                     Label(note.text, systemImage: note.icon)
                         .font(.caption)
@@ -654,12 +663,34 @@ struct AccountRowView: View {
             .padding(.vertical, DS.Spacing.sm)
             .background(
                 (problem.map { DS.presentationColor($0.tone) }
+                    ?? pace.map { _ in DS.presentationColor(.warning) }
                     ?? note.map { DS.presentationColor($0.tone) }
                     ?? Color.secondary).opacity(0.065),
                 in: RoundedRectangle(cornerRadius: DS.Radius.small, style: .continuous)
             )
             .transition(.opacity.combined(with: .move(edge: .top)))
         }
+    }
+
+    private func paceText(_ forecast: PaceForecast) -> String {
+        "On pace to run out around \(paceTime(forecast)) (\(forecast.windowLabel))"
+    }
+
+    private func paceHelp(_ forecast: PaceForecast) -> String {
+        var parts = [
+            "At the recent pace, the \(forecast.windowLabel) limit runs out around \(forecast.depletesAt.formatted(date: .abbreviated, time: .shortened))."
+        ]
+        if let reset = forecast.resetDate {
+            parts.append("The window resets \(reset.formatted(date: .abbreviated, time: .shortened)).")
+        }
+        return parts.joined(separator: " ")
+    }
+
+    private func paceTime(_ forecast: PaceForecast) -> String {
+        if Calendar.current.isDate(forecast.depletesAt, inSameDayAs: Date()) {
+            return forecast.depletesAt.formatted(date: .omitted, time: .shortened)
+        }
+        return forecast.depletesAt.formatted(date: .abbreviated, time: .shortened)
     }
 }
 
@@ -963,7 +994,8 @@ struct AccountCardPreviewGallery: View {
                         window("codex-weekly", .weekly, "Weekly", 91, .warning)
                     ],
                     risk: .depleted,
-                    payAsYouGoState: .enabledActive
+                    payAsYouGoState: .enabledActive,
+                    payAsYouGoSpend: PayAsYouGoSpend(monthlyLimit: 50, usedCredits: 12.5)
                 )
 
                 previewRow(
@@ -1013,6 +1045,7 @@ struct AccountCardPreviewGallery: View {
         risk: RiskLevel = .healthy,
         estimates: [String: BurnRateEstimate] = [:],
         payAsYouGoState: PayAsYouGoState? = nil,
+        payAsYouGoSpend: PayAsYouGoSpend? = nil,
         lastRefreshed: Date? = nil,
         hasSnapshot: Bool = true,
         hasStoredSnapshot: Bool = true
@@ -1041,7 +1074,8 @@ struct AccountCardPreviewGallery: View {
                 source: "Preview",
                 lastRefreshed: lastRefreshed ?? now,
                 parseConfidence: .high,
-                payAsYouGoState: payAsYouGoState
+                payAsYouGoState: payAsYouGoState,
+                payAsYouGoSpend: payAsYouGoSpend
             )
             : nil
 
