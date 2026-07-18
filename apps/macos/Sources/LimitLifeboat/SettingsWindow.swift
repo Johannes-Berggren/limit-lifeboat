@@ -136,6 +136,7 @@ struct SettingsView: View {
                         Toggle("Warn when included usage nears its limit", isOn: $settings.usageAlertsEnabled)
                         Toggle("Alert when an account's quota is likely back", isOn: $settings.resetAlertsEnabled)
                         Toggle("Also alert for the short session window (~5h)", isOn: $settings.sessionWindowAlertsEnabled)
+                        Toggle("Send a weekly usage summary", isOn: $settings.weeklyDigestEnabled)
                         Label(
                             "Session alerts can be chatty during heavy use — every long working session burns that window down.",
                             systemImage: "info.circle"

@@ -53,6 +53,7 @@ final class AppState: ObservableObject {
     private let usageAlertController = UsageAlertController()
     private let resetAlertPlanner = ResetAlertPlanner()
     private let historyStore: UsageHistoryStore?
+    private let eventStore: AppEventStore
     private let burnRateEstimator = BurnRateEstimator()
     private let switchAdvisor = SwitchAdvisor()
     private let settingsWindowController = SettingsWindowController()
@@ -100,6 +101,7 @@ final class AppState: ObservableObject {
             self.historyStore = nil
             AppLog.history.error("Could not open the usage history store: \(error.localizedDescription, privacy: .public)")
         }
+        self.eventStore = AppEventStore(applicationSupportDirectory: repository.applicationSupportDirectory)
         refreshStoredSnapshotStatuses()
         updateMenuBarSummary()
         // History can be tens of thousands of lines; load it off the launch
@@ -113,6 +115,11 @@ final class AppState: ObservableObject {
                 try self.historyStore?.load()
             } catch {
                 AppLog.history.error("Could not load usage history: \(error.localizedDescription, privacy: .public)")
+            }
+            do {
+                try self.eventStore.load()
+            } catch {
+                AppLog.history.error("Could not load the app event log: \(error.localizedDescription, privacy: .public)")
             }
             self.recomputeAllEstimates()
         }
@@ -296,6 +303,65 @@ final class AppState: ObservableObject {
         notifyElapsedResets()
         updateSwitchAdvice()
         updateMenuBarSummary()
+        maybeSendWeeklyDigest()
+    }
+
+    /// Digest due-ness is checked here rather than via a calendar-triggered
+    /// notification: a calendar trigger freezes its content at scheduling
+    /// time and fires when the app is not running — exactly when the numbers
+    /// are stale and the user cannot act. Checked after a refresh, the digest
+    /// is at most one refresh interval old; one due while the app was closed
+    /// arrives on the next launch's first refresh.
+    private func maybeSendWeeklyDigest(now: Date = Date()) {
+        guard settings.weeklyDigestEnabled else {
+            return
+        }
+        let planner = WeeklyDigestPlanner()
+        guard let lastSent = usageAlertController.lastWeeklyDigestSentAt else {
+            // First run arms the schedule without firing — a digest over
+            // history that predates the feature would be near-empty.
+            usageAlertController.markWeeklyDigestSent(at: now)
+            return
+        }
+        guard planner.isDue(lastSent: lastSent, now: now) else {
+            return
+        }
+
+        let period = planner.period(endingAt: now)
+        let accounts = profiles.map { profile -> WeeklyDigestPlanner.AccountInput in
+            var windows: [String: WeeklyDigestPlanner.WindowInput] = [:]
+            for record in historyStore?.records(for: profile.id) ?? [] {
+                for reading in record.windows {
+                    var input = windows[reading.id] ?? WeeklyDigestPlanner.WindowInput(
+                        id: reading.id,
+                        kind: reading.kind,
+                        label: snapshots[profile.id]?.orderedDisplayWindows
+                            .first { $0.id == reading.id }?.label ?? reading.fallbackLabel,
+                        readings: []
+                    )
+                    input.readings.append(BurnRateEstimator.Reading(timestamp: record.timestamp, reading: reading))
+                    windows[reading.id] = input
+                }
+            }
+            return WeeklyDigestPlanner.AccountInput(
+                profileID: profile.id,
+                label: profile.label,
+                provider: profile.provider,
+                windows: Array(windows.values)
+            )
+        }
+
+        let digest = planner.build(
+            accounts: accounts,
+            events: eventStore.events(in: period),
+            period: period
+        )
+        // Marked sent even when there is nothing to say, so an empty week
+        // does not re-run this on every refresh cycle.
+        usageAlertController.markWeeklyDigestSent(at: now)
+        if let digest {
+            usageAlertController.handleWeeklyDigest(digest)
+        }
     }
 
     /// Recomputes the best-switch-target hint from the fresh readings and,
@@ -1096,6 +1162,11 @@ final class AppState: ObservableObject {
         } catch {
             AppLog.history.error("Could not delete usage history for account \(profile.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
+        do {
+            try eventStore.removeAccount(profile.id)
+        } catch {
+            AppLog.history.error("Could not delete switch events for account \(profile.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
         burnRateEstimates[profile.id] = nil
         usageAlertController.forgetProfile(profile.id)
         persistProfiles()
@@ -1245,6 +1316,7 @@ final class AppState: ObservableObject {
             applySnapshot(snapshot, for: outgoing)
         }
 
+        let outgoingProfileID = activeProfile(for: profile.provider)?.id
         do {
             let result = try cliSwitcher.restoreSnapshot(
                 for: profile,
@@ -1260,6 +1332,22 @@ final class AppState: ObservableObject {
 
             statusMessage = "Switched \(profile.provider.displayName) CLI to \(profile.label)."
             AppLog.switching.notice("Switched \(profile.provider.displayName, privacy: .public) CLI to account \(profile.id, privacy: .public) (interactive: \(interactive, privacy: .public))")
+            // The single funnel every switch passes through (manual, auto,
+            // notification click) — the weekly digest counts these events.
+            do {
+                try eventStore.append(
+                    AppEvent(
+                        timestamp: Date(),
+                        kind: .cliSwitch,
+                        provider: profile.provider,
+                        toProfileID: profile.id,
+                        fromProfileID: outgoingProfileID == profile.id ? nil : outgoingProfileID,
+                        interactive: interactive
+                    )
+                )
+            } catch {
+                AppLog.history.error("Could not record the switch event: \(error.localizedDescription, privacy: .public)")
+            }
             refreshStates[profile.id] = .ok
             if interactive {
                 lastManualSwitchAt[profile.provider] = Date()

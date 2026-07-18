@@ -27,6 +27,26 @@ final class UsageAlertController {
     private let thresholdPlanner = ThresholdAlertPlanner()
     private let notifiedResetsKey = "notifiedResetDates"
     private let notifiedPaceKey = "notifiedPaceAlerts"
+    private let weeklyDigestSentKey = "lastWeeklyDigestSentAt"
+
+    /// Dedupe state for the weekly digest, persisted alongside the other
+    /// notified-at records (user *preferences* live in SettingsStore).
+    var lastWeeklyDigestSentAt: Date? {
+        let value = UserDefaults.standard.double(forKey: weeklyDigestSentKey)
+        return value > 0 ? Date(timeIntervalSince1970: value) : nil
+    }
+
+    func markWeeklyDigestSent(at date: Date) {
+        UserDefaults.standard.set(date.timeIntervalSince1970, forKey: weeklyDigestSentKey)
+    }
+
+    func handleWeeklyDigest(_ digest: WeeklyDigest) {
+        postNotification(
+            identifier: "weekly-digest-\(Int(digest.periodEnd.timeIntervalSince1970))",
+            title: digest.title,
+            body: digest.body
+        )
+    }
 
     /// Reset alerts survive relaunches (persisted, keyed by account+window and
     /// reset date) so a restart does not re-announce quotas that were already

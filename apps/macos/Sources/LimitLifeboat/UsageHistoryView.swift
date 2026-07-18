@@ -267,24 +267,8 @@ struct UsageHistoryChartView: View {
     private func label(for reading: UsageWindowReading) -> String {
         // Prefer the real label from the account's current windows; fall
         // back to reconstructing one from the id for windows that no longer
-        // exist ("weekly-fable" → "Weekly (Fable)").
-        if let current = currentWindows.first(where: { $0.id == reading.id }) {
-            return current.label
-        }
-        switch reading.kind {
-        case .session:
-            return "Session"
-        case .weekly:
-            return "Weekly"
-        case .weeklyScoped:
-            let scope = reading.id
-                .replacingOccurrences(of: "weekly-", with: "")
-                .replacingOccurrences(of: "-", with: " ")
-                .capitalized
-            return scope.isEmpty ? "Weekly (scoped)" : "Weekly (\(scope))"
-        case .other:
-            return reading.id.capitalized
-        }
+        // exist.
+        currentWindows.first(where: { $0.id == reading.id })?.label ?? reading.fallbackLabel
     }
 }
 
