@@ -38,18 +38,23 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
     }
 
     @objc private func togglePopover(_ sender: AnyObject?) {
-        guard let button = statusItem.button else {
-            return
-        }
-
         if popover.isShown {
             popover.performClose(sender)
         } else {
-            state.setAuthObservationInteractive(true)
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            popover.contentViewController?.view.window?.makeKey()
-            state.refreshIfStale()
+            showPopover()
         }
+    }
+
+    /// Opens the popover if it is not already shown — the landing spot for a
+    /// tapped notification body.
+    func showPopover() {
+        guard !popover.isShown, let button = statusItem.button else {
+            return
+        }
+        state.setAuthObservationInteractive(true)
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.contentViewController?.view.window?.makeKey()
+        state.refreshIfStale()
     }
 
     func popoverDidClose(_ notification: Notification) {

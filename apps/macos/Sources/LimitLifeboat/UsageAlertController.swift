@@ -3,6 +3,22 @@ import Foundation
 import LimitLifeboatCore
 import UserNotifications
 
+/// Category/action identifiers for the actionable "switch" notifications.
+/// Action titles are fixed at registration (dynamic per-target titles would
+/// require re-registering the category set before every post, which relabels
+/// already-delivered notifications), so the target lives in `userInfo` and
+/// the click re-resolves against live advice. File-scope (not nested in the
+/// controller) so the nonisolated notification-delegate callbacks can read it.
+enum NotificationSwitchAction {
+    static let categoryBest = "limit-switch"
+    static let categoryThisAccount = "limit-switch-here"
+    static let actionID = "switch-now"
+    static let actionKey = "action"
+    static let actionValue = "switch"
+    static let providerKey = "provider"
+    static let targetKey = "target"
+}
+
 @MainActor
 final class UsageAlertController {
     private var lastNotifiedRisk: [AlertWindowKey: RiskLevel] = [:]
@@ -43,7 +59,7 @@ final class UsageAlertController {
         return result
     }
 
-    func handlePaceAlert(_ alert: PaceAlert, provider: Provider) {
+    func handlePaceAlert(_ alert: PaceAlert, provider: Provider, advisedTargetID: UUID? = nil) {
         markWindowNotified(
             defaultsKey: notifiedPaceKey,
             profileID: alert.profileID,
@@ -64,7 +80,9 @@ final class UsageAlertController {
         postNotification(
             identifier: "pace-\(alert.profileID.uuidString)-\(alert.windowID)-\(Int(alert.projectedDepletion.timeIntervalSince1970))",
             title: "\(alert.profileLabel): on pace to hit the \(alert.windowLabel) limit",
-            body: parts.joined(separator: " ")
+            body: parts.joined(separator: " "),
+            categoryIdentifier: NotificationSwitchAction.categoryBest,
+            userInfo: switchUserInfo(provider: provider, targetID: advisedTargetID)
         )
     }
 
@@ -104,7 +122,13 @@ final class UsageAlertController {
         UserDefaults.standard.set(stored, forKey: defaultsKey)
     }
 
-    private func postNotification(identifier: String, title: String, body: String) {
+    private func postNotification(
+        identifier: String,
+        title: String,
+        body: String,
+        categoryIdentifier: String? = nil,
+        userInfo: [String: Any]? = nil
+    ) {
         // UNUserNotificationCenter requires a real bundle; an unbundled
         // `swift run` must not crash.
         guard Bundle.main.bundleIdentifier != nil else {
@@ -114,9 +138,38 @@ final class UsageAlertController {
         content.title = title
         content.body = body
         content.sound = .default
+        if let categoryIdentifier {
+            content.categoryIdentifier = categoryIdentifier
+        }
+        if let userInfo {
+            content.userInfo = userInfo
+        }
         let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
         NSApplication.shared.requestUserAttention(.informationalRequest)
+    }
+
+    /// The switch-action payload. The posted-time target is a fallback only;
+    /// the click handler re-resolves against live advice.
+    private func switchUserInfo(provider: Provider, targetID: UUID?) -> [String: Any] {
+        var info: [String: Any] = [
+            NotificationSwitchAction.actionKey: NotificationSwitchAction.actionValue,
+            NotificationSwitchAction.providerKey: provider.rawValue
+        ]
+        if let targetID {
+            info[NotificationSwitchAction.targetKey] = targetID.uuidString
+        }
+        return info
+    }
+
+    /// Feedback for a clicked switch action that did not result in a switch —
+    /// the user acted on a notification, so silence would read as a break.
+    func handleNotificationSwitchOutcome(title: String, body: String) {
+        postNotification(
+            identifier: "switch-outcome-\(Int(Date().timeIntervalSince1970))",
+            title: title,
+            body: body
+        )
     }
 
     func handleResetElapsed(_ alert: ResetAlert) {
@@ -129,7 +182,9 @@ final class UsageAlertController {
         postNotification(
             identifier: "reset-\(alert.profileID.uuidString)-\(alert.windowID)-\(Int(alert.resetDate.timeIntervalSince1970))",
             title: "\(alert.profileLabel): \(alert.windowLabel) quota likely back",
-            body: "The \(alert.provider.displayName) \(alert.windowLabel) limit window has rolled over since the last reading. Switch the CLI to \(alert.profileLabel) to keep using included usage."
+            body: "The \(alert.provider.displayName) \(alert.windowLabel) limit window has rolled over since the last reading. Switch the CLI to \(alert.profileLabel) to keep using included usage.",
+            categoryIdentifier: NotificationSwitchAction.categoryThisAccount,
+            userInfo: switchUserInfo(provider: alert.provider, targetID: alert.profileID)
         )
     }
 
@@ -139,13 +194,34 @@ final class UsageAlertController {
         guard Bundle.main.bundleIdentifier != nil else {
             return
         }
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        let switchToBest = UNNotificationCategory(
+            identifier: NotificationSwitchAction.categoryBest,
+            actions: [
+                UNNotificationAction(identifier: NotificationSwitchAction.actionID, title: "Switch to Best Account")
+            ],
+            intentIdentifiers: []
+        )
+        let switchToThisAccount = UNNotificationCategory(
+            identifier: NotificationSwitchAction.categoryThisAccount,
+            actions: [
+                UNNotificationAction(identifier: NotificationSwitchAction.actionID, title: "Switch to This Account")
+            ],
+            intentIdentifiers: []
+        )
+        center.setNotificationCategories([switchToBest, switchToThisAccount])
     }
 
     /// Per-window near-limit alerts. Session (5h) windows only notify when the
     /// user opts in — heavy sessions would fire on every burn-down.
     /// Each window re-arms once it drops back below the warning band.
-    func handleThresholds(snapshot: UsageSnapshot, profile: AccountProfile, includeSessionWindows: Bool = false) {
+    func handleThresholds(
+        snapshot: UsageSnapshot,
+        profile: AccountProfile,
+        includeSessionWindows: Bool = false,
+        advisedTargetID: UUID? = nil
+    ) {
         guard Bundle.main.bundleIdentifier != nil else {
             return
         }
@@ -166,7 +242,9 @@ final class UsageAlertController {
             postNotification(
                 identifier: "usage-\(alert.profileID.uuidString)-\(alert.windowID)-\(alert.riskLevel.rawValue)",
                 title: notificationTitle(alert: alert, profile: profile),
-                body: notificationBody(alert: alert, snapshot: snapshot, profile: profile)
+                body: notificationBody(alert: alert, snapshot: snapshot, profile: profile),
+                categoryIdentifier: NotificationSwitchAction.categoryBest,
+                userInfo: switchUserInfo(provider: profile.provider, targetID: advisedTargetID)
             )
         }
     }

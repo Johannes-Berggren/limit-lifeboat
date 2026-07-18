@@ -306,21 +306,78 @@ final class AppState: ObservableObject {
         // provider-scoped, so a Claude account can't be a switch target for a
         // depleted Codex login. The advisor itself is provider-agnostic.
         for provider in Provider.allCases {
-            let candidates = profiles
-                .filter { $0.provider == provider }
-                .map { profile in
-                    SwitchCandidate(
-                        profileID: profile.id,
-                        label: profile.label,
-                        isActiveCLI: profile.isActiveCLI,
-                        hasStoredCredentials: hasStoredSnapshot(for: profile)
-                            && !(refreshStates[profile.id]?.requiresLogin ?? false),
-                        snapshot: snapshots[profile.id]
-                    )
-                }
-            let advice = switchAdvisor.advise(candidates: candidates)
+            let advice = switchAdvisor.advise(candidates: switchCandidates(for: provider))
             switchAdvice[provider] = advice
             maybeAutoSwitch(provider: provider, advice: advice)
+        }
+    }
+
+    private func switchCandidates(for provider: Provider) -> [SwitchCandidate] {
+        profiles
+            .filter { $0.provider == provider }
+            .map { profile in
+                SwitchCandidate(
+                    profileID: profile.id,
+                    label: profile.label,
+                    isActiveCLI: profile.isActiveCLI,
+                    hasStoredCredentials: hasStoredSnapshot(for: profile)
+                        && !(refreshStates[profile.id]?.requiresLogin ?? false),
+                    snapshot: snapshots[profile.id]
+                )
+            }
+    }
+
+    /// A clicked "Switch" button on a notification. The notification may be
+    /// hours old, so the embedded target is only a fallback — the click
+    /// re-resolves against the current advice (see NotificationSwitchResolver).
+    /// The user acted deliberately, so every outcome is answered with a
+    /// notification rather than failing silently into a closed popover.
+    func performNotificationSwitch(provider: Provider, embeddedTargetID: UUID?) async {
+        let resolution = NotificationSwitchResolver().resolve(
+            embeddedTargetID: embeddedTargetID,
+            advice: switchAdvice[provider],
+            candidates: switchCandidates(for: provider)
+        )
+        switch resolution {
+        case .switchTo(let profileID, let label):
+            guard let target = profiles.first(where: { $0.id == profileID }) else {
+                usageAlertController.handleNotificationSwitchOutcome(
+                    title: "Could not switch",
+                    body: "\(label) is no longer saved in Limit Lifeboat."
+                )
+                return
+            }
+            let previousLabel = activeProfile(for: provider)?.label
+            // interactive: false — a notification click has no key window to
+            // anchor confirmation modals on; problems surface as notifications.
+            if await switchCLI(to: target, interactive: false) {
+                // The user chose this switch, so auto-switch must honor it the
+                // same way it honors an in-app manual switch.
+                lastManualSwitchAt[provider] = Date()
+                usageAlertController.handleAutoSwitch(
+                    fromLabel: previousLabel,
+                    toLabel: target.label,
+                    provider: provider,
+                    reason: nil
+                )
+            } else {
+                usageAlertController.handleNotificationSwitchOutcome(
+                    title: "Could not switch to \(target.label)",
+                    body: statusMessage.isEmpty
+                        ? "Open Limit Lifeboat for details."
+                        : statusMessage
+                )
+            }
+        case .alreadyActive(let label):
+            usageAlertController.handleNotificationSwitchOutcome(
+                title: "Already on \(label)",
+                body: "The \(provider.displayName) CLI is already using \(label)."
+            )
+        case .noEligibleTarget(let reason):
+            usageAlertController.handleNotificationSwitchOutcome(
+                title: "No account ready to switch to",
+                body: "\(reason) Open Limit Lifeboat to check your accounts."
+            )
         }
     }
 
@@ -872,7 +929,8 @@ final class AppState: ObservableObject {
             usageAlertController.handleThresholds(
                 snapshot: snapshot,
                 profile: profile,
-                includeSessionWindows: settings.sessionWindowAlertsEnabled
+                includeSessionWindows: settings.sessionWindowAlertsEnabled,
+                advisedTargetID: switchAdvice[profile.provider]?.bestCandidateID
             )
             notifyPaceAlerts(snapshot: snapshot, profile: profile)
         } else {
@@ -893,7 +951,11 @@ final class AppState: ObservableObject {
             alreadyNotified: usageAlertController.notifiedPaceKeys()
         )
         for alert in alerts {
-            usageAlertController.handlePaceAlert(alert, provider: profile.provider)
+            usageAlertController.handlePaceAlert(
+                alert,
+                provider: profile.provider,
+                advisedTargetID: switchAdvice[profile.provider]?.bestCandidateID
+            )
         }
     }
 
