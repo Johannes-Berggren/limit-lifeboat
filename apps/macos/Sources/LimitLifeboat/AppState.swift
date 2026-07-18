@@ -55,7 +55,6 @@ final class AppState: ObservableObject {
     private let historyStore: UsageHistoryStore?
     private let burnRateEstimator = BurnRateEstimator()
     private let switchAdvisor = SwitchAdvisor()
-    private let paceAlertPlanner = PaceAlertPlanner()
     private let settingsWindowController = SettingsWindowController()
     private let terminalLauncher = TerminalCommandLauncher()
     private var refreshTask: Task<Void, Never>?
@@ -870,7 +869,11 @@ final class AppState: ObservableObject {
         // snapshots still re-arm the dedupe keys so a healed window can
         // alert again once the account becomes active.
         if settings.usageAlertsEnabled, profile.isActiveCLI {
-            usageAlertController.handleThresholds(snapshot: snapshot, profile: profile)
+            usageAlertController.handleThresholds(
+                snapshot: snapshot,
+                profile: profile,
+                includeSessionWindows: settings.sessionWindowAlertsEnabled
+            )
             notifyPaceAlerts(snapshot: snapshot, profile: profile)
         } else {
             usageAlertController.rearmThresholds(snapshot: snapshot, profile: profile)
@@ -879,10 +882,11 @@ final class AppState: ObservableObject {
         statusMessage = "\(profile.label): \(snapshot.message)"
     }
 
-    /// "On pace to run out before the reset" — weekly windows only, active
-    /// account only, once per reset period (mirrors the reset-alert dedupe).
+    /// "On pace to run out before the reset" — weekly windows (plus sessions
+    /// when opted in), active account only, once per reset period (mirrors
+    /// the reset-alert dedupe).
     private func notifyPaceAlerts(snapshot: UsageSnapshot, profile: AccountProfile) {
-        let alerts = paceAlertPlanner.alerts(
+        let alerts = PaceAlertPlanner(includeSessionWindows: settings.sessionWindowAlertsEnabled).alerts(
             snapshot: snapshot,
             profile: profile,
             estimates: burnRateEstimates[profile.id] ?? [:],

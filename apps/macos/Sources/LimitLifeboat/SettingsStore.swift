@@ -26,6 +26,12 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(resetAlertsEnabled, forKey: Keys.resetAlertsEnabled) }
     }
 
+    /// Opt-in: let the fast ~5h session window join the near-limit and pace
+    /// alerts. Off by default — heavy sessions would notify on every burn-down.
+    @Published var sessionWindowAlertsEnabled: Bool {
+        didSet { defaults.set(sessionWindowAlertsEnabled, forKey: Keys.sessionWindowAlertsEnabled) }
+    }
+
     /// Controls the organization component of account-card subtitles. The
     /// identity remains stored and available for account matching either way.
     @Published var showOrganizationNames: Bool {
@@ -43,6 +49,7 @@ final class SettingsStore: ObservableObject {
         self.usageAlertsEnabled = defaults.object(forKey: Keys.usageAlertsEnabled) as? Bool ?? true
         self.autoSwitchEnabled = defaults.object(forKey: Keys.autoSwitchEnabled) as? Bool ?? false
         self.resetAlertsEnabled = defaults.object(forKey: Keys.resetAlertsEnabled) as? Bool ?? true
+        self.sessionWindowAlertsEnabled = defaults.object(forKey: Keys.sessionWindowAlertsEnabled) as? Bool ?? false
         self.showOrganizationNames = defaults.object(forKey: Keys.showOrganizationNames) as? Bool ?? true
     }
 
@@ -51,6 +58,7 @@ final class SettingsStore: ObservableObject {
         static let usageAlertsEnabled = "usageAlertsEnabled"
         static let autoSwitchEnabled = "autoSwitchEnabled"
         static let resetAlertsEnabled = "resetAlertsEnabled"
+        static let sessionWindowAlertsEnabled = "sessionWindowAlertsEnabled"
         static let showOrganizationNames = "showOrganizationNames"
     }
 }

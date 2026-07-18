@@ -6,6 +6,8 @@ import UserNotifications
 @MainActor
 final class UsageAlertController {
     private var lastNotifiedRisk: [AlertWindowKey: RiskLevel] = [:]
+    /// Only used for `currentRisk` re-arming, which is session-flag-independent;
+    /// alert planning constructs a planner per call with the user's setting.
     private let thresholdPlanner = ThresholdAlertPlanner()
     private let notifiedResetsKey = "notifiedResetDates"
     private let notifiedPaceKey = "notifiedPaceAlerts"
@@ -140,10 +142,10 @@ final class UsageAlertController {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    /// Per-window near-limit alerts. Session (5h) windows never notify —
-    /// heavy sessions would fire on every burn-down; they stay visual-only.
+    /// Per-window near-limit alerts. Session (5h) windows only notify when the
+    /// user opts in — heavy sessions would fire on every burn-down.
     /// Each window re-arms once it drops back below the warning band.
-    func handleThresholds(snapshot: UsageSnapshot, profile: AccountProfile) {
+    func handleThresholds(snapshot: UsageSnapshot, profile: AccountProfile, includeSessionWindows: Bool = false) {
         guard Bundle.main.bundleIdentifier != nil else {
             return
         }
@@ -154,7 +156,7 @@ final class UsageAlertController {
 
         rearmRecoveredWindows(snapshot: snapshot, profile: profile)
 
-        let alerts = thresholdPlanner.alerts(
+        let alerts = ThresholdAlertPlanner(includeSessionWindows: includeSessionWindows).alerts(
             snapshot: snapshot,
             profile: profile,
             lastNotified: lastNotifiedRisk

@@ -103,15 +103,7 @@ final class PaceAlertPlannerTests: XCTestCase {
     }
 
     func testSessionWindowNeverFires() {
-        let sessionWindow = UsageWindow(
-            id: "session",
-            kind: .session,
-            label: "Session",
-            usedPercent: 70,
-            resetDate: now.addingTimeInterval(3_600),
-            riskLevel: .healthy
-        )
-        let snapshot = windowedSnapshot([sessionWindow])
+        let snapshot = windowedSnapshot([sessionWindow(resetDate: now.addingTimeInterval(3_600))])
 
         XCTAssertTrue(
             planner.alerts(
@@ -119,6 +111,82 @@ final class PaceAlertPlannerTests: XCTestCase {
                 profile: profile,
                 estimates: ["session": .depletesAt(now.addingTimeInterval(1_800))],
                 alreadyNotified: [:],
+                now: now
+            ).isEmpty
+        )
+    }
+
+    func testSessionWindowFiresWhenOptedIn() {
+        let optedIn = PaceAlertPlanner(includeSessionWindows: true)
+        let resetDate = now.addingTimeInterval(3_600)
+        let depletion = now.addingTimeInterval(1_800)
+        let snapshot = windowedSnapshot([sessionWindow(resetDate: resetDate)])
+
+        let alerts = optedIn.alerts(
+            snapshot: snapshot,
+            profile: profile,
+            estimates: ["session": .depletesAt(depletion)],
+            alreadyNotified: [:],
+            now: now
+        )
+
+        XCTAssertEqual(alerts.map(\.windowID), ["session"])
+        XCTAssertEqual(alerts[0].projectedDepletion, depletion)
+    }
+
+    /// The load-bearing tolerance split: consecutive ~5h session resets sit
+    /// well inside the 24h weekly tolerance, so with a single tolerance a
+    /// session alert would fire once and never re-arm. The next session
+    /// period (hours later) must count as a NEW reset.
+    func testSessionAlertRearmsForTheNextSessionPeriod() {
+        let optedIn = PaceAlertPlanner(includeSessionWindows: true)
+        let previousReset = now.addingTimeInterval(-3_600)
+        let currentReset = previousReset.addingTimeInterval(5 * 3_600)
+        let snapshot = windowedSnapshot([sessionWindow(resetDate: currentReset)])
+
+        let alerts = optedIn.alerts(
+            snapshot: snapshot,
+            profile: profile,
+            estimates: ["session": .depletesAt(now.addingTimeInterval(1_800))],
+            alreadyNotified: [AlertWindowKey(profileID: profile.id, windowID: "session"): previousReset],
+            now: now
+        )
+
+        XCTAssertEqual(alerts.count, 1)
+    }
+
+    /// Minutes-scale reset-date jitter (API vs TUI re-anchoring) within the
+    /// same session period must still dedupe.
+    func testSessionAlertDedupesWithinTheSamePeriodDespiteJitter() {
+        let optedIn = PaceAlertPlanner(includeSessionWindows: true)
+        let storedReset = now.addingTimeInterval(3_600)
+        let jitteredReset = storedReset.addingTimeInterval(-10 * 60)
+        let snapshot = windowedSnapshot([sessionWindow(resetDate: jitteredReset)])
+
+        XCTAssertTrue(
+            optedIn.alerts(
+                snapshot: snapshot,
+                profile: profile,
+                estimates: ["session": .depletesAt(now.addingTimeInterval(1_800))],
+                alreadyNotified: [AlertWindowKey(profileID: profile.id, windowID: "session"): storedReset],
+                now: now
+            ).isEmpty
+        )
+    }
+
+    /// Opting sessions in must not loosen the weekly dedupe.
+    func testWeeklyDedupeUnchangedWhenSessionsOptedIn() {
+        let optedIn = PaceAlertPlanner(includeSessionWindows: true)
+        let apiReset = now.addingTimeInterval(3 * 86_400 + 250)
+        let parsedReset = apiReset.addingTimeInterval(-600)
+        let snapshot = windowedSnapshot([weeklyWindow(resetDate: parsedReset)])
+
+        XCTAssertTrue(
+            optedIn.alerts(
+                snapshot: snapshot,
+                profile: profile,
+                estimates: ["weekly-all": .depletesAt(now.addingTimeInterval(86_400))],
+                alreadyNotified: [AlertWindowKey(profileID: profile.id, windowID: "weekly-all"): apiReset],
                 now: now
             ).isEmpty
         )
@@ -260,6 +328,17 @@ final class PaceAlertPlannerTests: XCTestCase {
             id: id,
             kind: kind,
             label: label,
+            usedPercent: usedPercent,
+            resetDate: resetDate,
+            riskLevel: UsageThresholds.standard.riskLevel(usedPercent: usedPercent)
+        )
+    }
+
+    private func sessionWindow(usedPercent: Double = 70, resetDate: Date?) -> UsageWindow {
+        UsageWindow(
+            id: "session",
+            kind: .session,
+            label: "Session",
             usedPercent: usedPercent,
             resetDate: resetDate,
             riskLevel: UsageThresholds.standard.riskLevel(usedPercent: usedPercent)
