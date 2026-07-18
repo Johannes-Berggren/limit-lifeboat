@@ -159,6 +159,52 @@ public enum PayAsYouGoState: String, Codable, Sendable {
     case enabledActive
 }
 
+/// The pay-as-you-go spend figures the usage API reports alongside
+/// `PayAsYouGoState`. Display-only: `usedCredits` is cumulative for the
+/// billing month and stays non-zero after a rate-limit window resets, so it
+/// must never drive `payAsYouGoState`/`billingUsageMode` (see the trigger
+/// rationale in `ClaudeUsageAPIClient.payAsYouGoState(for:)`).
+public struct PayAsYouGoSpend: Codable, Equatable, Sendable {
+    public var monthlyLimit: Double?
+    /// Cumulative extra-usage spend for the current billing month.
+    public var usedCredits: Double?
+    /// The API's own used/limit ratio; shape unconfirmed (fraction vs
+    /// percent), so it is only a last-resort display fallback.
+    public var utilization: Double?
+
+    public init(monthlyLimit: Double? = nil, usedCredits: Double? = nil, utilization: Double? = nil) {
+        self.monthlyLimit = monthlyLimit
+        self.usedCredits = usedCredits
+        self.utilization = utilization
+    }
+
+    /// The one-line human summary, or nil when nothing usable was reported.
+    public var summaryText: String? {
+        if let usedCredits {
+            if let monthlyLimit {
+                return "\(Self.formatCredits(usedCredits)) of \(Self.formatCredits(monthlyLimit)) extra usage this month"
+            }
+            return "\(Self.formatCredits(usedCredits)) extra usage this month"
+        }
+        if let utilization {
+            let percent = utilization <= 1 ? utilization * 100 : utilization
+            return "Extra usage at \(Int(percent.rounded()))% of this month's cap"
+        }
+        return nil
+    }
+
+    /// The single home for credit formatting. The API's units are assumed to
+    /// be dollars (unverified against a live overage response); if they turn
+    /// out to be cents, this is the one line to fix.
+    private static func formatCredits(_ value: Double) -> String {
+        let rounded = (value * 100).rounded() / 100
+        if rounded == rounded.rounded() {
+            return "$\(Int(rounded))"
+        }
+        return String(format: "$%.2f", rounded)
+    }
+}
+
 public enum WebDataStoreKind: String, Codable, Sendable {
     case appDefault
     case isolated

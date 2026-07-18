@@ -406,6 +406,31 @@ final class ClaudeUsageAPIClientTests: XCTestCase {
         let usage = ClaudeAPIUsage(windows: [ClaudeAPIUsageWindow(kindRaw: "session", usedPercent: 10)])
         let snapshot = ClaudeUsageAPIClient().makeSnapshot(for: claudeProfile, usage: usage)
         XCTAssertNil(snapshot.payAsYouGoState)
+        XCTAssertNil(snapshot.payAsYouGoSpend)
+    }
+
+    /// Spend figures are display-only but carried even while overage is idle,
+    /// so the popover can show the month's spend before included usage runs out.
+    func testMakeSnapshotCarriesSpendFiguresWhenOverageEnabled() {
+        let usage = ClaudeAPIUsage(
+            windows: [ClaudeAPIUsageWindow(kindRaw: "session", usedPercent: 40)],
+            extraUsage: ClaudeAPIExtraUsage(isEnabled: true, monthlyLimit: 50, usedCredits: 12.5, utilization: 25)
+        )
+        let snapshot = ClaudeUsageAPIClient().makeSnapshot(for: claudeProfile, usage: usage)
+
+        XCTAssertEqual(snapshot.payAsYouGoState, .enabledIdle)
+        XCTAssertEqual(snapshot.payAsYouGoSpend, PayAsYouGoSpend(monthlyLimit: 50, usedCredits: 12.5, utilization: 25))
+        // Spend never flips the billing mode on its own.
+        XCTAssertEqual(snapshot.billingUsageMode, .includedSubscription)
+    }
+
+    func testMakeSnapshotDisabledOverageCarriesNoSpend() {
+        let usage = ClaudeAPIUsage(
+            windows: [ClaudeAPIUsageWindow(kindRaw: "session", usedPercent: 40)],
+            extraUsage: ClaudeAPIExtraUsage(isEnabled: false, monthlyLimit: 50, usedCredits: 12.5)
+        )
+        let snapshot = ClaudeUsageAPIClient().makeSnapshot(for: claudeProfile, usage: usage)
+        XCTAssertNil(snapshot.payAsYouGoSpend)
     }
 
     private var claudeProfile: AccountProfile {

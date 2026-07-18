@@ -681,6 +681,12 @@ struct BillingStatusView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            if let spendText {
+                Label(spendText, systemImage: "creditcard")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let planLabel, !planLabel.isEmpty {
                 Label("\(planLabel) plan", systemImage: "person.text.rectangle")
                     .font(.caption2)
@@ -701,6 +707,13 @@ struct BillingStatusView: View {
 
     private var mode: BillingUsageMode {
         snapshot?.billingUsageMode ?? .unknown
+    }
+
+    /// Month-to-date overage spend, shown whenever overage is enabled (spend
+    /// is nil when it is off). Cumulative for the billing month, so it stays
+    /// visible after windows reset without implying active billing.
+    private var spendText: String? {
+        snapshot?.payAsYouGoSpend?.summaryText
     }
 
     private var title: String {

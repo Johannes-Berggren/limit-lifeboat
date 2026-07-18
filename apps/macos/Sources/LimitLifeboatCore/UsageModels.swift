@@ -97,6 +97,9 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
     /// nil for TUI/dashboard snapshots and legacy files, which fall back to the
     /// keyword scan in `billingUsageMode`.
     public var payAsYouGoState: PayAsYouGoState?
+    /// The overage spend figures ("$12.50 of $50 this month") when the source
+    /// reports them. Display-only — never feeds `billingUsageMode`.
+    public var payAsYouGoSpend: PayAsYouGoSpend?
 
     public init(
         accountID: UUID,
@@ -112,7 +115,8 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         lastRefreshed: Date = Date(),
         parseConfidence: ParseConfidence = .none,
         message: String = "",
-        payAsYouGoState: PayAsYouGoState? = nil
+        payAsYouGoState: PayAsYouGoState? = nil,
+        payAsYouGoSpend: PayAsYouGoSpend? = nil
     ) {
         self.accountID = accountID
         self.provider = provider
@@ -128,6 +132,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         self.parseConfidence = parseConfidence
         self.message = message
         self.payAsYouGoState = payAsYouGoState
+        self.payAsYouGoSpend = payAsYouGoSpend
     }
 
     public var remainingFraction: Double? {
@@ -359,6 +364,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         case parseConfidence
         case message
         case payAsYouGoState
+        case payAsYouGoSpend
     }
 
     // Manual conformance so snapshots persisted before `windows` existed still
@@ -382,6 +388,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         self.parseConfidence = try container.decode(ParseConfidence.self, forKey: .parseConfidence)
         self.message = try container.decode(String.self, forKey: .message)
         self.payAsYouGoState = try container.decodeIfPresent(PayAsYouGoState.self, forKey: .payAsYouGoState)
+        self.payAsYouGoSpend = try container.decodeIfPresent(PayAsYouGoSpend.self, forKey: .payAsYouGoSpend)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -400,5 +407,6 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         try container.encode(parseConfidence, forKey: .parseConfidence)
         try container.encode(message, forKey: .message)
         try container.encodeIfPresent(payAsYouGoState, forKey: .payAsYouGoState)
+        try container.encodeIfPresent(payAsYouGoSpend, forKey: .payAsYouGoSpend)
     }
 }
