@@ -988,6 +988,30 @@ final class AppState: ObservableObject {
         historyStore?.records(for: profile.id) ?? []
     }
 
+    /// The Settings-window "export everything" flow: every account's retained
+    /// history in one CSV.
+    func exportAllUsageHistoryCSV() {
+        guard let historyStore else {
+            statusMessage = "Usage history is unavailable — see Copy Diagnostics for the reason."
+            return
+        }
+        var recordsByAccount: [UUID: [UsageHistoryRecord]] = [:]
+        var descriptors: [UUID: UsageHistoryCSVExporter.AccountDescriptor] = [:]
+        for profile in profiles {
+            let records = historyStore.records(for: profile.id)
+            guard !records.isEmpty else {
+                continue
+            }
+            recordsByAccount[profile.id] = records
+            descriptors[profile.id] = .init(label: profile.label, provider: profile.provider)
+        }
+        let csv = UsageHistoryCSVExporter().csv(records: recordsByAccount, accounts: descriptors)
+        UsageHistoryCSVSaver.save(
+            csv: csv,
+            suggestedName: UsageHistoryCSVSaver.fileName(scope: "all-accounts")
+        )
+    }
+
     // MARK: - Dashboard fallback
 
     @discardableResult

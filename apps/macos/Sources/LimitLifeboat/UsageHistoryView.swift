@@ -1,6 +1,8 @@
+import AppKit
 import Charts
 import LimitLifeboatCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Usage-over-time line chart for one account, one series per quota window.
 /// Opened from the account card's "…" menu.
@@ -138,6 +140,9 @@ struct UsageHistoryChartView: View {
                 }
 
                 HStack {
+                    Button("Export CSV…") { exportCSV() }
+                        .help("Saves this account's full retained history (up to 30 days) as CSV — not just the visible range.")
+                        .disabled(records.isEmpty)
                     Spacer()
                     Button("Done") { dismiss() }
                         .keyboardShortcut(.defaultAction)
@@ -187,6 +192,17 @@ struct UsageHistoryChartView: View {
             .sorted { $0.label.localizedStandardCompare($1.label) == .orderedAscending }
     }
 
+    private func exportCSV() {
+        let csv = UsageHistoryCSVExporter().csv(
+            records: [profile.id: records],
+            accounts: [profile.id: .init(label: profile.label, provider: profile.provider)]
+        )
+        UsageHistoryCSVSaver.save(
+            csv: csv,
+            suggestedName: UsageHistoryCSVSaver.fileName(scope: profile.label)
+        )
+    }
+
     private func label(for reading: UsageWindowReading) -> String {
         // Prefer the real label from the account's current windows; fall
         // back to reconstructing one from the id for windows that no longer
@@ -207,6 +223,37 @@ struct UsageHistoryChartView: View {
             return scope.isEmpty ? "Weekly (scoped)" : "Weekly (\(scope))"
         case .other:
             return reading.id.capitalized
+        }
+    }
+}
+
+/// The shared save-panel flow for CSV exports (per-account from the history
+/// sheet, all-accounts from Settings).
+@MainActor
+enum UsageHistoryCSVSaver {
+    static func fileName(scope: String) -> String {
+        let slug = UsageWindowID.slug(scope)
+        let date = Date().formatted(.iso8601.year().month().day())
+        return "limit-lifeboat-usage-\(slug)-\(date).csv"
+    }
+
+    static func save(csv: String, suggestedName: String) {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.commaSeparatedText]
+        panel.nameFieldStringValue = suggestedName
+        panel.canCreateDirectories = true
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+        do {
+            try Data(csv.utf8).write(to: url)
+        } catch {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Could not save the CSV export"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
         }
     }
 }
