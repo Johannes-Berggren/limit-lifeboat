@@ -101,6 +101,22 @@ struct UsageHistoryChartView: View {
                             }
                         }
 
+                        if !trends.isEmpty {
+                            VStack(alignment: .leading, spacing: DS.Spacing.xs) {
+                                ForEach(trends, id: \.window.id) { item in
+                                    HStack(spacing: DS.Spacing.tight) {
+                                        Circle()
+                                            .fill(seriesColor(for: item.window.label))
+                                            .frame(width: 7, height: 7)
+                                        Text(trendText(window: item.window, trend: item.trend))
+                                            .font(.caption)
+                                            .foregroundStyle(trendColor(item.trend))
+                                            .lineLimit(1)
+                                    }
+                                }
+                            }
+                        }
+
                         Chart(points) { point in
                             LineMark(
                                 x: .value("Time", point.timestamp),
@@ -190,6 +206,51 @@ struct UsageHistoryChartView: View {
                 return LatestValue(label: label, usedPercent: latest.usedPercent)
             }
             .sorted { $0.label.localizedStandardCompare($1.label) == .orderedAscending }
+    }
+
+    /// Week-over-week trends for the weekly-shaped windows, computed over the
+    /// FULL retained history (the visible scope is often shorter than the two
+    /// window lives the comparison needs). Windows with insufficient history
+    /// render nothing.
+    private var trends: [(window: UsageWindow, trend: UsageTrend)] {
+        let analyzer = UsageTrendAnalyzer()
+        return currentWindows
+            .filter { $0.kind == .weekly || $0.kind == .weeklyScoped }
+            .compactMap { window in
+                let readings = records.compactMap { record -> BurnRateEstimator.Reading? in
+                    guard let reading = record.windows.first(where: { $0.id == window.id }) else {
+                        return nil
+                    }
+                    return BurnRateEstimator.Reading(timestamp: record.timestamp, reading: reading)
+                }
+                guard let trend = analyzer.periodOverPeriodTrend(readings: readings, window: window) else {
+                    return nil
+                }
+                return (window, trend)
+            }
+    }
+
+    private func trendText(window: UsageWindow, trend: UsageTrend) -> String {
+        let current = Int(trend.currentUsedPercent.rounded())
+        guard let relative = trend.relativeChange else {
+            let delta = Int(trend.deltaPercentagePoints.rounded())
+            if abs(delta) < 2 {
+                return "\(window.label): \(current)% used — about the same as last week"
+            }
+            return "\(window.label): \(current)% used — \(delta > 0 ? "+" : "")\(delta) pts vs last week"
+        }
+        let percent = Int((abs(relative) * 100).rounded())
+        if percent < 5 {
+            return "\(window.label): \(current)% used — about the same pace as last week"
+        }
+        return "\(window.label): \(current)% used — ~\(percent)% \(relative > 0 ? "faster" : "slower") than last week"
+    }
+
+    private func trendColor(_ trend: UsageTrend) -> Color {
+        guard let relative = trend.relativeChange, relative >= 0.05 else {
+            return .secondary
+        }
+        return DS.presentationColor(.warning)
     }
 
     private func exportCSV() {
