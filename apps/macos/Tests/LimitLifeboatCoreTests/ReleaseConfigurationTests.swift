@@ -79,7 +79,7 @@ final class ReleaseConfigurationTests: XCTestCase {
         XCTAssertTrue(release.contains("anchor apple"))
         XCTAssertTrue(release.contains("subject.OU] = \\\"$TEAM_ID\\\""))
         XCTAssertTrue(ci.contains("Validate stable distribution signing policy"))
-        XCTAssertTrue(ci.contains(#"codesign --display --requirements - "$APP_DIR""#))
+        XCTAssertTrue(ci.contains(#"codesign --display --requirements - \"\$APP_DIR\""#))
         XCTAssertTrue(ci.contains("teamIdentifier == DistributionIdentity.appleTeamIdentifier"))
     }
 
