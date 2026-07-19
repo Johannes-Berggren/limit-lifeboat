@@ -121,11 +121,11 @@ jobs:
           set -euo pipefail
           release="apps/macos/scripts/release.sh"
           runtime="apps/macos/Sources/LimitLifeboat/AppMain.swift"
-          grep -Fq 'TeamIdentifier=$TEAM_ID' "$release"
-          grep -Fq 'codesign --display --requirements - "$APP_DIR"' "$release"
-          grep -Fq 'designated => identifier "$BUNDLE_ID"' "$release"
+          grep -Fq "TeamIdentifier=\$TEAM_ID" "$release"
+          grep -Fq "codesign --display --requirements - \"\$APP_DIR\"" "$release"
+          grep -Fq "designated => identifier \\\"\$BUNDLE_ID\\\"" "$release"
           grep -Fq 'anchor apple' "$release"
-          grep -Fq 'subject.OU] = "$TEAM_ID"' "$release"
+          grep -Fq "subject.OU] = \\\"\$TEAM_ID\\\"" "$release"
           grep -Fq 'case .developerIDApplication(let teamIdentifier)' "$runtime"
           grep -Fq 'teamIdentifier == DistributionIdentity.appleTeamIdentifier' "$runtime"
 
