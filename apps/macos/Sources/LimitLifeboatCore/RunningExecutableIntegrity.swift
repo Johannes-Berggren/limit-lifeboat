@@ -5,6 +5,8 @@ import Foundation
 public enum RunningExecutableIntegrityError: Error, LocalizedError, Equatable {
     case unavailable(path: String)
     case replaced(path: String)
+    case invalidCodeSignature(status: OSStatus)
+    case unsupportedCodeSignature
 
     public var errorDescription: String? {
         switch self {
@@ -12,6 +14,10 @@ public enum RunningExecutableIntegrityError: Error, LocalizedError, Equatable {
             return "The running app executable no longer exists at \(path). Quit and relaunch Limit Lifeboat before accessing credentials."
         case .replaced(let path):
             return "The running app executable was replaced at \(path). Quit and relaunch Limit Lifeboat before accessing credentials."
+        case .invalidCodeSignature(let status):
+            return "macOS could not validate this app's code signature (status \(status)). Quit workspace builds and relaunch the stable installed app before accessing credentials."
+        case .unsupportedCodeSignature:
+            return "This distribution build is not signed with Limit Lifeboat's stable Developer ID identity. Relaunch the official installed app before accessing credentials."
         }
     }
 }

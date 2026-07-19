@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 protocol ProviderCredentialAdapter {
@@ -101,7 +102,14 @@ struct ClaudeCredentialAdapter: ProviderCredentialAdapter {
 
     private func makeSnapshot(liveItem: Data?) throws -> CredentialSnapshot {
         var items: [CredentialSnapshotItem] = []
-        let credentials = liveItem.flatMap { ClaudeOAuthCredentials.extract(fromKeychainItemJSON: $0) }
+        let credentials: ClaudeOAuthCredentials?
+        if let liveItem {
+            credentials = try ClaudeOAuthCredentials.validatedExtract(
+                fromKeychainItemJSON: liveItem
+            )
+        } else {
+            credentials = nil
+        }
         if let credentials {
             items.append(
                 CredentialSnapshotItem(
@@ -146,14 +154,50 @@ struct ClaudeCredentialAdapter: ProviderCredentialAdapter {
     }
 
     func observe(accessMode: CredentialAccessMode) throws -> LiveCredentialObservation {
+        if credentialSource.supportsExactItemLocations {
+            guard let location = try credentialSource.locateLiveItem(accessMode: accessMode) else {
+                return try observe(liveItem: nil, location: nil)
+            }
+            guard let live = try credentialSource.readLiveItemJSON(
+                at: location,
+                accessMode: accessMode
+            ) else {
+                // The pinned item vanished/replaced after discovery. Never
+                // combine filesystem auth fields with an absent secret read.
+                throw ClaudeCodeCredentialsKeychainError.missingLiveItem
+            }
+            return try observe(liveItem: live, location: location)
+        }
         let live = try credentialSource.readLiveItemJSON(accessMode: accessMode)
+        return try observe(liveItem: live)
+    }
+
+    /// Builds an observation from an already pinned Keychain read. Restore
+    /// transactions use this overload so post-write verification cannot be
+    /// redirected to a replacement or duplicate item.
+    func observe(
+        liveItem: Data?,
+        location: ClaudeKeychainItemLocation? = nil
+    ) throws -> LiveCredentialObservation {
+        if let liveItem {
+            _ = try ClaudeOAuthCredentials.validatedExtract(
+                fromKeychainItemJSON: liveItem
+            )
+        }
         let snapshot: CredentialSnapshot
         do {
-            snapshot = try makeSnapshot(liveItem: live)
+            snapshot = try makeSnapshot(liveItem: liveItem)
         } catch CLISwitcherError.missingCredentials {
-            return LiveCredentialObservation(provider: provider, isLoggedIn: false, identity: nil, credentialFingerprint: nil, snapshot: nil)
+            return LiveCredentialObservation(
+                provider: provider,
+                isLoggedIn: false,
+                identity: nil,
+                credentialFingerprint: nil,
+                snapshot: nil,
+                claudeKeychainItemLocation: location
+            )
         }
-        let hasOAuth = live.flatMap { ClaudeOAuthCredentials.extract(fromKeychainItemJSON: $0) } != nil
+        let hasOAuth = snapshot.items.contains { $0.kind == .keychainJSONFields }
             || !((try? readConfigAuthFields()) ?? [:]).isEmpty
         let claudeJSONURL = resolve(".claude.json")
         let identity = (try? Data(contentsOf: claudeJSONURL)).flatMap {
@@ -164,8 +208,87 @@ struct ClaudeCredentialAdapter: ProviderCredentialAdapter {
             isLoggedIn: hasOAuth,
             identity: identity,
             credentialFingerprint: hasOAuth ? CredentialFingerprint.make(for: snapshot) : nil,
-            snapshot: hasOAuth ? snapshot : nil
+            snapshot: hasOAuth ? snapshot : nil,
+            claudeKeychainItemLocation: location,
+            claudeKeychainPayloadFingerprint: liveItem.flatMap(Self.payloadFingerprint)
         )
+    }
+
+    /// Refreshes only Claude's filesystem-owned identity/config fields around
+    /// a previously pinned Keychain observation. Login completion uses this
+    /// after the provider item has been read once, so an identity file that
+    /// lands later cannot cause another shared-Keychain read.
+    func refreshFilesystemMetadata(
+        in observation: LiveCredentialObservation
+    ) throws -> LiveCredentialObservation {
+        let configRelativePath = "Library/Application Support/Claude/config.json"
+        let accountRelativePath = ".claude.json"
+        let configURL = resolve(configRelativePath)
+        let accountURL = resolve(accountRelativePath)
+        let configFields = try readConfigAuthFields()
+        let accountFields = try readOwnedFields(
+            at: accountURL,
+            keys: Self.accountOwnedKeys
+        ) ?? [:]
+
+        var items = observation.snapshot?.items ?? []
+        items.removeAll {
+            $0.relativePath == configRelativePath || $0.relativePath == accountRelativePath
+        }
+        items.append(
+            CredentialSnapshotItem(
+                relativePath: configRelativePath,
+                kind: .jsonFields,
+                contents: try JSONSerialization.data(
+                    withJSONObject: configFields,
+                    options: [.sortedKeys]
+                ),
+                posixPermissions: filePermissions(configURL),
+                ownedJSONKeys: Self.configOwnedKeys,
+                onlyIfDestinationExists: !fileManager.fileExists(atPath: configURL.path)
+            )
+        )
+        items.append(
+            CredentialSnapshotItem(
+                relativePath: accountRelativePath,
+                kind: .jsonFields,
+                contents: try JSONSerialization.data(
+                    withJSONObject: accountFields,
+                    options: [.sortedKeys]
+                ),
+                posixPermissions: filePermissions(accountURL),
+                ownedJSONKeys: Self.accountOwnedKeys,
+                onlyIfDestinationExists: !fileManager.fileExists(atPath: accountURL.path)
+            )
+        )
+
+        let isLoggedIn = observation.isLoggedIn || !configFields.isEmpty
+        let snapshot = isLoggedIn
+            ? CredentialSnapshot(provider: .claude, items: items)
+            : nil
+        let identity = (try? Data(contentsOf: accountURL)).flatMap {
+            ClaudeIdentityReader.identity(fromClaudeJSON: $0)
+        }
+        return LiveCredentialObservation(
+            provider: .claude,
+            isLoggedIn: isLoggedIn,
+            identity: identity,
+            credentialFingerprint: snapshot.map(CredentialFingerprint.make),
+            snapshot: snapshot,
+            claudeKeychainItemLocation: observation.claudeKeychainItemLocation,
+            claudeKeychainPayloadFingerprint: observation.claudeKeychainPayloadFingerprint
+        )
+    }
+
+    private static func payloadFingerprint(_ data: Data) -> String? {
+        guard let credentials = ClaudeOAuthCredentials.extract(
+            fromKeychainItemJSON: data
+        ) else {
+            return nil
+        }
+        return SHA256.hash(data: credentials.rawClaudeAiOauth)
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 
     func currentIdentity(accessMode: CredentialAccessMode) -> AccountIdentity? {

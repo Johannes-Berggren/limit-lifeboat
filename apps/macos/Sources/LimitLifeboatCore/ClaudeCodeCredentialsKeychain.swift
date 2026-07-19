@@ -4,6 +4,10 @@ import Security
 public enum ClaudeCodeCredentialsKeychainError: Error, LocalizedError {
     case credentialAccessUnavailable(underlying: Error)
     case missingLiveItem
+    case duplicateLiveItems([ClaudeKeychainItemLocation])
+    case malformedItemMetadata(String)
+    case malformedCredentialJSON(String)
+    case itemIdentityMismatch
     case keychainError(OSStatus)
 
     public var errorDescription: String? {
@@ -12,6 +16,17 @@ public enum ClaudeCodeCredentialsKeychainError: Error, LocalizedError {
             return underlying.localizedDescription
         case .missingLiveItem:
             return "Claude Code is not logged in. Run `claude /login` before switching accounts."
+        case .duplicateLiveItems(let items):
+            let keychains = items.map(\.keychainPath).sorted().joined(separator: ", ")
+            return "Found \(items.count) matching Claude Code credential items in the Keychain search list"
+                + (keychains.isEmpty ? "." : ": \(keychains).")
+                + " Remove the duplicate before switching accounts."
+        case .malformedItemMetadata(let detail):
+            return "Could not safely identify the Claude Code credential item (\(detail)). No changes were made."
+        case .malformedCredentialJSON(let detail):
+            return "The Claude Code credential item contains malformed JSON (\(detail)). No changes were made. Recreate the Claude login explicitly."
+        case .itemIdentityMismatch:
+            return "The selected Keychain item does not belong to this Claude Code credential source. No changes were made."
         case .keychainError(let status):
             if CredentialStoreError.isCodeSigningStatus(status) {
                 return CredentialStoreError.keychainError(status).localizedDescription
@@ -22,17 +37,18 @@ public enum ClaudeCodeCredentialsKeychainError: Error, LocalizedError {
     }
 
     public var isKeychainAccessDenied: Bool {
+        credentialAccessDisposition?.isAccessDenied ?? false
+    }
+
+    public var credentialAccessDisposition: CredentialAccessDisposition? {
         switch self {
-        case .credentialAccessUnavailable:
-            return true
-        case .missingLiveItem:
-            return false
+        case .credentialAccessUnavailable(let underlying):
+            return CredentialAccessDisposition(underlying: underlying)
         case .keychainError(let status):
-            return status == errSecInteractionNotAllowed
-                || status == errSecInteractionRequired
-                || status == errSecAuthFailed
-                || status == errSecUserCanceled
-                || CredentialStoreError.isCodeSigningStatus(status)
+            return CredentialAccessDisposition(status: status)
+        case .missingLiveItem, .duplicateLiveItems, .malformedItemMetadata,
+             .malformedCredentialJSON, .itemIdentityMismatch:
+            return nil
         }
     }
 }
@@ -41,13 +57,45 @@ public enum ClaudeCodeCredentialsKeychainError: Error, LocalizedError {
 /// Abstracted so tests (and the switcher's snapshot store) can substitute an
 /// in-memory source.
 public protocol ClaudeCLICredentialSource: Sendable {
+    /// Production legacy-Keychain sources can pin an entire workflow to one
+    /// persistent item identity. Lightweight test/provider sources may use
+    /// the compatibility defaults instead.
+    var supportsExactItemLocations: Bool { get }
+
+    /// Metadata-only discovery across the user's Keychain search list. A nil
+    /// result means Claude is logged out; multiple matches must be rejected.
+    func locateLiveItem(accessMode: CredentialAccessMode) throws -> ClaudeKeychainItemLocation?
+
     /// The full keychain item JSON, or nil when no item exists (logged out).
     func readLiveItemJSON(accessMode: CredentialAccessMode) throws -> Data?
     func writeLiveItemJSON(_ data: Data, accessMode: CredentialAccessMode) throws
     func deleteLiveItem(accessMode: CredentialAccessMode) throws
+
+    /// Exact-item variants used by login polling and authorization workflows.
+    func readLiveItemJSON(
+        at location: ClaudeKeychainItemLocation,
+        accessMode: CredentialAccessMode
+    ) throws -> Data?
+    func writeLiveItemJSON(
+        _ data: Data,
+        at location: ClaudeKeychainItemLocation,
+        accessMode: CredentialAccessMode
+    ) throws
+    func deleteLiveItem(
+        at location: ClaudeKeychainItemLocation,
+        accessMode: CredentialAccessMode
+    ) throws
 }
 
 public extension ClaudeCLICredentialSource {
+    var supportsExactItemLocations: Bool { false }
+
+    /// Compatibility default for in-memory and provider-specific test doubles.
+    /// Production Claude Keychain access overrides this with exact discovery.
+    func locateLiveItem(accessMode: CredentialAccessMode) throws -> ClaudeKeychainItemLocation? {
+        nil
+    }
+
     func readLiveItemJSON() throws -> Data? {
         try readLiveItemJSON(accessMode: CredentialAccess.currentMode)
     }
@@ -58,6 +106,28 @@ public extension ClaudeCLICredentialSource {
 
     func deleteLiveItem() throws {
         try deleteLiveItem(accessMode: CredentialAccess.currentMode)
+    }
+
+    func readLiveItemJSON(
+        at location: ClaudeKeychainItemLocation,
+        accessMode: CredentialAccessMode
+    ) throws -> Data? {
+        try readLiveItemJSON(accessMode: accessMode)
+    }
+
+    func writeLiveItemJSON(
+        _ data: Data,
+        at location: ClaudeKeychainItemLocation,
+        accessMode: CredentialAccessMode
+    ) throws {
+        try writeLiveItemJSON(data, accessMode: accessMode)
+    }
+
+    func deleteLiveItem(
+        at location: ClaudeKeychainItemLocation,
+        accessMode: CredentialAccessMode
+    ) throws {
+        try deleteLiveItem(accessMode: accessMode)
     }
 }
 
@@ -72,6 +142,9 @@ public struct ClaudeCodeCredentialsKeychain: ClaudeCLICredentialSource {
     private let serviceName: String
     private let accountName: String
     private let validateAccess: @Sendable () throws -> Void
+    private let securityClient: any ClaudeKeychainSecurityClient
+
+    public var supportsExactItemLocations: Bool { true }
 
     public init(
         serviceName: String = Self.serviceName,
@@ -81,62 +154,106 @@ public struct ClaudeCodeCredentialsKeychain: ClaudeCLICredentialSource {
         self.serviceName = serviceName
         self.accountName = accountName
         self.validateAccess = validateAccess
+        self.securityClient = SystemClaudeKeychainSecurityClient()
+    }
+
+    init(
+        serviceName: String = Self.serviceName,
+        accountName: String = NSUserName(),
+        validateAccess: @escaping @Sendable () throws -> Void = {},
+        securityClient: any ClaudeKeychainSecurityClient
+    ) {
+        self.serviceName = serviceName
+        self.accountName = accountName
+        self.validateAccess = validateAccess
+        self.securityClient = securityClient
+    }
+
+    public func locateLiveItem(
+        accessMode: CredentialAccessMode
+    ) throws -> ClaudeKeychainItemLocation? {
+        try validateCredentialAccess()
+        return try locateValidated(accessMode: accessMode)
     }
 
     public func readLiveItemJSON(accessMode: CredentialAccessMode) throws -> Data? {
         try validateCredentialAccess()
+        guard let location = try locateValidated(accessMode: accessMode) else { return nil }
+        return try securityClient.readData(at: location, accessMode: accessMode)
+    }
 
-        var query = baseQuery(accessMode: accessMode)
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecItemNotFound {
-            return nil
-        }
-        guard status == errSecSuccess else {
-            throw ClaudeCodeCredentialsKeychainError.keychainError(status)
-        }
-        guard let data = result as? Data else {
-            throw ClaudeCodeCredentialsKeychainError.keychainError(errSecDecode)
-        }
-
-        return data
+    public func readLiveItemJSON(
+        at location: ClaudeKeychainItemLocation,
+        accessMode: CredentialAccessMode
+    ) throws -> Data? {
+        try validateCredentialAccess()
+        try validate(location: location)
+        return try securityClient.readData(at: location, accessMode: accessMode)
     }
 
     public func writeLiveItemJSON(_ data: Data, accessMode: CredentialAccessMode) throws {
         try validateCredentialAccess()
-
-        let status = SecItemUpdate(
-            baseQuery(accessMode: accessMode) as CFDictionary,
-            [kSecValueData as String: data] as CFDictionary
-        )
-        if status == errSecSuccess {
-            return
-        }
-        if status == errSecItemNotFound {
+        guard let location = try locateValidated(accessMode: accessMode) else {
             throw ClaudeCodeCredentialsKeychainError.missingLiveItem
         }
-        throw ClaudeCodeCredentialsKeychainError.keychainError(status)
+        try writeValidated(data, at: location, accessMode: accessMode)
+    }
+
+    public func writeLiveItemJSON(
+        _ data: Data,
+        at location: ClaudeKeychainItemLocation,
+        accessMode: CredentialAccessMode
+    ) throws {
+        try validateCredentialAccess()
+        try validate(location: location)
+        try writeValidated(data, at: location, accessMode: accessMode)
     }
 
     public func deleteLiveItem(accessMode: CredentialAccessMode) throws {
         try validateCredentialAccess()
+        guard let location = try locateValidated(accessMode: accessMode) else { return }
+        try securityClient.deleteItem(at: location, accessMode: accessMode)
+    }
 
-        let status = SecItemDelete(baseQuery(accessMode: accessMode) as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw ClaudeCodeCredentialsKeychainError.keychainError(status)
+    public func deleteLiveItem(
+        at location: ClaudeKeychainItemLocation,
+        accessMode: CredentialAccessMode
+    ) throws {
+        try validateCredentialAccess()
+        try validate(location: location)
+        try securityClient.deleteItem(at: location, accessMode: accessMode)
+    }
+
+    private func locateValidated(
+        accessMode: CredentialAccessMode
+    ) throws -> ClaudeKeychainItemLocation? {
+        let items = try securityClient.locateItems(
+            serviceName: serviceName,
+            accountName: accountName,
+            accessMode: accessMode
+        )
+        guard items.count <= 1 else {
+            throw ClaudeCodeCredentialsKeychainError.duplicateLiveItems(items)
+        }
+        return items.first
+    }
+
+    private func writeValidated(
+        _ data: Data,
+        at location: ClaudeKeychainItemLocation,
+        accessMode: CredentialAccessMode
+    ) throws {
+        let updated = try securityClient.updateData(data, at: location, accessMode: accessMode)
+        guard updated else {
+            throw ClaudeCodeCredentialsKeychainError.missingLiveItem
         }
     }
 
-    private func baseQuery(accessMode: CredentialAccessMode) -> [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: serviceName,
-            kSecAttrAccount as String: accountName,
-            kSecUseAuthenticationContext as String: CredentialAccess.authenticationContext(for: accessMode)
-        ]
+    private func validate(location: ClaudeKeychainItemLocation) throws {
+        guard location.serviceName == serviceName,
+              location.accountName == accountName else {
+            throw ClaudeCodeCredentialsKeychainError.itemIdentityMismatch
+        }
     }
 
     private func validateCredentialAccess() throws {
@@ -149,21 +266,37 @@ public struct ClaudeCodeCredentialsKeychain: ClaudeCLICredentialSource {
 }
 
 /// Replaces only the "claudeAiOauth" key of the keychain item JSON, keeping
-/// every sibling (especially the machine-level "mcpOAuth") byte-for-byte in
-/// place, so an account switch never clobbers machine state.
-public func mergeClaudeAiOauth(_ claudeAiOauthObjectJSON: Data, intoItemJSON existing: Data?) -> Data {
+/// every sibling (especially the machine-level "mcpOAuth") semantically in
+/// place, so an account switch never clobbers machine state. Malformed input
+/// is never repaired by replacement: callers must abort without writing.
+public func mergeClaudeAiOauth(
+    _ claudeAiOauthObjectJSON: Data,
+    intoItemJSON existing: Data?
+) throws -> Data {
     var item: [String: Any] = [:]
-    if let existing,
-       let parsed = try? JSONSerialization.jsonObject(with: existing) as? [String: Any] {
+    if let existing {
+        guard let parsed = try? JSONSerialization.jsonObject(with: existing) as? [String: Any] else {
+            throw ClaudeCodeCredentialsKeychainError.malformedCredentialJSON(
+                "the existing item is not a JSON object"
+            )
+        }
         item = parsed
     }
 
-    if let claudeAiOauth = try? JSONSerialization.jsonObject(with: claudeAiOauthObjectJSON) as? [String: Any] {
-        item["claudeAiOauth"] = claudeAiOauth
+    guard let claudeAiOauth = try? JSONSerialization.jsonObject(
+        with: claudeAiOauthObjectJSON
+    ) as? [String: Any] else {
+        throw ClaudeCodeCredentialsKeychainError.malformedCredentialJSON(
+            "the incoming OAuth payload is not a JSON object"
+        )
     }
+    item["claudeAiOauth"] = claudeAiOauth
 
-    guard let merged = try? JSONSerialization.data(withJSONObject: item, options: [.sortedKeys]) else {
-        return existing ?? Data("{}".utf8)
+    do {
+        return try JSONSerialization.data(withJSONObject: item, options: [.sortedKeys])
+    } catch {
+        throw ClaudeCodeCredentialsKeychainError.malformedCredentialJSON(
+            "the merged credential could not be encoded"
+        )
     }
-    return merged
 }

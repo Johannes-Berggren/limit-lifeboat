@@ -234,13 +234,17 @@ SPARKLE_PRIVATE_KEY_FILE="$WORK_DIR/sparkle-ed25519-private-key"
   || fail "Could not export the Sparkle private key from Keychain account '$SPARKLE_ACCOUNT'"
 
 echo "==> Building app"
-SKIP_ADHOC_SIGN=1 ARCHITECTURE="$ARCHITECTURE" VERSION="$RELEASE_VERSION" BUILD_NUMBER="$BUILD_NUMBER" \
+APP_VARIANT=distribution SKIP_ADHOC_SIGN=1 ARCHITECTURE="$ARCHITECTURE" \
+  VERSION="$RELEASE_VERSION" BUILD_NUMBER="$BUILD_NUMBER" \
   "$APP_ROOT/scripts/package-app.sh"
 
 plutil -lint "$INFO_PLIST" >/dev/null
 assert_plist_value "$INFO_PLIST" CFBundleDisplayName "$PRODUCT_NAME"
 assert_plist_value "$INFO_PLIST" CFBundleExecutable "$EXECUTABLE_NAME"
 assert_plist_value "$INFO_PLIST" CFBundleIdentifier "$BUNDLE_ID"
+assert_plist_value "$INFO_PLIST" LimitLifeboatAppVariant "distribution"
+assert_plist_value "$INFO_PLIST" LimitLifeboatApplicationSupportDirectoryName "LimitLifeboat"
+assert_plist_value "$INFO_PLIST" LimitLifeboatCredentialService "com.limitlifeboat.app.credentials"
 assert_plist_value "$INFO_PLIST" CFBundleShortVersionString "$RELEASE_VERSION"
 assert_plist_value "$INFO_PLIST" CFBundleVersion "$BUILD_NUMBER"
 assert_plist_value "$INFO_PLIST" LSMinimumSystemVersion "14.0"
@@ -362,6 +366,9 @@ MOUNTED_FRAMEWORK="$MOUNTED_APP/Contents/Frameworks/Sparkle.framework"
 MOUNTED_AUTOUPDATE="$MOUNTED_FRAMEWORK/Versions/B/Autoupdate"
 MOUNTED_UPDATER="$MOUNTED_FRAMEWORK/Versions/B/Updater.app"
 assert_plist_value "$MOUNTED_INFO" CFBundleIdentifier "$BUNDLE_ID"
+assert_plist_value "$MOUNTED_INFO" LimitLifeboatAppVariant "distribution"
+assert_plist_value "$MOUNTED_INFO" LimitLifeboatApplicationSupportDirectoryName "LimitLifeboat"
+assert_plist_value "$MOUNTED_INFO" LimitLifeboatCredentialService "com.limitlifeboat.app.credentials"
 assert_plist_value "$MOUNTED_INFO" CFBundleShortVersionString "$RELEASE_VERSION"
 assert_plist_value "$MOUNTED_INFO" CFBundleVersion "$BUILD_NUMBER"
 assert_plist_value "$MOUNTED_INFO" LSMinimumSystemVersion "14.0"

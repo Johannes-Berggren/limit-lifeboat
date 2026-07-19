@@ -116,20 +116,36 @@ struct MenuRootView: View {
             Spacer(minLength: DS.Spacing.md)
 
             Menu {
-                Button("Fix Repeated Keychain Prompts…") {
-                    Task { await state.repairClaudeKeychainPartitionList(reason: "on request") }
+                if state.hasNondurableDevelopmentSignature {
+                    Label(
+                        "Ad-hoc build: Keychain approval is not durable",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    Divider()
+                }
+                if let diagnostic = state.claudeKeychainAuthorizationDiagnostic {
+                    Label(diagnostic, systemImage: "exclamationmark.triangle")
+                    Divider()
+                }
+                if state.canAuthorizeClaudeKeychain {
+                    Button("Authorize Keychain Access…") {
+                        Task { await state.authorizeClaudeKeychainAccess() }
+                    }
+                    .disabled(state.isAuthorizingClaudeKeychain)
                 }
             } label: {
-                Image(systemName: state.keychainRepairSuggested ? "exclamationmark.circle" : "ellipsis.circle")
+                Image(systemName: state.shouldHighlightClaudeKeychainAuthorization ? "exclamationmark.circle" : "ellipsis.circle")
                     .frame(width: 20, height: 20)
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
-            .foregroundStyle(state.keychainRepairSuggested ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.secondary))
-            .help(state.keychainRepairSuggested
-                ? "Switching accounts keeps asking for your password — click to fix"
-                : "More actions")
+            .foregroundStyle(state.shouldHighlightClaudeKeychainAuthorization ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.secondary))
+            .help(state.claudeKeychainAuthorizationDiagnostic != nil
+                ? "Claude Keychain state needs attention"
+                : (state.shouldHighlightClaudeKeychainAuthorization
+                    ? "Limit Lifeboat needs one explicit Always Allow authorization"
+                    : "More actions"))
 
             Button {
                 state.openSettings()

@@ -115,7 +115,8 @@ The release script:
 
 - checks stable SemVer, the exact annotated tag, clean worktree, and
   `HEAD == origin/main` without requiring a branch name;
-- runs the Swift suite and packages the app with the commit-count build number;
+- runs the Swift suite and explicitly packages the distribution variant with
+  the commit-count build number;
 - checks the embedded Sparkle framework, rpath, update keys, licenses, and
   absence of unused XPC services;
 - checks the Keychain EdDSA public key against the app's committed public key;
@@ -206,6 +207,12 @@ In disposable accounts on macOS 14 and the current macOS release, verify:
   Automation, relaunch, reinstall, and launch at login;
 - Keychain and account-data continuity, legacy migration, and no false
   executable-integrity warning;
+- with a freshly recreated `Claude Code-credentials` item, choose **More →
+  Authorize Keychain Access…**, enter the macOS password once, and select
+  **Always Allow**; then verify login completion, manual and automatic
+  switching, Retry, repeated popover opens, relaunch, sleep/wake, Claude item
+  updates, and an app update produce no further Limit Lifeboat password
+  dialogs (Claude's own requester-named authorization is a separate check);
 - manual **Check for Updates**, scheduled gentle reminder, menu-bar **Update**
   affordance, dismiss/skip, and explicit **Install and Relaunch**; and
 - the installed version/build after updating and launch-at-login continuity.

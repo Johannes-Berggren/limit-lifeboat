@@ -32,28 +32,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             UNUserNotificationCenter.current().delegate = self
         }
         do {
+            let applicationVariant = try ApplicationVariant.resolve()
             guard let executableURL = Bundle.main.executableURL else {
                 throw RunningExecutableIntegrityError.unavailable(path: Bundle.main.bundlePath)
             }
             let integrityGuard = try RunningExecutableIntegrityGuard(executableURL: executableURL)
+            let codeSignatureStatus = ApplicationCodeSignatureInspector.inspect(
+                executableURL: executableURL
+            )
             let validateCredentialAccess: @Sendable () throws -> Void = {
                 try integrityGuard.validate()
+                if case .invalid(let status) = codeSignatureStatus {
+                    throw RunningExecutableIntegrityError.invalidCodeSignature(status: status)
+                }
+                if applicationVariant == .distribution {
+                    guard case .developerIDApplication(let teamIdentifier) = codeSignatureStatus,
+                          teamIdentifier == DistributionIdentity.appleTeamIdentifier else {
+                        throw RunningExecutableIntegrityError.unsupportedCodeSignature
+                    }
+                }
+            }
+            // Fail closed before migration, UI construction, or any scheduled
+            // credential work. Otherwise an empty profile set could let an
+            // invalid (or ad-hoc distribution) bundle appear healthy until a
+            // later Keychain operation happened to invoke this guard.
+            try validateCredentialAccess()
+
+            var enableLaunchAtLogin = false
+            if applicationVariant.allowsLegacyMigration {
+                let migrationResult = try LegacyMigrationCoordinator(
+                    validateCredentialAccess: validateCredentialAccess
+                ).runIfNeeded()
+                switch migrationResult {
+                case .proceed(let shouldEnable):
+                    enableLaunchAtLogin = shouldEnable
+                case .quit:
+                    NSApplication.shared.terminate(nil)
+                    return
+                }
             }
 
-            let migrationResult = try LegacyMigrationCoordinator(
-                validateCredentialAccess: validateCredentialAccess
-            ).runIfNeeded()
-            let enableLaunchAtLogin: Bool
-            switch migrationResult {
-            case .proceed(let shouldEnable):
-                enableLaunchAtLogin = shouldEnable
-            case .quit:
-                NSApplication.shared.terminate(nil)
-                return
-            }
-
-            let repository = try ProfileRepository()
-            let credentialStore = KeychainCredentialStore(validateAccess: validateCredentialAccess)
+            let repository = try ProfileRepository(
+                applicationSupportDirectoryName: applicationVariant.applicationSupportDirectoryName
+            )
+            let credentialStore = KeychainCredentialStore(
+                service: applicationVariant.credentialService,
+                validateAccess: validateCredentialAccess
+            )
             let claudeCredentials = ClaudeCodeCredentialsKeychain(validateAccess: validateCredentialAccess)
             let switcher = CLISwitcher(
                 backupDirectory: repository.applicationSupportDirectory
@@ -61,7 +86,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 credentialStore: credentialStore,
                 claudeCLICredentialSource: claudeCredentials
             )
-            let state = try AppState(repository: repository, cliSwitcher: switcher)
+            let state = try AppState(
+                repository: repository,
+                cliSwitcher: switcher,
+                codeSignatureStatus: codeSignatureStatus
+            )
             self.state = state
             self.menuBarController = MenuBarController(state: state)
             self.executableMonitor = try RunningExecutableMonitor(executableURL: executableURL) { [weak self] in
@@ -70,7 +99,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
 
-            if enableLaunchAtLogin {
+            if applicationVariant.supportsLaunchAtLogin, enableLaunchAtLogin {
                 do {
                     try SMAppService.mainApp.register()
                 } catch {
@@ -86,7 +115,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task {
                 await state.refreshAll()
                 state.startBackgroundRefresh()
-                await state.refreshKeychainRepairSuggestion()
             }
         } catch {
             let alert = NSAlert()

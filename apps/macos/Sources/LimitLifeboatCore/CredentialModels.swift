@@ -67,6 +67,84 @@ public struct RestoreResult: Equatable, Sendable {
     }
 }
 
+/// Non-secret metadata retained by AppState after a stored credential has
+/// been inspected. Keeping this separate from the decoded record prevents
+/// tokens from becoming a process-lifetime cache merely to render status UI.
+public struct StoredCredentialSummary: Equatable, Sendable {
+    public var provider: Provider
+    public var fingerprint: String
+    public var isRestorable: Bool
+    public var claudeRefreshTokenExpiresAt: Date?
+
+    public init(
+        provider: Provider,
+        fingerprint: String,
+        isRestorable: Bool,
+        claudeRefreshTokenExpiresAt: Date? = nil
+    ) {
+        self.provider = provider
+        self.fingerprint = fingerprint
+        self.isRestorable = isRestorable
+        self.claudeRefreshTokenExpiresAt = claudeRefreshTokenExpiresAt
+    }
+}
+
+/// A decoded snapshot scoped to one credential workflow. Callers should drop
+/// this value after the operation and retain only `summary`.
+public struct StoredCredentialRecord: Sendable {
+    public var snapshot: CredentialSnapshot
+    public var summary: StoredCredentialSummary
+    /// Opaque app-store generation used for a read-free compare-and-swap.
+    /// Records assembled from provider data rather than loaded from the
+    /// credential store have no revision and cannot perform that mutation.
+    public var storeRevision: CredentialStoreRevision?
+
+    public init(
+        snapshot: CredentialSnapshot,
+        summary: StoredCredentialSummary,
+        storeRevision: CredentialStoreRevision? = nil
+    ) {
+        self.snapshot = snapshot
+        self.summary = summary
+        self.storeRevision = storeRevision
+    }
+
+    public var claudeOAuthCredentials: ClaudeOAuthCredentials? {
+        guard snapshot.provider == .claude,
+              let item = snapshot.items.first(where: { $0.kind == .keychainJSONFields }) else {
+            return nil
+        }
+        return ClaudeOAuthCredentials(claudeAiOauthJSON: item.contents)
+    }
+
+    public var codexAuthJSON: Data? {
+        guard snapshot.provider == .codex,
+              let item = snapshot.items.first(where: {
+                  ($0.kind == .jsonFields || $0.kind == .fullFile)
+                      && $0.relativePath == ".codex/auth.json"
+              }) else {
+            return nil
+        }
+        return item.contents
+    }
+}
+
+/// One workflow-scoped read of the provider-owned Claude OAuth item. The
+/// location pins compare-and-swap writes to the same legacy Keychain item that
+/// supplied the credential; callers must not persist or log the raw reference.
+public struct LiveClaudeOAuthCredentialRecord: Sendable {
+    public var credentials: ClaudeOAuthCredentials
+    public var itemLocation: ClaudeKeychainItemLocation?
+
+    public init(
+        credentials: ClaudeOAuthCredentials,
+        itemLocation: ClaudeKeychainItemLocation?
+    ) {
+        self.credentials = credentials
+        self.itemLocation = itemLocation
+    }
+}
+
 public enum AuthChangeOrigin: String, Equatable, Sendable {
     case launch
     case scheduledRefresh
@@ -88,29 +166,49 @@ public struct LiveCredentialObservation: Equatable, Sendable {
     public var isLoggedIn: Bool
     public var identity: AccountIdentity?
     public var credentialFingerprint: String?
+    /// SHA-256 of the exact provider-owned Claude Keychain payload. Unlike
+    /// `credentialFingerprint`, this excludes filesystem identity/config data
+    /// and can prove that an in-place item update occurred even when the
+    /// legacy Keychain modification date collides within the same second.
+    public var claudeKeychainPayloadFingerprint: String?
     public var snapshot: CredentialSnapshot?
+    /// Exact provider-owned Claude item that supplied the secret data for this
+    /// observation. Nil for Codex, logged-out Claude, and lightweight sources
+    /// that do not support persistent item identities.
+    public var claudeKeychainItemLocation: ClaudeKeychainItemLocation?
 
     public init(
         provider: Provider,
         isLoggedIn: Bool,
         identity: AccountIdentity?,
         credentialFingerprint: String?,
-        snapshot: CredentialSnapshot?
+        snapshot: CredentialSnapshot?,
+        claudeKeychainItemLocation: ClaudeKeychainItemLocation? = nil,
+        claudeKeychainPayloadFingerprint: String? = nil
     ) {
         self.provider = provider
         self.isLoggedIn = isLoggedIn
         self.identity = identity
         self.credentialFingerprint = credentialFingerprint
         self.snapshot = snapshot
+        self.claudeKeychainItemLocation = claudeKeychainItemLocation
+        self.claudeKeychainPayloadFingerprint = claudeKeychainPayloadFingerprint
     }
 
     public var stabilityKey: String {
         [
             isLoggedIn ? "1" : "0",
             credentialFingerprint ?? "-",
+            claudeKeychainPayloadFingerprint ?? "-",
             identity?.accountID ?? "-",
             identity?.organizationID ?? "-",
-            identity?.email?.lowercased() ?? "-"
+            identity?.email?.lowercased() ?? "-",
+            claudeKeychainItemLocation.map { location in
+                let identityDigest = SHA256.hash(data: location.persistentReference)
+                    .map { String(format: "%02x", $0) }
+                    .joined()
+                return "\(identityDigest):\(location.modificationDate.timeIntervalSince1970)"
+            } ?? "-"
         ].joined(separator: "|")
     }
 }

@@ -4,6 +4,66 @@ import XCTest
 @testable import LimitLifeboatCore
 
 final class CLISwitcherTests: XCTestCase {
+    func testClaudeFilesystemMetadataRefreshReusesSingleKeychainRead() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let source = fakeClaudeSource(accessToken: "new-login")
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: MemoryCredentialStore(),
+            claudeCLICredentialSource: source
+        )
+
+        let initial = try switcher.liveObservation(
+            provider: .claude,
+            accessMode: .nonInteractive
+        )
+        XCTAssertNil(initial.identity)
+        XCTAssertEqual(source.readCount, 1)
+
+        let claudeJSON = fixture.home.appendingPathComponent(".claude.json")
+        try Data(
+            #"{"oauthAccount":{"emailAddress":"late@example.com","accountUuid":"late-account"}}"#.utf8
+        ).write(to: claudeJSON)
+        let refreshed = try switcher.refreshClaudeFilesystemMetadata(in: initial)
+
+        XCTAssertEqual(refreshed.identity?.email, "late@example.com")
+        XCTAssertEqual(source.readCount, 1)
+        XCTAssertNotEqual(refreshed.credentialFingerprint, initial.credentialFingerprint)
+        XCTAssertEqual(
+            refreshed.claudeKeychainPayloadFingerprint,
+            initial.claudeKeychainPayloadFingerprint,
+            "Filesystem identity changes must not masquerade as a provider-item update"
+        )
+
+        source.itemJSON = Data(
+            #"{"claudeAiOauth":{"accessToken":"new-login","expiresAt":1783458000000},"mcpOAuth":{"server":{"accessToken":"changed-sibling"}}}"#.utf8
+        )
+        let siblingOnlyChange = try switcher.liveObservation(
+            provider: .claude,
+            accessMode: .nonInteractive
+        )
+        XCTAssertEqual(
+            siblingOnlyChange.claudeKeychainPayloadFingerprint,
+            initial.claudeKeychainPayloadFingerprint,
+            "MCP sibling changes must not masquerade as a Claude account login"
+        )
+
+        source.itemJSON = Data(
+            #"{"claudeAiOauth":{"accessToken":"replacement","expiresAt":1783458000000}}"#.utf8
+        )
+        let replaced = try switcher.liveObservation(
+            provider: .claude,
+            accessMode: .nonInteractive
+        )
+        XCTAssertNotEqual(
+            replaced.claudeKeychainPayloadFingerprint,
+            initial.claudeKeychainPayloadFingerprint,
+            "Payload hashing must detect an in-place update even when metadata timestamps collide"
+        )
+    }
+
     func testGuardedLiveCodexRefreshMergesOwnedFieldsAndPreservesUnknownSiblings() throws {
         let fixture = try TemporaryFixture()
         defer { fixture.cleanup() }
@@ -164,6 +224,341 @@ final class CLISwitcherTests: XCTestCase {
         )
     }
 
+    func testStoreObservationReusesWorkflowRecordWithoutAnotherStoredKeychainRead() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let store = MemoryCredentialStore()
+        let source = fakeClaudeSource(accessToken: "first")
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: store,
+            claudeCLICredentialSource: source
+        )
+        let profile = AccountProfile(provider: .claude, label: "Claude")
+        _ = try switcher.captureAndStoreSnapshot(for: profile)
+        let record = try XCTUnwrap(switcher.storedCredentialRecord(for: profile))
+
+        source.itemJSON = Data(
+            #"{"claudeAiOauth":{"accessToken":"second","expiresAt":1784458000000}}"#.utf8
+        )
+        let observation = try switcher.liveObservation(provider: .claude)
+        let baselineLoads = store.loadCount
+
+        _ = try switcher.storeObservation(
+            observation,
+            for: profile,
+            storedRecord: record
+        )
+
+        XCTAssertEqual(store.loadCount, baselineLoads)
+    }
+
+    func testPreloadedClaudeRotationUsesRevisionCASWithoutAnotherStoredRead() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let store = MemoryCredentialStore()
+        let source = fakeClaudeSource(accessToken: "stale")
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: store,
+            claudeCLICredentialSource: source
+        )
+        let profile = AccountProfile(provider: .claude, label: "Claude")
+        _ = try switcher.captureAndStoreSnapshot(for: profile)
+        let record = try XCTUnwrap(switcher.storedCredentialRecord(for: profile))
+        let baselineLoads = store.loadCount
+        let fresh = try XCTUnwrap(
+            ClaudeOAuthCredentials(
+                claudeAiOauthJSON: Data(
+                    #"{"accessToken":"fresh","refreshToken":"refresh-2","expiresAt":1784458000000}"#.utf8
+                )
+            )
+        )
+
+        let updated = try XCTUnwrap(
+            switcher.replaceStoredClaudeOAuthCredentials(
+                fresh,
+                for: profile.id,
+                using: record,
+                ifAccessTokenMatches: "stale",
+                accessMode: .nonInteractive
+            )
+        )
+
+        XCTAssertEqual(store.loadCount, baselineLoads)
+        XCTAssertEqual(store.replaceCount, 1)
+        XCTAssertEqual(updated.claudeOAuthCredentials?.accessToken, "fresh")
+        XCTAssertNotEqual(updated.storeRevision, record.storeRevision)
+
+        // Reusing the stale workflow record must lose the opaque revision CAS,
+        // even though its own token predicate still matches.
+        XCTAssertNil(
+            try switcher.replaceStoredClaudeOAuthCredentials(
+                fresh,
+                for: profile.id,
+                using: record,
+                ifAccessTokenMatches: "stale",
+                accessMode: .nonInteractive
+            )
+        )
+        XCTAssertEqual(store.loadCount, baselineLoads)
+        XCTAssertEqual(store.replaceCount, 2)
+        XCTAssertEqual(
+            try switcher.storedClaudeOAuthCredentials(for: profile.id)?.accessToken,
+            "fresh"
+        )
+    }
+
+    func testPreloadedCodexRotationUsesRevisionCASAndNoOpSkipsWrite() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let authURL = fixture.home.appendingPathComponent(".codex/auth.json")
+        try FileManager.default.createDirectory(
+            at: authURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let stale = Data(
+            #"{"auth_mode":"chatgpt","tokens":{"access_token":"stale","refresh_token":"refresh-1"}}"#.utf8
+        )
+        try stale.write(to: authURL)
+        let store = MemoryCredentialStore()
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: store,
+            claudeCLICredentialSource: FakeClaudeCLICredentialSource()
+        )
+        let profile = AccountProfile(provider: .codex, label: "Codex")
+        _ = try switcher.captureAndStoreSnapshot(for: profile)
+        let record = try XCTUnwrap(switcher.storedCredentialRecord(for: profile))
+        let baselineLoads = store.loadCount
+
+        let unchanged = try XCTUnwrap(
+            switcher.replaceStoredCodexAuthJSON(
+                stale,
+                for: profile.id,
+                using: record,
+                ifSnapshotFingerprintMatches: record.summary.fingerprint,
+                accessMode: .nonInteractive
+            )
+        )
+        XCTAssertEqual(unchanged.storeRevision, record.storeRevision)
+        XCTAssertEqual(store.replaceCount, 0)
+
+        let fresh = Data(
+            #"{"auth_mode":"chatgpt","tokens":{"access_token":"fresh","refresh_token":"refresh-2"}}"#.utf8
+        )
+        let updated = try XCTUnwrap(
+            switcher.replaceStoredCodexAuthJSON(
+                fresh,
+                for: profile.id,
+                using: record,
+                ifSnapshotFingerprintMatches: record.summary.fingerprint,
+                accessMode: .nonInteractive
+            )
+        )
+
+        XCTAssertEqual(store.loadCount, baselineLoads)
+        XCTAssertEqual(store.replaceCount, 1)
+        XCTAssertNotEqual(updated.storeRevision, record.storeRevision)
+        XCTAssertEqual(
+            try XCTUnwrap(
+                JSONSerialization.jsonObject(with: try XCTUnwrap(updated.codexAuthJSON))
+                    as? [String: Any]
+            )["auth_mode"] as? String,
+            "chatgpt"
+        )
+    }
+
+    func testUnchangedStoredCodexPreflightSkipsKeychainWrite() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let authURL = fixture.home.appendingPathComponent(".codex/auth.json")
+        try FileManager.default.createDirectory(
+            at: authURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let authJSON = Data(
+            #"{"auth_mode":"chatgpt","tokens":{"access_token":"same","refresh_token":"refresh"}}"#.utf8
+        )
+        try authJSON.write(to: authURL)
+        let store = MemoryCredentialStore()
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: store,
+            claudeCLICredentialSource: FakeClaudeCLICredentialSource()
+        )
+        let profile = AccountProfile(provider: .codex, label: "Codex")
+        let snapshot = try switcher.captureAndStoreSnapshot(for: profile)
+        let baselineSaves = store.saveCount
+
+        XCTAssertTrue(
+            try switcher.replaceStoredCodexAuthJSON(
+                authJSON,
+                for: profile.id,
+                ifSnapshotFingerprintMatches: CredentialFingerprint.make(for: snapshot),
+                accessMode: .nonInteractive
+            )
+        )
+        XCTAssertEqual(store.saveCount, baselineSaves)
+    }
+
+    func testExactObservationDoesNotAttachLocationWhenResolvedItemDisappears() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let source = FakeClaudeCLICredentialSource()
+        source.exactLocation = ClaudeKeychainItemLocation(
+            serviceName: ClaudeCodeCredentialsKeychain.serviceName,
+            accountName: "disposable-test-user",
+            keychainPath: "/tmp/disposable.keychain-db",
+            persistentReference: Data("removed-item".utf8),
+            creationDate: Date(timeIntervalSince1970: 1),
+            modificationDate: Date(timeIntervalSince1970: 2)
+        )
+        source.itemJSON = nil
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: MemoryCredentialStore(),
+            claudeCLICredentialSource: source
+        )
+
+        XCTAssertThrowsError(try switcher.liveObservation(provider: .claude)) { error in
+            guard case ClaudeCodeCredentialsKeychainError.missingLiveItem = error else {
+                return XCTFail("Expected missingLiveItem, got \(error)")
+            }
+        }
+        XCTAssertEqual(source.readCount, 1)
+    }
+
+    func testPinnedClaudeObservationCannotBroadenToReplacementItem() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let settled = testClaudeKeychainLocation(reference: "settled-generation")
+        let replacement = testClaudeKeychainLocation(reference: "replacement-generation")
+        let source = fakeClaudeSource(accessToken: "replacement-token")
+        source.exactLocation = replacement
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: MemoryCredentialStore(),
+            claudeCLICredentialSource: source
+        )
+
+        XCTAssertThrowsError(
+            try switcher.liveClaudeObservation(
+                at: settled,
+                accessMode: .nonInteractive
+            )
+        ) { error in
+            guard case ClaudeCodeCredentialsKeychainError.missingLiveItem = error else {
+                return XCTFail("Expected missingLiveItem, got \(error)")
+            }
+        }
+
+        XCTAssertEqual(source.exactReadLocations, [settled])
+        XCTAssertEqual(source.readCount, 1)
+    }
+
+    func testPinnedClaudeObservationAttachesTheSettledLocation() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let settled = testClaudeKeychainLocation(reference: "settled-generation")
+        let source = fakeClaudeSource(accessToken: "settled-token")
+        source.exactLocation = settled
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: MemoryCredentialStore(),
+            claudeCLICredentialSource: source
+        )
+
+        let observation = try switcher.liveClaudeObservation(
+            at: settled,
+            accessMode: .nonInteractive
+        )
+
+        XCTAssertEqual(observation.claudeKeychainItemLocation, settled)
+        XCTAssertNotNil(observation.claudeKeychainPayloadFingerprint)
+        XCTAssertEqual(source.exactReadLocations, [settled])
+        XCTAssertEqual(source.readCount, 1)
+    }
+
+    func testPinnedClaudeOAuthRecordUsesOnlySettledGeneration() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let settled = testClaudeKeychainLocation(reference: "settled-generation")
+        let source = fakeClaudeSource(accessToken: "settled-token")
+        source.exactLocation = settled
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: MemoryCredentialStore(),
+            claudeCLICredentialSource: source
+        )
+
+        let record = try XCTUnwrap(
+            switcher.liveClaudeOAuthCredentialRecord(
+                at: settled,
+                accessMode: .nonInteractive
+            )
+        )
+
+        XCTAssertEqual(record.credentials.accessToken, "settled-token")
+        XCTAssertEqual(record.itemLocation, settled)
+        XCTAssertEqual(source.exactReadLocations, [settled])
+        XCTAssertEqual(source.readCount, 1)
+    }
+
+    func testMCPOnlyLiveItemIsLegitimateLoggedOutState() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let source = FakeClaudeCLICredentialSource()
+        source.exactLocation = testClaudeKeychainLocation(reference: "mcp-only")
+        source.itemJSON = Data(
+            #"{"mcpOAuth":{"server":{"accessToken":"mcp"}}}"#.utf8
+        )
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: MemoryCredentialStore(),
+            claudeCLICredentialSource: source
+        )
+
+        XCTAssertNil(
+            try switcher.liveClaudeOAuthCredentialRecord(
+                accessMode: .nonInteractive
+            )
+        )
+    }
+
+    func testMalformedLiveOAuthItemFailsClosed() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let source = FakeClaudeCLICredentialSource()
+        source.exactLocation = testClaudeKeychainLocation(reference: "malformed")
+        source.itemJSON = Data(#"{"claudeAiOauth":{"refreshToken":"missing-access"}}"#.utf8)
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: MemoryCredentialStore(),
+            claudeCLICredentialSource: source
+        )
+
+        XCTAssertThrowsError(
+            try switcher.liveClaudeOAuthCredentialRecord(
+                accessMode: .nonInteractive
+            )
+        ) { error in
+            guard case ClaudeCodeCredentialsKeychainError.malformedCredentialJSON = error else {
+                return XCTFail("Expected malformedCredentialJSON, got \(error)")
+            }
+        }
+    }
+
     func testSuccessfulClaudeRestoreCleansAllTemporaryRollbackMaterial() throws {
         let fixture = try TemporaryFixture()
         defer { fixture.cleanup() }
@@ -202,6 +597,7 @@ final class CLISwitcherTests: XCTestCase {
 
         let store = MemoryCredentialStore()
         let source = fakeClaudeSource()
+        source.exactLocation = testClaudeKeychainLocation(reference: "restore-success")
         let switcher = CLISwitcher(
             homeDirectory: fixture.home,
             backupDirectory: fixture.backups,
@@ -225,10 +621,49 @@ final class CLISwitcherTests: XCTestCase {
         // the transaction immediately repeated. That duplicate is gone; pin an
         // upper bound so re-introducing it (which multiplies OS password
         // prompts) fails here. The intentional reads — backup baseline, the
-        // compare-and-swap re-check, the merge read, and the post-write verify —
-        // must still happen.
+        // mutation-boundary compare, post-write verify, and any rollback check
+        // must remain within the workflow budget.
         XCTAssertGreaterThan(restoreReads, 0)
-        XCTAssertLessThanOrEqual(restoreReads, 5)
+        XCTAssertLessThanOrEqual(restoreReads, 4)
+    }
+
+    func testFailedExactClaudeRestoreRollsBackWithinFourReads() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let store = MemoryCredentialStore()
+        let source = fakeClaudeSource(accessToken: "account-a")
+        source.exactLocation = testClaudeKeychainLocation(reference: "restore-failure")
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: store,
+            claudeCLICredentialSource: source
+        )
+        var profile = AccountProfile(provider: .claude, label: "Expected identity")
+        let captured = try switcher.captureAndStoreSnapshot(for: profile)
+        profile.identity = AccountIdentity(
+            email: "expected@example.com",
+            source: .manual
+        )
+        let baselineReads = source.readCount
+
+        XCTAssertThrowsError(
+            try switcher.restoreSnapshot(
+                for: profile,
+                expectedLiveFingerprint: CredentialFingerprint.make(for: captured),
+                enforceExpectedLiveState: true,
+                accessMode: .nonInteractive
+            )
+        )
+
+        XCTAssertEqual(source.readCount - baselineReads, 4)
+        XCTAssertTrue(source.accessModes.suffix(4).allSatisfy { $0 == .nonInteractive })
+        XCTAssertEqual(
+            ClaudeOAuthCredentials.extract(
+                fromKeychainItemJSON: try XCTUnwrap(source.itemJSON)
+            )?.accessToken,
+            "account-a"
+        )
     }
 
     func testRestoreAbortsWithoutWritingWhenBackupFails() throws {
@@ -402,7 +837,8 @@ final class CLISwitcherTests: XCTestCase {
             try transaction.restore(snapshot, validateRestoredCredentials: {
                 throw CLISwitcherError.restoreValidationFailed(
                     provider: .codex,
-                    reason: "test mismatch"
+                    reason: "test mismatch",
+                    disposition: nil
                 )
             })
         ) { error in
@@ -605,7 +1041,7 @@ final class CLISwitcherTests: XCTestCase {
 
         var recoveryDirectory: URL?
         XCTAssertThrowsError(try transaction.restore(snapshot, validateRestoredCredentials: {})) { error in
-            guard case CLISwitcherError.rollbackConflict(let paths, let recovery, _) = error else {
+            guard case CLISwitcherError.rollbackConflict(let paths, let recovery, _, _) = error else {
                 return XCTFail("Expected rollbackConflict, got \(error)")
             }
             XCTAssertEqual(paths, [firstURL.path])
@@ -941,6 +1377,79 @@ final class CLISwitcherTests: XCTestCase {
         XCTAssertTrue(source.writes.isEmpty, "A failed read must not lead to a merge-into-{} write")
     }
 
+    func testWriteLiveClaudeOAuthCredentialsLeavesMalformedItemUntouched() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+
+        let malformed = Data("not-json-with-unknown-siblings".utf8)
+        let source = FakeClaudeCLICredentialSource()
+        source.itemJSON = malformed
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: MemoryCredentialStore(),
+            claudeCLICredentialSource: source
+        )
+        let credentials = try XCTUnwrap(
+            ClaudeOAuthCredentials(claudeAiOauthJSON: Data(#"{"accessToken":"fresh"}"#.utf8))
+        )
+
+        XCTAssertThrowsError(try switcher.writeLiveClaudeOAuthCredentials(credentials)) { error in
+            guard case ClaudeCodeCredentialsKeychainError.malformedCredentialJSON = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+        XCTAssertEqual(source.itemJSON, malformed)
+        XCTAssertTrue(source.writes.isEmpty)
+    }
+
+    func testLiveOAuthCASPreservesConcurrentMCPSiblingUpdate() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let source = FakeClaudeCLICredentialSource()
+        source.itemJSON = Data(
+            #"{"claudeAiOauth":{"accessToken":"stale","refreshToken":"old"},"mcpOAuth":{"server":{"accessToken":"mcp-old"}}}"#.utf8
+        )
+        source.onRead = { source, count in
+            if count == 2 {
+                source.itemJSON = Data(
+                    #"{"claudeAiOauth":{"accessToken":"stale","refreshToken":"old"},"mcpOAuth":{"server":{"accessToken":"mcp-new"}}}"#.utf8
+                )
+            }
+        }
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: MemoryCredentialStore(),
+            claudeCLICredentialSource: source
+        )
+        let refreshed = try XCTUnwrap(
+            ClaudeOAuthCredentials(
+                claudeAiOauthJSON: Data(
+                    #"{"accessToken":"fresh","refreshToken":"new"}"#.utf8
+                )
+            )
+        )
+
+        XCTAssertTrue(
+            try switcher.replaceLiveClaudeOAuthCredentials(
+                refreshed,
+                ifAccessTokenMatches: "stale",
+                accessMode: .nonInteractive
+            )
+        )
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try XCTUnwrap(source.itemJSON))
+                as? [String: Any]
+        )
+        let oauth = try XCTUnwrap(object["claudeAiOauth"] as? [String: Any])
+        let mcp = try XCTUnwrap(object["mcpOAuth"] as? [String: Any])
+        let server = try XCTUnwrap(mcp["server"] as? [String: Any])
+        XCTAssertEqual(oauth["accessToken"] as? String, "fresh")
+        XCTAssertEqual(server["accessToken"] as? String, "mcp-new")
+        XCTAssertEqual(source.readCount, 2)
+    }
+
     func testRestoreAbortsWhenKeychainReadThrows() throws {
         let fixture = try TemporaryFixture()
         defer { fixture.cleanup() }
@@ -1094,6 +1603,21 @@ final class CLISwitcherTests: XCTestCase {
         XCTAssertEqual(store.accessModes, [.userInitiated])
     }
 
+    func testRestoreValidationFailurePreservesCredentialAccessDisposition() {
+        let validationError = CLISwitcherError.restoreValidationFailed(
+            provider: .claude,
+            reason: "authorization stopped",
+            disposition: .userCancelled
+        )
+        XCTAssertEqual(validationError.credentialAccessDisposition, .userCancelled)
+
+        let nestedError = CLISwitcherError.backupFailed(
+            path: "keychain/Claude Code-credentials",
+            underlying: CredentialStoreError.keychainError(errSecInteractionNotAllowed)
+        )
+        XCTAssertEqual(nestedError.credentialAccessDisposition, .interactionRequired)
+    }
+
     private func codexAccessToken(at url: URL) throws -> String? {
         let object = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
         let tokens = object?["tokens"] as? [String: Any]
@@ -1118,6 +1642,19 @@ final class CLISwitcherTests: XCTestCase {
         source.itemJSON = Data(#"{"claudeAiOauth":{"accessToken":"\#(accessToken)","expiresAt":1783458000000},"mcpOAuth":{"serverX":{"accessToken":"mcp"}}}"#.utf8)
         return source
     }
+
+    private func testClaudeKeychainLocation(
+        reference: String
+    ) -> ClaudeKeychainItemLocation {
+        ClaudeKeychainItemLocation(
+            serviceName: ClaudeCodeCredentialsKeychain.serviceName,
+            accountName: "disposable-test-user",
+            keychainPath: "/tmp/disposable.keychain-db",
+            persistentReference: Data(reference.utf8),
+            creationDate: Date(timeIntervalSince1970: 1),
+            modificationDate: Date(timeIntervalSince1970: 2)
+        )
+    }
 }
 
 private enum InjectedRestoreFailure: Error {
@@ -1129,15 +1666,43 @@ private enum InjectedRestoreFailure: Error {
 private final class FakeClaudeCLICredentialSource: ClaudeCLICredentialSource, @unchecked Sendable {
     var itemJSON: Data?
     var readError: Error?
+    var exactLocation: ClaudeKeychainItemLocation?
+    var onRead: ((FakeClaudeCLICredentialSource, Int) -> Void)?
     private(set) var writes: [Data] = []
     private(set) var accessModes: [CredentialAccessMode] = []
     private(set) var readCount = 0
+    private(set) var exactReadLocations: [ClaudeKeychainItemLocation] = []
+
+    var supportsExactItemLocations: Bool { exactLocation != nil }
+
+    func locateLiveItem(accessMode: CredentialAccessMode) throws -> ClaudeKeychainItemLocation? {
+        accessModes.append(accessMode)
+        return exactLocation
+    }
 
     func readLiveItemJSON(accessMode: CredentialAccessMode) throws -> Data? {
         accessModes.append(accessMode)
         readCount += 1
+        onRead?(self, readCount)
         if let readError {
             throw readError
+        }
+        return itemJSON
+    }
+
+    func readLiveItemJSON(
+        at location: ClaudeKeychainItemLocation,
+        accessMode: CredentialAccessMode
+    ) throws -> Data? {
+        accessModes.append(accessMode)
+        exactReadLocations.append(location)
+        readCount += 1
+        onRead?(self, readCount)
+        if let readError {
+            throw readError
+        }
+        guard exactLocation?.identity == location.identity else {
+            return nil
         }
         return itemJSON
     }
@@ -1156,7 +1721,11 @@ private final class FakeClaudeCLICredentialSource: ClaudeCLICredentialSource, @u
 
 private final class MemoryCredentialStore: CredentialStoreProtocol {
     private var storage: [UUID: CredentialSnapshot] = [:]
+    private var revisions: [UUID: CredentialStoreRevision] = [:]
     private(set) var accessModes: [CredentialAccessMode] = []
+    private(set) var loadCount = 0
+    private(set) var saveCount = 0
+    private(set) var replaceCount = 0
 
     func save(
         snapshot: CredentialSnapshot,
@@ -1164,7 +1733,9 @@ private final class MemoryCredentialStore: CredentialStoreProtocol {
         accessMode: CredentialAccessMode
     ) throws {
         accessModes.append(accessMode)
+        saveCount += 1
         storage[accountID] = snapshot
+        revisions[accountID] = Self.freshRevision()
     }
 
     func loadSnapshot(
@@ -1172,17 +1743,51 @@ private final class MemoryCredentialStore: CredentialStoreProtocol {
         accessMode: CredentialAccessMode
     ) throws -> CredentialSnapshot? {
         accessModes.append(accessMode)
+        loadCount += 1
         return storage[accountID]
+    }
+
+    func loadVersionedSnapshot(
+        for accountID: UUID,
+        accessMode: CredentialAccessMode
+    ) throws -> VersionedCredentialSnapshot? {
+        accessModes.append(accessMode)
+        loadCount += 1
+        guard let snapshot = storage[accountID],
+              let revision = revisions[accountID] else {
+            return nil
+        }
+        return VersionedCredentialSnapshot(snapshot: snapshot, revision: revision)
+    }
+
+    func replaceSnapshot(
+        _ snapshot: CredentialSnapshot,
+        for accountID: UUID,
+        ifRevisionMatches expectedRevision: CredentialStoreRevision,
+        accessMode: CredentialAccessMode
+    ) throws -> CredentialStoreRevision? {
+        accessModes.append(accessMode)
+        replaceCount += 1
+        guard revisions[accountID] == expectedRevision else { return nil }
+        let revision = Self.freshRevision()
+        storage[accountID] = snapshot
+        revisions[accountID] = revision
+        return revision
     }
 
     func deleteSnapshot(for accountID: UUID, accessMode: CredentialAccessMode) throws {
         accessModes.append(accessMode)
         storage[accountID] = nil
+        revisions[accountID] = nil
     }
 
     func hasSnapshot(for accountID: UUID, accessMode: CredentialAccessMode) throws -> Bool {
         accessModes.append(accessMode)
         return storage[accountID] != nil
+    }
+
+    private static func freshRevision() -> CredentialStoreRevision {
+        CredentialStoreRevision(rawValue: Data(UUID().uuidString.utf8))
     }
 }
 

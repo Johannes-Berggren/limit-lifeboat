@@ -44,13 +44,9 @@ final class CredentialRestoreTransaction {
         _ snapshot: CredentialSnapshot,
         expectedLiveFingerprint: String?? = nil,
         accessMode: CredentialAccessMode = CredentialAccess.currentMode,
+        claudeKeychainItemLocation: ClaudeKeychainItemLocation? = nil,
         validateRestoredCredentials: () throws -> Void
     ) throws -> [URL] {
-        try validateExpectedLiveFingerprint(
-            expectedLiveFingerprint,
-            provider: snapshot.provider,
-            accessMode: accessMode
-        )
         var normalizedItems = try snapshot.items.map { try normalized($0, provider: snapshot.provider) }
         if snapshot.provider == .claude {
             appendMissingClaudeRemovalPatch(
@@ -139,7 +135,10 @@ final class CredentialRestoreTransaction {
             // write happens — treating it as "absent" would merge into {}
             // (dropping mcpOAuth) or skip the logout below.
             do {
-                liveKeychainBackup = try claudeCredentialSource.readLiveItemJSON(accessMode: accessMode)
+                liveKeychainBackup = try readClaudeKeychainItem(
+                    at: claudeKeychainItemLocation,
+                    accessMode: accessMode
+                )
             } catch {
                 throw CLISwitcherError.backupFailed(path: CLISwitcher.claudeKeychainItemPath, underlying: error)
             }
@@ -162,7 +161,9 @@ final class CredentialRestoreTransaction {
         try validateExpectedLiveFingerprint(
             expectedLiveFingerprint,
             provider: snapshot.provider,
-            accessMode: accessMode
+            accessMode: accessMode,
+            claudeKeychainItemLocation: claudeKeychainItemLocation,
+            claudeKeychainItemData: liveKeychainBackup
         )
 
         // Phase 2: write all items; on failure roll back from the backups.
@@ -212,18 +213,27 @@ final class CredentialRestoreTransaction {
                 )
             }
             for item in keychainItems {
-                let current = try claudeCredentialSource.readLiveItemJSON(accessMode: accessMode)
+                let current = try readClaudeKeychainItem(
+                    at: claudeKeychainItemLocation,
+                    accessMode: accessMode
+                )
                 guard current == liveKeychainBackup else {
                     throw CLISwitcherError.credentialConflict(CLISwitcher.claudeKeychainItemPath)
                 }
-                let merged = mergeClaudeAiOauth(item.contents, intoItemJSON: liveKeychainBackup)
-                try claudeCredentialSource.writeLiveItemJSON(merged, accessMode: accessMode)
+                let merged = try mergeClaudeAiOauth(item.contents, intoItemJSON: liveKeychainBackup)
+                try writeClaudeKeychainItem(
+                    merged,
+                    at: claudeKeychainItemLocation,
+                    accessMode: accessMode
+                )
                 writtenKeychain = merged
             }
             // Verification is part of the transaction: rollback material is
             // not deleted until the restored login identifies the target.
             try validateRestoredCredentials()
         } catch {
+            let originalError = error
+            var rollbackDisposition = credentialDisposition(from: originalError)
             var rollbackConflicts: [String] = []
             for destination in touched.reversed() {
                 guard let written = writtenFiles[destination.path] else { continue }
@@ -242,22 +252,36 @@ final class CredentialRestoreTransaction {
                     } else if fileManager.fileExists(atPath: destination.path) {
                         try fileManager.removeItem(at: destination)
                     }
-                } catch {
+                } catch let rollbackError {
+                    rollbackDisposition = rollbackDisposition
+                        ?? credentialDisposition(from: rollbackError)
                     rollbackConflicts.append(destination.path)
                 }
             }
             if let writtenKeychain {
                 do {
-                    if try claudeCredentialSource.readLiveItemJSON(accessMode: accessMode) == writtenKeychain {
+                    if try readClaudeKeychainItem(
+                        at: claudeKeychainItemLocation,
+                        accessMode: accessMode
+                    ) == writtenKeychain {
                         if let liveKeychainBackup {
-                            try claudeCredentialSource.writeLiveItemJSON(liveKeychainBackup, accessMode: accessMode)
+                            try writeClaudeKeychainItem(
+                                liveKeychainBackup,
+                                at: claudeKeychainItemLocation,
+                                accessMode: accessMode
+                            )
                         } else {
-                            try claudeCredentialSource.deleteLiveItem(accessMode: accessMode)
+                            try deleteClaudeKeychainItem(
+                                at: claudeKeychainItemLocation,
+                                accessMode: accessMode
+                            )
                         }
                     } else {
                         rollbackConflicts.append(CLISwitcher.claudeKeychainItemPath)
                     }
-                } catch {
+                } catch let rollbackError {
+                    rollbackDisposition = rollbackDisposition
+                        ?? credentialDisposition(from: rollbackError)
                     rollbackConflicts.append(CLISwitcher.claudeKeychainItemPath)
                 }
             }
@@ -266,10 +290,11 @@ final class CredentialRestoreTransaction {
                 throw CLISwitcherError.rollbackConflict(
                     paths: rollbackConflicts,
                     recoveryDirectory: restoreBackupDirectory,
-                    underlying: error
+                    underlying: originalError,
+                    disposition: rollbackDisposition
                 )
             }
-            throw error
+            throw originalError
         }
 
         return touched
@@ -278,7 +303,9 @@ final class CredentialRestoreTransaction {
     private func validateExpectedLiveFingerprint(
         _ expected: String??,
         provider: Provider,
-        accessMode: CredentialAccessMode
+        accessMode: CredentialAccessMode,
+        claudeKeychainItemLocation: ClaudeKeychainItemLocation?,
+        claudeKeychainItemData: Data?
     ) throws {
         guard let expected else { return }
         let observation: LiveCredentialObservation
@@ -293,11 +320,70 @@ final class CredentialRestoreTransaction {
                 homeDirectory: homeDirectory,
                 fileManager: fileManager,
                 credentialSource: claudeCredentialSource
-            ).observe(accessMode: accessMode)
+            ).observe(
+                liveItem: claudeKeychainItemData,
+                location: claudeKeychainItemLocation
+            )
         }
         guard observation.credentialFingerprint == expected else {
             throw CLISwitcherError.credentialConflict("live \(provider.displayName) credentials")
         }
+    }
+
+    private func readClaudeKeychainItem(
+        at location: ClaudeKeychainItemLocation?,
+        accessMode: CredentialAccessMode
+    ) throws -> Data? {
+        if let location {
+            return try claudeCredentialSource.readLiveItemJSON(
+                at: location,
+                accessMode: accessMode
+            )
+        }
+        return try claudeCredentialSource.readLiveItemJSON(accessMode: accessMode)
+    }
+
+    private func writeClaudeKeychainItem(
+        _ data: Data,
+        at location: ClaudeKeychainItemLocation?,
+        accessMode: CredentialAccessMode
+    ) throws {
+        if let location {
+            try claudeCredentialSource.writeLiveItemJSON(
+                data,
+                at: location,
+                accessMode: accessMode
+            )
+        } else {
+            try claudeCredentialSource.writeLiveItemJSON(data, accessMode: accessMode)
+        }
+    }
+
+    private func deleteClaudeKeychainItem(
+        at location: ClaudeKeychainItemLocation?,
+        accessMode: CredentialAccessMode
+    ) throws {
+        if let location {
+            try claudeCredentialSource.deleteLiveItem(
+                at: location,
+                accessMode: accessMode
+            )
+        } else {
+            try claudeCredentialSource.deleteLiveItem(accessMode: accessMode)
+        }
+    }
+
+    private func credentialDisposition(from error: Error) -> CredentialAccessDisposition? {
+        if let error = error as? ClaudeCodeCredentialsKeychainError {
+            return error.credentialAccessDisposition
+        }
+        if let error = error as? CredentialStoreError {
+            return error.credentialAccessDisposition
+        }
+        if let error = error as? CLISwitcherError {
+            return error.credentialAccessDisposition
+        }
+        return nil
     }
 
     private func resolve(relativePath: String) -> URL {

@@ -152,42 +152,45 @@ open "apps/macos/dist/Limit Lifeboat.app"
 Do not use `swift run`: notifications, Automation, and Keychain identity rely
 on running from an application bundle. Local packaging uses an Apple
 Development identity when available and otherwise falls back to ad-hoc
-signing. Quit the copy in `apps/macos/dist` before rebuilding it.
+signing. It defaults to the visibly named **Limit Lifeboat Dev** variant, whose
+bundle ID, preferences, Application Support folder, and app-owned Keychain
+items are isolated from the installed release; updates and launch at login are
+disabled. Quit the copy in `apps/macos/dist` before rebuilding it.
 
-The `/usr/bin/security` interoperability test is opt-in because macOS may show
-a real authorization dialog for that subprocess:
+The Security.framework integration suite is opt-in. It creates a disposable
+temporary Keychain, scopes every query to it, and never adds it to the user's
+search list or touches the login Keychain:
 
 ```bash
-RUN_KEYCHAIN_INTEROP_TESTS=1 swift test --package-path apps/macos \
-  --filter testSecurityToolInteroperability
+RUN_DISPOSABLE_KEYCHAIN_TESTS=1 swift test --package-path apps/macos \
+  --filter testDisposableCustomKeychainDiscoveryAndPinnedAccessIntegration
 ```
 
 ### Troubleshooting keychain prompts
 
-**`claude` demands your login keychain password on every run.** Newer Claude
-Code builds read the `Claude Code-credentials` item natively (team
-`Q6L2SF6YDW`) instead of via `/usr/bin/security`, but the item's keychain
-partition list typically only allows `apple-tool:` and the team that has been
-granted before — so macOS asks for the keychain password each time and
-"Always Allow" never sticks. Fix it once:
+**Limit Lifeboat needs access to Claude's credential.** Open the menu bar
+popover, choose **More → Authorize Keychain Access…**, read the explanation,
+then enter your macOS password once and choose **Always Allow** in the native
+Keychain dialog. Choosing only **Allow** grants access for that read but does
+not make it durable, so the app keeps the authorization action available and
+does not retry automatically.
 
-```bash
-apps/macos/scripts/fix-keychain-prompts.sh
-```
+Background refreshes, login watchers, popover opens, and `/usage` probes are
+noninteractive. The `/usage` fallback launches Claude only when a valid OAuth
+token has already been read and injects it as `CLAUDE_CODE_OAUTH_TOKEN`; it
+never launches Claude to make the CLI read Keychain itself.
 
-Enter your login keychain password when asked, then click **Always Allow** on
-the next claude dialog. That grant is stored against Claude Code's
-identifier+team code requirement, so it survives claude updates. The app's
-`/usage` fallback probe also passes the current token to the CLI it spawns
-(`CLAUDE_CODE_OAUTH_TOKEN`), so the probe itself never triggers the CLI's
-keychain read.
+If the app reports duplicate or malformed Claude items, it deliberately does
+not choose, rewrite, or delete one. Quit workspace builds and relaunch the
+stable app in `/Applications`, or explicitly recreate the Claude login.
 
 **Dev builds re-prompt after every rebuild.** Ad-hoc signed bundles get a
 per-build `cdhash` grant that dies with the next build. `package-app.sh`
 auto-picks an Apple Development identity (or honors `SIGN_IDENTITY`), which
-keeps the code requirement stable across rebuilds. The tell for past ad-hoc
-grants: `security dump-keychain -a` shows `requirement: cdhash H"..."`
-entries with `(status -67068)` for deleted bundle paths.
+keeps the code requirement stable across rebuilds. The app labels ad-hoc
+authorization as nondurable; relaunch an Apple Development-signed workspace
+bundle or the installed Developer ID-signed release before authorizing if the
+grant needs to survive a rebuild.
 
 **Never replace a running bundle.** `manage-workspace-app.sh check` refuses
 to overwrite a live app; quit it first. Swapping the binary under a running

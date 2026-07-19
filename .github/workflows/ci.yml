@@ -37,11 +37,26 @@ jobs:
           grep -Fq '"version" : "2.9.4"' apps/macos/Package.resolved
       - name: Test Swift package
         run: swift test --package-path apps/macos --disable-keychain
-      - name: Package arm64 app
+      - name: Package development arm64 app
         env:
           SIGN_IDENTITY: "-"
         run: apps/macos/scripts/package-app.sh
-      - name: Validate packaged app
+      - name: Validate development isolation
+        run: |
+          set -euo pipefail
+          info="apps/macos/dist/Limit Lifeboat.app/Contents/Info.plist"
+          test "$(plutil -extract CFBundleDisplayName raw -o - "$info")" = "Limit Lifeboat Dev"
+          test "$(plutil -extract CFBundleIdentifier raw -o - "$info")" = "com.limitlifeboat.app.dev"
+          test "$(plutil -extract LimitLifeboatAppVariant raw -o - "$info")" = "development"
+          test "$(plutil -extract LimitLifeboatApplicationSupportDirectoryName raw -o - "$info")" = "LimitLifeboat-Dev"
+          test "$(plutil -extract LimitLifeboatCredentialService raw -o - "$info")" = "com.limitlifeboat.app.dev.credentials"
+          test "$(plutil -extract SUEnableAutomaticChecks raw -o - "$info")" = "false"
+      - name: Package distribution arm64 app
+        env:
+          APP_VARIANT: distribution
+          SIGN_IDENTITY: "-"
+        run: apps/macos/scripts/package-app.sh
+      - name: Validate packaged distribution app
         run: |
           set -euo pipefail
           app="apps/macos/dist/Limit Lifeboat.app"
@@ -59,6 +74,10 @@ jobs:
           test "$(lipo -archs "$executable")" = "arm64"
           test "$(xcrun vtool -show-build "$executable" | awk '$1 == "minos" { print $2; exit }')" = "14.0"
           test "$(plutil -extract CFBundleIdentifier raw -o - "$info")" = "com.limitlifeboat.app"
+          test "$(plutil -extract CFBundleDisplayName raw -o - "$info")" = "Limit Lifeboat"
+          test "$(plutil -extract LimitLifeboatAppVariant raw -o - "$info")" = "distribution"
+          test "$(plutil -extract LimitLifeboatApplicationSupportDirectoryName raw -o - "$info")" = "LimitLifeboat"
+          test "$(plutil -extract LimitLifeboatCredentialService raw -o - "$info")" = "com.limitlifeboat.app.credentials"
           test "$(plutil -extract CFBundleExecutable raw -o - "$info")" = "LimitLifeboat"
           test "$(plutil -extract CFBundleShortVersionString raw -o - "$info")" = "$(tr -d '[:space:]' < apps/macos/VERSION)"
           test "$(plutil -extract CFBundleVersion raw -o - "$info")" = "$(git rev-list --count HEAD)"
@@ -97,6 +116,18 @@ jobs:
           codesign --display --entitlements - --xml "$app" > "$signed_entitlements"
           plutil -lint "$signed_entitlements"
           test "$(plutil -convert json -o - "$signed_entitlements")" = "$expected_entitlements"
+      - name: Validate stable distribution signing policy
+        run: |
+          set -euo pipefail
+          release="apps/macos/scripts/release.sh"
+          runtime="apps/macos/Sources/LimitLifeboat/AppMain.swift"
+          grep -Fq 'TeamIdentifier=$TEAM_ID' "$release"
+          grep -Fq 'codesign --display --requirements - "$APP_DIR"' "$release"
+          grep -Fq 'designated => identifier "$BUNDLE_ID"' "$release"
+          grep -Fq 'anchor apple' "$release"
+          grep -Fq 'subject.OU] = "$TEAM_ID"' "$release"
+          grep -Fq 'case .developerIDApplication(let teamIdentifier)' "$runtime"
+          grep -Fq 'teamIdentifier == DistributionIdentity.appleTeamIdentifier' "$runtime"
 
   site:
     name: Marketing site
