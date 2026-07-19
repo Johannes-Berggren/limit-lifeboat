@@ -1,6 +1,7 @@
 import AppKit
 import LimitLifeboatCore
 import ServiceManagement
+import UserNotifications
 
 private var retainedDelegate: AppDelegate?
 
@@ -23,6 +24,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var executableMonitor: RunningExecutableMonitor?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Registered before AppState exists so a notification click that
+        // launches the app is still delivered to this delegate. Guarded like
+        // every UNUserNotificationCenter touch: an unbundled `swift run` has
+        // no notification center and must not crash.
+        if Bundle.main.bundleIdentifier != nil {
+            UNUserNotificationCenter.current().delegate = self
+        }
         do {
             guard let executableURL = Bundle.main.executableURL else {
                 throw RunningExecutableIntegrityError.unavailable(path: Bundle.main.bundlePath)
@@ -89,6 +97,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func handleNotificationResponse(
+        actionIdentifier: String,
+        action: String?,
+        providerRaw: String?,
+        targetRaw: String?
+    ) async {
+        let isSwitchAction = actionIdentifier == NotificationSwitchAction.actionID
+        guard isSwitchAction,
+              action == NotificationSwitchAction.actionValue,
+              let providerRaw,
+              let provider = Provider(rawValue: providerRaw) else {
+            // Tapping the notification body (or an unrecognized payload) just
+            // brings up the popover as the place to act.
+            if actionIdentifier == UNNotificationDefaultActionIdentifier {
+                menuBarController?.showPopover()
+            }
+            return
+        }
+        await state?.performNotificationSwitch(
+            provider: provider,
+            embeddedTargetID: targetRaw.flatMap(UUID.init)
+        )
+    }
+
     private func handleRunningExecutableInvalidation() {
         state?.stopForInvalidatedBundle()
 
@@ -99,5 +131,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "Quit")
         alert.runModal()
         NSApplication.shared.terminate(nil)
+    }
+}
+
+extension AppDelegate: UNUserNotificationCenterDelegate {
+    /// Alerts must stay visible even while this accessory app counts as
+    /// active (its popover being open would otherwise swallow them).
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        [.banner, .sound]
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse
+    ) async {
+        // Extract the Sendable pieces before hopping to the main actor —
+        // UNNotificationResponse and its userInfo dictionary are not.
+        let userInfo = response.notification.request.content.userInfo
+        let actionIdentifier = response.actionIdentifier
+        let action = userInfo[NotificationSwitchAction.actionKey] as? String
+        let providerRaw = userInfo[NotificationSwitchAction.providerKey] as? String
+        let targetRaw = userInfo[NotificationSwitchAction.targetKey] as? String
+        await handleNotificationResponse(
+            actionIdentifier: actionIdentifier,
+            action: action,
+            providerRaw: providerRaw,
+            targetRaw: targetRaw
+        )
     }
 }

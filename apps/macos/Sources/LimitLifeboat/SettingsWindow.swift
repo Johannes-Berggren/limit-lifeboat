@@ -11,7 +11,11 @@ final class SettingsWindowController {
     func show(state: AppState) {
         if window == nil {
             let hosting = NSHostingController(
-                rootView: SettingsView(settings: state.settings, updater: state.updater)
+                rootView: SettingsView(
+                    settings: state.settings,
+                    updater: state.updater,
+                    exportUsageHistory: { [weak state] in state?.exportAllUsageHistoryCSV() }
+                )
             )
             let window = NSWindow(contentViewController: hosting)
             window.title = "Limit Lifeboat Settings"
@@ -74,6 +78,9 @@ enum LaunchAtLogin {
 struct SettingsView: View {
     @ObservedObject var settings: SettingsStore
     @ObservedObject var updater: AppUpdater
+    /// Optional so previews and tests can construct the view without an
+    /// AppState behind it.
+    var exportUsageHistory: (() -> Void)? = nil
 
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
     @State private var launchAtLoginMessage: String?
@@ -128,6 +135,14 @@ struct SettingsView: View {
                     Section("Notifications") {
                         Toggle("Warn when included usage nears its limit", isOn: $settings.usageAlertsEnabled)
                         Toggle("Alert when an account's quota is likely back", isOn: $settings.resetAlertsEnabled)
+                        Toggle("Also alert for the short session window (~5h)", isOn: $settings.sessionWindowAlertsEnabled)
+                        Toggle("Send a weekly usage summary", isOn: $settings.weeklyDigestEnabled)
+                        Label(
+                            "Session alerts can be chatty during heavy use — every long working session burns that window down.",
+                            systemImage: "info.circle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     }
 
                     Section("Switching") {
@@ -163,6 +178,19 @@ struct SettingsView: View {
                             updater.checkForUpdates()
                         }
                         .disabled(!updater.canCheckForUpdates)
+                    }
+
+                    Section("History") {
+                        Button("Export Usage History as CSV…") {
+                            exportUsageHistory?()
+                        }
+                        .disabled(exportUsageHistory == nil)
+                        Label(
+                            "Every account's usage readings from the last 30 days. The export names accounts by their labels only — never emails or organizations.",
+                            systemImage: "info.circle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     }
 
                     Section("Troubleshooting") {

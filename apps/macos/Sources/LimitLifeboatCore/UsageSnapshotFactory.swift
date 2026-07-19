@@ -173,7 +173,8 @@ public enum UsageSnapshotFactory {
         lastRefreshed: Date,
         parseConfidence: ParseConfidence = .high,
         message: String,
-        payAsYouGoState: PayAsYouGoState? = nil
+        payAsYouGoState: PayAsYouGoState? = nil,
+        payAsYouGoSpend: PayAsYouGoSpend? = nil
     ) -> UsageSnapshot {
         guard let selected = windows.max(by: { $0.usedPercent < $1.usedPercent }) else {
             return UsageSnapshot(
@@ -185,7 +186,8 @@ public enum UsageSnapshotFactory {
                 lastRefreshed: lastRefreshed,
                 parseConfidence: .none,
                 message: message,
-                payAsYouGoState: payAsYouGoState
+                payAsYouGoState: payAsYouGoState,
+                payAsYouGoSpend: payAsYouGoSpend
             )
         }
 
@@ -204,7 +206,8 @@ public enum UsageSnapshotFactory {
             lastRefreshed: lastRefreshed,
             parseConfidence: parseConfidence,
             message: message,
-            payAsYouGoState: payAsYouGoState
+            payAsYouGoState: payAsYouGoState,
+            payAsYouGoSpend: payAsYouGoSpend
         )
     }
 }

@@ -73,4 +73,35 @@ final class UsageSnapshotFactoryTests: XCTestCase {
         XCTAssertEqual(snapshot.parseConfidence, .none)
         XCTAssertEqual(snapshot.message, "No reading")
     }
+
+    /// Spend must survive the empty-windows branch too, so a response that
+    /// carried only the extra_usage block still shows the month's spend.
+    func testSnapshotCarriesPayAsYouGoSpendThroughBothBranches() {
+        let spend = PayAsYouGoSpend(monthlyLimit: 50, usedCredits: 12.5)
+        let empty = UsageSnapshotFactory.snapshot(
+            accountID: UUID(),
+            provider: .claude,
+            windows: [],
+            source: "test",
+            lastRefreshed: Date(),
+            message: "",
+            payAsYouGoSpend: spend
+        )
+        XCTAssertEqual(empty.payAsYouGoSpend, spend)
+
+        let window = UsageSnapshotFactory.window(
+            descriptor: UsageWindowDescriptor(id: "session", kind: .session, label: "Session"),
+            usedPercent: 40
+        )
+        let populated = UsageSnapshotFactory.snapshot(
+            accountID: UUID(),
+            provider: .claude,
+            windows: [window],
+            source: "test",
+            lastRefreshed: Date(),
+            message: "",
+            payAsYouGoSpend: spend
+        )
+        XCTAssertEqual(populated.payAsYouGoSpend, spend)
+    }
 }

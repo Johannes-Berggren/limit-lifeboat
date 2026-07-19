@@ -1,6 +1,8 @@
+import AppKit
 import Charts
 import LimitLifeboatCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Usage-over-time line chart for one account, one series per quota window.
 /// Opened from the account card's "…" menu.
@@ -99,6 +101,22 @@ struct UsageHistoryChartView: View {
                             }
                         }
 
+                        if !trends.isEmpty {
+                            VStack(alignment: .leading, spacing: DS.Spacing.xs) {
+                                ForEach(trends, id: \.window.id) { item in
+                                    HStack(spacing: DS.Spacing.tight) {
+                                        Circle()
+                                            .fill(seriesColor(for: item.window.label))
+                                            .frame(width: 7, height: 7)
+                                        Text(trendText(window: item.window, trend: item.trend))
+                                            .font(.caption)
+                                            .foregroundStyle(trendColor(item.trend))
+                                            .lineLimit(1)
+                                    }
+                                }
+                            }
+                        }
+
                         Chart(points) { point in
                             LineMark(
                                 x: .value("Time", point.timestamp),
@@ -138,6 +156,9 @@ struct UsageHistoryChartView: View {
                 }
 
                 HStack {
+                    Button("Export CSV…") { exportCSV() }
+                        .help("Saves this account's full retained history (up to 30 days) as CSV — not just the visible range.")
+                        .disabled(records.isEmpty)
                     Spacer()
                     Button("Done") { dismiss() }
                         .keyboardShortcut(.defaultAction)
@@ -187,26 +208,97 @@ struct UsageHistoryChartView: View {
             .sorted { $0.label.localizedStandardCompare($1.label) == .orderedAscending }
     }
 
+    /// Week-over-week trends for the weekly-shaped windows, computed over the
+    /// FULL retained history (the visible scope is often shorter than the two
+    /// window lives the comparison needs). Windows with insufficient history
+    /// render nothing.
+    private var trends: [(window: UsageWindow, trend: UsageTrend)] {
+        let analyzer = UsageTrendAnalyzer()
+        return currentWindows
+            .filter { $0.kind == .weekly || $0.kind == .weeklyScoped }
+            .compactMap { window in
+                let readings = records.compactMap { record -> BurnRateEstimator.Reading? in
+                    guard let reading = record.windows.first(where: { $0.id == window.id }) else {
+                        return nil
+                    }
+                    return BurnRateEstimator.Reading(timestamp: record.timestamp, reading: reading)
+                }
+                guard let trend = analyzer.periodOverPeriodTrend(readings: readings, window: window) else {
+                    return nil
+                }
+                return (window, trend)
+            }
+    }
+
+    private func trendText(window: UsageWindow, trend: UsageTrend) -> String {
+        let current = Int(trend.currentUsedPercent.rounded())
+        guard let relative = trend.relativeChange else {
+            let delta = Int(trend.deltaPercentagePoints.rounded())
+            if abs(delta) < 2 {
+                return "\(window.label): \(current)% used — about the same as last week"
+            }
+            return "\(window.label): \(current)% used — \(delta > 0 ? "+" : "")\(delta) pts vs last week"
+        }
+        let percent = Int((abs(relative) * 100).rounded())
+        if percent < 5 {
+            return "\(window.label): \(current)% used — about the same pace as last week"
+        }
+        return "\(window.label): \(current)% used — ~\(percent)% \(relative > 0 ? "faster" : "slower") than last week"
+    }
+
+    private func trendColor(_ trend: UsageTrend) -> Color {
+        guard let relative = trend.relativeChange, relative >= 0.05 else {
+            return .secondary
+        }
+        return DS.presentationColor(.warning)
+    }
+
+    private func exportCSV() {
+        let csv = UsageHistoryCSVExporter().csv(
+            records: [profile.id: records],
+            accounts: [profile.id: .init(label: profile.label, provider: profile.provider)]
+        )
+        UsageHistoryCSVSaver.save(
+            csv: csv,
+            suggestedName: UsageHistoryCSVSaver.fileName(scope: profile.label)
+        )
+    }
+
     private func label(for reading: UsageWindowReading) -> String {
         // Prefer the real label from the account's current windows; fall
         // back to reconstructing one from the id for windows that no longer
-        // exist ("weekly-fable" → "Weekly (Fable)").
-        if let current = currentWindows.first(where: { $0.id == reading.id }) {
-            return current.label
+        // exist.
+        currentWindows.first(where: { $0.id == reading.id })?.label ?? reading.fallbackLabel
+    }
+}
+
+/// The shared save-panel flow for CSV exports (per-account from the history
+/// sheet, all-accounts from Settings).
+@MainActor
+enum UsageHistoryCSVSaver {
+    static func fileName(scope: String) -> String {
+        let slug = UsageWindowID.slug(scope)
+        let date = Date().formatted(.iso8601.year().month().day())
+        return "limit-lifeboat-usage-\(slug)-\(date).csv"
+    }
+
+    static func save(csv: String, suggestedName: String) {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.commaSeparatedText]
+        panel.nameFieldStringValue = suggestedName
+        panel.canCreateDirectories = true
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
         }
-        switch reading.kind {
-        case .session:
-            return "Session"
-        case .weekly:
-            return "Weekly"
-        case .weeklyScoped:
-            let scope = reading.id
-                .replacingOccurrences(of: "weekly-", with: "")
-                .replacingOccurrences(of: "-", with: " ")
-                .capitalized
-            return scope.isEmpty ? "Weekly (scoped)" : "Weekly (\(scope))"
-        case .other:
-            return reading.id.capitalized
+        do {
+            try Data(csv.utf8).write(to: url)
+        } catch {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Could not save the CSV export"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
         }
     }
 }

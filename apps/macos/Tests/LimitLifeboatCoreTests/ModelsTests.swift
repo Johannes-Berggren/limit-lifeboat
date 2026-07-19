@@ -260,6 +260,51 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(decoded, original)
     }
 
+    func testSnapshotRoundTripsPayAsYouGoSpend() throws {
+        let original = UsageSnapshot(
+            accountID: UUID(),
+            provider: .claude,
+            windows: [
+                UsageWindow(id: "session", kind: .session, label: "Session (5h)", usedPercent: 12, riskLevel: .healthy)
+            ],
+            riskLevel: .healthy,
+            source: "test",
+            lastRefreshed: Date(timeIntervalSince1970: 1_783_000_000),
+            parseConfidence: .high,
+            message: "m",
+            payAsYouGoState: .enabledIdle,
+            payAsYouGoSpend: PayAsYouGoSpend(monthlyLimit: 50, usedCredits: 12.5, utilization: 25)
+        )
+
+        let data = try JSONEncoder.appEncoder.encode(original)
+        let decoded = try JSONDecoder.appDecoder.decode(UsageSnapshot.self, from: data)
+        XCTAssertEqual(decoded, original)
+        XCTAssertEqual(decoded.payAsYouGoSpend?.usedCredits, 12.5)
+    }
+
+    func testPayAsYouGoSpendSummaryText() {
+        XCTAssertEqual(
+            PayAsYouGoSpend(monthlyLimit: 50, usedCredits: 12.5).summaryText,
+            "$12.50 of $50 extra usage this month"
+        )
+        XCTAssertEqual(
+            PayAsYouGoSpend(usedCredits: 42).summaryText,
+            "$42 extra usage this month"
+        )
+        // Utilization is a last-resort fallback; both fraction and percent
+        // shapes must read sensibly because the API's shape is unconfirmed.
+        XCTAssertEqual(
+            PayAsYouGoSpend(utilization: 0.25).summaryText,
+            "Extra usage at 25% of this month's cap"
+        )
+        XCTAssertEqual(
+            PayAsYouGoSpend(utilization: 25).summaryText,
+            "Extra usage at 25% of this month's cap"
+        )
+        XCTAssertNil(PayAsYouGoSpend().summaryText)
+        XCTAssertNil(PayAsYouGoSpend(monthlyLimit: 50).summaryText)
+    }
+
     /// The load-bearing migration guarantee: snapshots persisted before
     /// `windows` existed must still decode (with an empty windows array) rather
     /// than throwing and wiping stored usage on first launch.
@@ -289,6 +334,7 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(snapshot.riskLevel, .healthy)
         // Legacy snapshots still surface a window for display/alerts via the fallback.
         XCTAssertEqual(snapshot.displayWindows.count, 1)
+        XCTAssertNil(snapshot.payAsYouGoSpend)
     }
 
     func testOrderedDisplayWindowsCollapsesDuplicateIDsKeepingLastOccurrence() {

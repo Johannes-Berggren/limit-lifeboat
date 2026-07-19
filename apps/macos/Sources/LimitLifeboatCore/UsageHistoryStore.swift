@@ -36,6 +36,29 @@ public struct UsageWindowReading: Codable, Equatable, Sendable {
     }
 }
 
+extension UsageWindowReading {
+    /// Display label reconstructed from the id, for windows that no longer
+    /// exist on the account ("weekly-fable" → "Weekly (Fable)"). Readings
+    /// deliberately store no label (it would defeat dedupe), so consumers
+    /// prefer the account's current window labels and fall back to this.
+    public var fallbackLabel: String {
+        switch kind {
+        case .session:
+            return "Session"
+        case .weekly:
+            return "Weekly"
+        case .weeklyScoped:
+            let scope = id
+                .replacingOccurrences(of: "weekly-", with: "")
+                .replacingOccurrences(of: "-", with: " ")
+                .capitalized
+            return scope.isEmpty ? "Weekly (scoped)" : "Weekly (\(scope))"
+        case .other:
+            return id.capitalized
+        }
+    }
+}
+
 /// Everything one refresh learned about one account: a timestamped reading of
 /// every reported window. One JSONL line per record.
 public struct UsageHistoryRecord: Codable, Equatable, Sendable {

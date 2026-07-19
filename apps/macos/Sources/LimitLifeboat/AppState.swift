@@ -53,9 +53,9 @@ final class AppState: ObservableObject {
     private let usageAlertController = UsageAlertController()
     private let resetAlertPlanner = ResetAlertPlanner()
     private let historyStore: UsageHistoryStore?
+    private let eventStore: AppEventStore
     private let burnRateEstimator = BurnRateEstimator()
     private let switchAdvisor = SwitchAdvisor()
-    private let paceAlertPlanner = PaceAlertPlanner()
     private let settingsWindowController = SettingsWindowController()
     private let terminalLauncher = TerminalCommandLauncher()
     private var refreshTask: Task<Void, Never>?
@@ -101,6 +101,7 @@ final class AppState: ObservableObject {
             self.historyStore = nil
             AppLog.history.error("Could not open the usage history store: \(error.localizedDescription, privacy: .public)")
         }
+        self.eventStore = AppEventStore(applicationSupportDirectory: repository.applicationSupportDirectory)
         refreshStoredSnapshotStatuses()
         updateMenuBarSummary()
         // History can be tens of thousands of lines; load it off the launch
@@ -114,6 +115,11 @@ final class AppState: ObservableObject {
                 try self.historyStore?.load()
             } catch {
                 AppLog.history.error("Could not load usage history: \(error.localizedDescription, privacy: .public)")
+            }
+            do {
+                try self.eventStore.load()
+            } catch {
+                AppLog.history.error("Could not load the app event log: \(error.localizedDescription, privacy: .public)")
             }
             self.recomputeAllEstimates()
         }
@@ -297,6 +303,65 @@ final class AppState: ObservableObject {
         notifyElapsedResets()
         updateSwitchAdvice()
         updateMenuBarSummary()
+        maybeSendWeeklyDigest()
+    }
+
+    /// Digest due-ness is checked here rather than via a calendar-triggered
+    /// notification: a calendar trigger freezes its content at scheduling
+    /// time and fires when the app is not running — exactly when the numbers
+    /// are stale and the user cannot act. Checked after a refresh, the digest
+    /// is at most one refresh interval old; one due while the app was closed
+    /// arrives on the next launch's first refresh.
+    private func maybeSendWeeklyDigest(now: Date = Date()) {
+        guard settings.weeklyDigestEnabled else {
+            return
+        }
+        let planner = WeeklyDigestPlanner()
+        guard let lastSent = usageAlertController.lastWeeklyDigestSentAt else {
+            // First run arms the schedule without firing — a digest over
+            // history that predates the feature would be near-empty.
+            usageAlertController.markWeeklyDigestSent(at: now)
+            return
+        }
+        guard planner.isDue(lastSent: lastSent, now: now) else {
+            return
+        }
+
+        let period = planner.period(endingAt: now)
+        let accounts = profiles.map { profile -> WeeklyDigestPlanner.AccountInput in
+            var windows: [String: WeeklyDigestPlanner.WindowInput] = [:]
+            for record in historyStore?.records(for: profile.id) ?? [] {
+                for reading in record.windows {
+                    var input = windows[reading.id] ?? WeeklyDigestPlanner.WindowInput(
+                        id: reading.id,
+                        kind: reading.kind,
+                        label: snapshots[profile.id]?.orderedDisplayWindows
+                            .first { $0.id == reading.id }?.label ?? reading.fallbackLabel,
+                        readings: []
+                    )
+                    input.readings.append(BurnRateEstimator.Reading(timestamp: record.timestamp, reading: reading))
+                    windows[reading.id] = input
+                }
+            }
+            return WeeklyDigestPlanner.AccountInput(
+                profileID: profile.id,
+                label: profile.label,
+                provider: profile.provider,
+                windows: Array(windows.values)
+            )
+        }
+
+        let digest = planner.build(
+            accounts: accounts,
+            events: eventStore.events(in: period),
+            period: period
+        )
+        // Marked sent even when there is nothing to say, so an empty week
+        // does not re-run this on every refresh cycle.
+        usageAlertController.markWeeklyDigestSent(at: now)
+        if let digest {
+            usageAlertController.handleWeeklyDigest(digest)
+        }
     }
 
     /// Recomputes the best-switch-target hint from the fresh readings and,
@@ -307,21 +372,78 @@ final class AppState: ObservableObject {
         // provider-scoped, so a Claude account can't be a switch target for a
         // depleted Codex login. The advisor itself is provider-agnostic.
         for provider in Provider.allCases {
-            let candidates = profiles
-                .filter { $0.provider == provider }
-                .map { profile in
-                    SwitchCandidate(
-                        profileID: profile.id,
-                        label: profile.label,
-                        isActiveCLI: profile.isActiveCLI,
-                        hasStoredCredentials: hasStoredSnapshot(for: profile)
-                            && !(refreshStates[profile.id]?.requiresLogin ?? false),
-                        snapshot: snapshots[profile.id]
-                    )
-                }
-            let advice = switchAdvisor.advise(candidates: candidates)
+            let advice = switchAdvisor.advise(candidates: switchCandidates(for: provider))
             switchAdvice[provider] = advice
             maybeAutoSwitch(provider: provider, advice: advice)
+        }
+    }
+
+    private func switchCandidates(for provider: Provider) -> [SwitchCandidate] {
+        profiles
+            .filter { $0.provider == provider }
+            .map { profile in
+                SwitchCandidate(
+                    profileID: profile.id,
+                    label: profile.label,
+                    isActiveCLI: profile.isActiveCLI,
+                    hasStoredCredentials: hasStoredSnapshot(for: profile)
+                        && !(refreshStates[profile.id]?.requiresLogin ?? false),
+                    snapshot: snapshots[profile.id]
+                )
+            }
+    }
+
+    /// A clicked "Switch" button on a notification. The notification may be
+    /// hours old, so the embedded target is only a fallback — the click
+    /// re-resolves against the current advice (see NotificationSwitchResolver).
+    /// The user acted deliberately, so every outcome is answered with a
+    /// notification rather than failing silently into a closed popover.
+    func performNotificationSwitch(provider: Provider, embeddedTargetID: UUID?) async {
+        let resolution = NotificationSwitchResolver().resolve(
+            embeddedTargetID: embeddedTargetID,
+            advice: switchAdvice[provider],
+            candidates: switchCandidates(for: provider)
+        )
+        switch resolution {
+        case .switchTo(let profileID, let label):
+            guard let target = profiles.first(where: { $0.id == profileID }) else {
+                usageAlertController.handleNotificationSwitchOutcome(
+                    title: "Could not switch",
+                    body: "\(label) is no longer saved in Limit Lifeboat."
+                )
+                return
+            }
+            let previousLabel = activeProfile(for: provider)?.label
+            // interactive: false — a notification click has no key window to
+            // anchor confirmation modals on; problems surface as notifications.
+            if await switchCLI(to: target, interactive: false) {
+                // The user chose this switch, so auto-switch must honor it the
+                // same way it honors an in-app manual switch.
+                lastManualSwitchAt[provider] = Date()
+                usageAlertController.handleAutoSwitch(
+                    fromLabel: previousLabel,
+                    toLabel: target.label,
+                    provider: provider,
+                    reason: nil
+                )
+            } else {
+                usageAlertController.handleNotificationSwitchOutcome(
+                    title: "Could not switch to \(target.label)",
+                    body: statusMessage.isEmpty
+                        ? "Open Limit Lifeboat for details."
+                        : statusMessage
+                )
+            }
+        case .alreadyActive(let label):
+            usageAlertController.handleNotificationSwitchOutcome(
+                title: "Already on \(label)",
+                body: "The \(provider.displayName) CLI is already using \(label)."
+            )
+        case .noEligibleTarget(let reason):
+            usageAlertController.handleNotificationSwitchOutcome(
+                title: "No account ready to switch to",
+                body: "\(reason) Open Limit Lifeboat to check your accounts."
+            )
         }
     }
 
@@ -870,7 +992,12 @@ final class AppState: ObservableObject {
         // snapshots still re-arm the dedupe keys so a healed window can
         // alert again once the account becomes active.
         if settings.usageAlertsEnabled, profile.isActiveCLI {
-            usageAlertController.handleThresholds(snapshot: snapshot, profile: profile)
+            usageAlertController.handleThresholds(
+                snapshot: snapshot,
+                profile: profile,
+                includeSessionWindows: settings.sessionWindowAlertsEnabled,
+                advisedTargetID: switchAdvice[profile.provider]?.bestCandidateID
+            )
             notifyPaceAlerts(snapshot: snapshot, profile: profile)
         } else {
             usageAlertController.rearmThresholds(snapshot: snapshot, profile: profile)
@@ -879,17 +1006,22 @@ final class AppState: ObservableObject {
         statusMessage = "\(profile.label): \(snapshot.message)"
     }
 
-    /// "On pace to run out before the reset" — weekly windows only, active
-    /// account only, once per reset period (mirrors the reset-alert dedupe).
+    /// "On pace to run out before the reset" — weekly windows (plus sessions
+    /// when opted in), active account only, once per reset period (mirrors
+    /// the reset-alert dedupe).
     private func notifyPaceAlerts(snapshot: UsageSnapshot, profile: AccountProfile) {
-        let alerts = paceAlertPlanner.alerts(
+        let alerts = PaceAlertPlanner(includeSessionWindows: settings.sessionWindowAlertsEnabled).alerts(
             snapshot: snapshot,
             profile: profile,
             estimates: burnRateEstimates[profile.id] ?? [:],
             alreadyNotified: usageAlertController.notifiedPaceKeys()
         )
         for alert in alerts {
-            usageAlertController.handlePaceAlert(alert, provider: profile.provider)
+            usageAlertController.handlePaceAlert(
+                alert,
+                provider: profile.provider,
+                advisedTargetID: switchAdvice[profile.provider]?.bestCandidateID
+            )
         }
     }
 
@@ -920,6 +1052,30 @@ final class AppState: ObservableObject {
 
     func historyRecords(for profile: AccountProfile) -> [UsageHistoryRecord] {
         historyStore?.records(for: profile.id) ?? []
+    }
+
+    /// The Settings-window "export everything" flow: every account's retained
+    /// history in one CSV.
+    func exportAllUsageHistoryCSV() {
+        guard let historyStore else {
+            statusMessage = "Usage history is unavailable — see Copy Diagnostics for the reason."
+            return
+        }
+        var recordsByAccount: [UUID: [UsageHistoryRecord]] = [:]
+        var descriptors: [UUID: UsageHistoryCSVExporter.AccountDescriptor] = [:]
+        for profile in profiles {
+            let records = historyStore.records(for: profile.id)
+            guard !records.isEmpty else {
+                continue
+            }
+            recordsByAccount[profile.id] = records
+            descriptors[profile.id] = .init(label: profile.label, provider: profile.provider)
+        }
+        let csv = UsageHistoryCSVExporter().csv(records: recordsByAccount, accounts: descriptors)
+        UsageHistoryCSVSaver.save(
+            csv: csv,
+            suggestedName: UsageHistoryCSVSaver.fileName(scope: "all-accounts")
+        )
     }
 
     // MARK: - Dashboard fallback
@@ -1005,6 +1161,11 @@ final class AppState: ObservableObject {
             try historyStore?.removeAccount(profile.id)
         } catch {
             AppLog.history.error("Could not delete usage history for account \(profile.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+        do {
+            try eventStore.removeAccount(profile.id)
+        } catch {
+            AppLog.history.error("Could not delete switch events for account \(profile.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
         burnRateEstimates[profile.id] = nil
         usageAlertController.forgetProfile(profile.id)
@@ -1155,6 +1316,7 @@ final class AppState: ObservableObject {
             applySnapshot(snapshot, for: outgoing)
         }
 
+        let outgoingProfileID = activeProfile(for: profile.provider)?.id
         do {
             let result = try cliSwitcher.restoreSnapshot(
                 for: profile,
@@ -1170,6 +1332,22 @@ final class AppState: ObservableObject {
 
             statusMessage = "Switched \(profile.provider.displayName) CLI to \(profile.label)."
             AppLog.switching.notice("Switched \(profile.provider.displayName, privacy: .public) CLI to account \(profile.id, privacy: .public) (interactive: \(interactive, privacy: .public))")
+            // The single funnel every switch passes through (manual, auto,
+            // notification click) — the weekly digest counts these events.
+            do {
+                try eventStore.append(
+                    AppEvent(
+                        timestamp: Date(),
+                        kind: .cliSwitch,
+                        provider: profile.provider,
+                        toProfileID: profile.id,
+                        fromProfileID: outgoingProfileID == profile.id ? nil : outgoingProfileID,
+                        interactive: interactive
+                    )
+                )
+            } catch {
+                AppLog.history.error("Could not record the switch event: \(error.localizedDescription, privacy: .public)")
+            }
             refreshStates[profile.id] = .ok
             if interactive {
                 lastManualSwitchAt[profile.provider] = Date()

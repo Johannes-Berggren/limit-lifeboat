@@ -167,7 +167,22 @@ public struct ClaudeUsageAPIClient: Sendable {
             message: usage.windows.isEmpty
                 ? "Anthropic usage API did not include a recognizable limit."
                 : message(for: usage.windows),
-            payAsYouGoState: payAsYouGoState
+            payAsYouGoState: payAsYouGoState,
+            payAsYouGoSpend: payAsYouGoSpend(for: usage)
+        )
+    }
+
+    /// The display-only spend figures. Carried whenever overage is enabled —
+    /// including `.enabledIdle`, so the popover can show the month's spend
+    /// even while included usage is fine; the UI gates visibility.
+    private func payAsYouGoSpend(for usage: ClaudeAPIUsage) -> PayAsYouGoSpend? {
+        guard let extra = usage.extraUsage, extra.isEnabled else {
+            return nil
+        }
+        return PayAsYouGoSpend(
+            monthlyLimit: extra.monthlyLimit,
+            usedCredits: extra.usedCredits,
+            utilization: extra.utilization
         )
     }
 

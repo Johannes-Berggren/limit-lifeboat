@@ -449,5 +449,170 @@ final class AccountRowPresentationTests: XCTestCase {
 
         XCTAssertEqual(presentation.billingBadge?.text, "PAYG")
         XCTAssertEqual(presentation.billingBadge?.tone, .danger)
+        XCTAssertTrue(presentation.billingBadge?.help.contains("extra usage may be billed") == true)
+    }
+
+    func testPayAsYouGoBadgeHelpEmbedsSpendWhenReported() {
+        let profile = AccountProfile(provider: .claude, label: "Overage")
+        let snapshot = UsageSnapshot(
+            accountID: profile.id,
+            provider: .claude,
+            riskLevel: .depleted,
+            source: "test",
+            payAsYouGoState: .enabledActive,
+            payAsYouGoSpend: PayAsYouGoSpend(monthlyLimit: 50, usedCredits: 12.5)
+        )
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: snapshot,
+            hasStoredSnapshot: true,
+            refreshState: .ok,
+            adviceReason: nil
+        )
+
+        XCTAssertEqual(
+            presentation.billingBadge?.help,
+            "Included usage appears depleted — $12.50 of $50 extra usage this month. Click for details."
+        )
+    }
+
+    // MARK: - Pace forecast
+
+    private func paceSnapshot(
+        profile: AccountProfile,
+        windows: [UsageWindow],
+        lastRefreshed: Date
+    ) -> UsageSnapshot {
+        UsageSnapshot(
+            accountID: profile.id,
+            provider: profile.provider,
+            windows: windows,
+            riskLevel: .warning,
+            source: "test",
+            lastRefreshed: lastRefreshed,
+            parseConfidence: .high
+        )
+    }
+
+    func testPaceForecastPicksEarliestDepletion() {
+        let now = Date()
+        let profile = AccountProfile(provider: .claude, label: "Active", isActiveCLI: true)
+        let reset = now.addingTimeInterval(4 * 24 * 3600)
+        let windows = [
+            UsageWindow(id: "session", kind: .session, label: "Session (5h)", usedPercent: 60,
+                        resetDate: now.addingTimeInterval(2 * 3600), riskLevel: .healthy),
+            UsageWindow(id: "weekly-all", kind: .weekly, label: "Weekly (all models)", usedPercent: 80,
+                        resetDate: reset, riskLevel: .warning)
+        ]
+        let sessionDepletion = now.addingTimeInterval(90 * 60)
+        let weeklyDepletion = now.addingTimeInterval(2 * 24 * 3600)
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: paceSnapshot(profile: profile, windows: windows, lastRefreshed: now),
+            hasStoredSnapshot: true,
+            refreshState: .ok,
+            adviceReason: nil,
+            estimates: [
+                "session": .depletesAt(sessionDepletion),
+                "weekly-all": .depletesAt(weeklyDepletion)
+            ],
+            now: now
+        )
+
+        XCTAssertEqual(presentation.paceForecast?.windowID, "session")
+        XCTAssertEqual(presentation.paceForecast?.depletesAt, sessionDepletion)
+    }
+
+    func testPaceForecastSuppressedForStaleSnapshot() {
+        let now = Date()
+        let profile = AccountProfile(provider: .claude, label: "Active", isActiveCLI: true)
+        let windows = [
+            UsageWindow(id: "weekly-all", kind: .weekly, label: "Weekly", usedPercent: 80,
+                        resetDate: now.addingTimeInterval(24 * 3600), riskLevel: .warning)
+        ]
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: paceSnapshot(profile: profile, windows: windows, lastRefreshed: now.addingTimeInterval(-3600)),
+            hasStoredSnapshot: true,
+            refreshState: .ok,
+            adviceReason: nil,
+            estimates: ["weekly-all": .depletesAt(now.addingTimeInterval(3600))],
+            now: now
+        )
+
+        XCTAssertNil(presentation.paceForecast)
+    }
+
+    func testPaceForecastSuppressedWhenAllWindowsResetElapsed() {
+        let now = Date()
+        let profile = AccountProfile(provider: .claude, label: "Inactive")
+        let windows = [
+            UsageWindow(id: "weekly-all", kind: .weekly, label: "Weekly", usedPercent: 80,
+                        resetDate: now.addingTimeInterval(-60), riskLevel: .warning)
+        ]
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: paceSnapshot(profile: profile, windows: windows, lastRefreshed: now),
+            hasStoredSnapshot: true,
+            refreshState: .ok,
+            adviceReason: nil,
+            estimates: ["weekly-all": .depletesAt(now.addingTimeInterval(3600))],
+            now: now
+        )
+
+        XCTAssertNil(presentation.paceForecast)
+    }
+
+    /// Without a reset bound the estimator can project weeks out — the card
+    /// line only claims imminent (24h) depletion for reset-less windows.
+    func testPaceForecastCapsResetlessWindowsToOneDayHorizon() {
+        let now = Date()
+        let profile = AccountProfile(provider: .claude, label: "Active", isActiveCLI: true)
+        let windows = [
+            UsageWindow(id: "primary", kind: .other, label: "Quota", usedPercent: 55, riskLevel: .healthy)
+        ]
+        let farOut = AccountRowPresentation(
+            profile: profile,
+            snapshot: paceSnapshot(profile: profile, windows: windows, lastRefreshed: now),
+            hasStoredSnapshot: true,
+            refreshState: .ok,
+            adviceReason: nil,
+            estimates: ["primary": .depletesAt(now.addingTimeInterval(3 * 24 * 3600))],
+            now: now
+        )
+        XCTAssertNil(farOut.paceForecast)
+
+        let imminent = AccountRowPresentation(
+            profile: profile,
+            snapshot: paceSnapshot(profile: profile, windows: windows, lastRefreshed: now),
+            hasStoredSnapshot: true,
+            refreshState: .ok,
+            adviceReason: nil,
+            estimates: ["primary": .depletesAt(now.addingTimeInterval(3600))],
+            now: now
+        )
+        XCTAssertEqual(imminent.paceForecast?.windowID, "primary")
+    }
+
+    func testPaceForecastIgnoresSafeAndInsufficientEstimates() {
+        let now = Date()
+        let profile = AccountProfile(provider: .claude, label: "Active", isActiveCLI: true)
+        let windows = [
+            UsageWindow(id: "session", kind: .session, label: "Session", usedPercent: 30,
+                        resetDate: now.addingTimeInterval(3600), riskLevel: .healthy),
+            UsageWindow(id: "weekly-all", kind: .weekly, label: "Weekly", usedPercent: 20,
+                        resetDate: now.addingTimeInterval(24 * 3600), riskLevel: .healthy)
+        ]
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: paceSnapshot(profile: profile, windows: windows, lastRefreshed: now),
+            hasStoredSnapshot: true,
+            refreshState: .ok,
+            adviceReason: nil,
+            estimates: ["session": .safe, "weekly-all": .insufficientData],
+            now: now
+        )
+
+        XCTAssertNil(presentation.paceForecast)
     }
 }
