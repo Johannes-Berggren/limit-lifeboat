@@ -1,5 +1,18 @@
 import Foundation
 
+private func accessDisposition(from error: Error) -> CredentialAccessDisposition? {
+    if let error = error as? ClaudeCodeCredentialsKeychainError {
+        return error.credentialAccessDisposition
+    }
+    if let error = error as? CredentialStoreError {
+        return error.credentialAccessDisposition
+    }
+    if let error = error as? CLISwitcherError {
+        return error.credentialAccessDisposition
+    }
+    return nil
+}
+
 public enum CLISwitcherError: Error, LocalizedError {
     case missingCredentials(String)
     case missingStoredSnapshot(UUID)
@@ -7,8 +20,17 @@ public enum CLISwitcherError: Error, LocalizedError {
     case invalidJSON(String)
     case backupFailed(path: String, underlying: Error)
     case credentialConflict(String)
-    case restoreValidationFailed(provider: Provider, reason: String)
-    case rollbackConflict(paths: [String], recoveryDirectory: URL, underlying: Error)
+    case restoreValidationFailed(
+        provider: Provider,
+        reason: String,
+        disposition: CredentialAccessDisposition?
+    )
+    case rollbackConflict(
+        paths: [String],
+        recoveryDirectory: URL,
+        underlying: Error,
+        disposition: CredentialAccessDisposition?
+    )
 
     public var errorDescription: String? {
         switch self {
@@ -24,12 +46,26 @@ public enum CLISwitcherError: Error, LocalizedError {
             return "Could not back up \(path) before switching; nothing was changed. (\(underlying.localizedDescription))"
         case .credentialConflict(let path):
             return "Credentials changed in another app at \(path). The outside change was preserved; refresh and try again."
-        case .restoreValidationFailed(let provider, let reason):
+        case .restoreValidationFailed(let provider, let reason, _):
             return "The restored \(provider.displayName) login could not be verified, so the previous login was restored. \(reason)"
-        case .rollbackConflict(let paths, let recoveryDirectory, let underlying):
+        case .rollbackConflict(let paths, let recoveryDirectory, let underlying, _):
             return "The switch failed and outside changes were preserved at \(paths.joined(separator: ", ")). Recovery files are at \(recoveryDirectory.path). \(underlying.localizedDescription)"
         }
     }
+
+    public var credentialAccessDisposition: CredentialAccessDisposition? {
+        switch self {
+        case .backupFailed(_, let underlying):
+            return accessDisposition(from: underlying)
+        case .rollbackConflict(_, _, let underlying, let disposition):
+            return disposition ?? accessDisposition(from: underlying)
+        case .restoreValidationFailed(_, _, let disposition):
+            return disposition
+        default:
+            return nil
+        }
+    }
+
 }
 
 public final class CLISwitcher {
@@ -78,6 +114,24 @@ public final class CLISwitcher {
         for profile: AccountProfile,
         accessMode: CredentialAccessMode = CredentialAccess.currentMode
     ) throws -> CredentialSnapshot {
+        let storedRecord = try storedCredentialRecord(for: profile, accessMode: accessMode)
+        return try storeObservation(
+            observation,
+            for: profile,
+            storedRecord: storedRecord,
+            accessMode: accessMode
+        )
+    }
+
+    /// Stores an observation using the snapshot record already decoded by the
+    /// surrounding workflow. Supplying `nil` means that workflow confirmed no
+    /// item exists; it does not trigger another Keychain read.
+    public func storeObservation(
+        _ observation: LiveCredentialObservation,
+        for profile: AccountProfile,
+        storedRecord: StoredCredentialRecord?,
+        accessMode: CredentialAccessMode = CredentialAccess.currentMode
+    ) throws -> CredentialSnapshot {
         guard observation.provider == profile.provider else {
             throw CLISwitcherError.providerMismatch(expected: profile.provider, actual: observation.provider)
         }
@@ -90,8 +144,9 @@ public final class CLISwitcher {
             throw CLISwitcherError.credentialConflict("live \(profile.provider.displayName) identity")
         }
 
+        let stored = storedRecord?.snapshot
         if profile.provider == .claude,
-           let stored = try credentialStore.loadSnapshot(for: profile.id, accessMode: accessMode),
+           let stored,
            let storedItem = stored.items.first(where: { $0.kind == .keychainJSONFields }) {
             if let liveIndex = snapshot.items.firstIndex(where: { $0.kind == .keychainJSONFields }) {
                 // Background usage can leave a rotated token in the private
@@ -114,6 +169,11 @@ public final class CLISwitcher {
             }
         }
 
+        if let stored,
+           stored.provider == snapshot.provider,
+           CredentialFingerprint.make(for: stored) == CredentialFingerprint.make(for: snapshot) {
+            return snapshot
+        }
         try credentialStore.save(snapshot: snapshot, for: profile.id, accessMode: accessMode)
         return snapshot
     }
@@ -128,6 +188,98 @@ public final class CLISwitcher {
         case .claude:
             return try claudeCredentials.observe(accessMode: accessMode)
         }
+    }
+
+    /// Metadata-only discovery of the exact provider-owned Claude item. This
+    /// does not request secret data and is safe for login-completion polling.
+    public func locateClaudeKeychainItem(
+        accessMode: CredentialAccessMode = CredentialAccess.currentMode
+    ) throws -> ClaudeKeychainItemLocation? {
+        try claudeCLICredentialSource.locateLiveItem(accessMode: accessMode)
+    }
+
+    /// Reads only the previously resolved Claude item, preventing a duplicate
+    /// service/account entry or search-list change from redirecting an
+    /// authorization workflow midway through the operation.
+    public func readClaudeKeychainItem(
+        at location: ClaudeKeychainItemLocation,
+        accessMode: CredentialAccessMode = CredentialAccess.currentMode
+    ) throws -> Data? {
+        try claudeCLICredentialSource.readLiveItemJSON(at: location, accessMode: accessMode)
+    }
+
+    /// Reads and observes only the item generation selected by a preceding
+    /// metadata sample. Login watchers must not rediscover by service/account
+    /// here: the search list can change between the settle decision and the
+    /// data read, which would otherwise let an un-settled replacement through.
+    public func liveClaudeObservation(
+        at location: ClaudeKeychainItemLocation,
+        accessMode: CredentialAccessMode = CredentialAccess.currentMode
+    ) throws -> LiveCredentialObservation {
+        guard let item = try claudeCLICredentialSource.readLiveItemJSON(
+            at: location,
+            accessMode: accessMode
+        ) else {
+            throw ClaudeCodeCredentialsKeychainError.missingLiveItem
+        }
+        return try claudeCredentials.observe(liveItem: item, location: location)
+    }
+
+    /// Resolves OAuth fields from one already-selected item generation. This
+    /// is the usage-workflow counterpart to `liveClaudeObservation(at:)`: it
+    /// never broadens to another service/account match after metadata was
+    /// sampled.
+    public func liveClaudeOAuthCredentialRecord(
+        at location: ClaudeKeychainItemLocation,
+        accessMode: CredentialAccessMode = CredentialAccess.currentMode
+    ) throws -> LiveClaudeOAuthCredentialRecord? {
+        guard let item = try claudeCLICredentialSource.readLiveItemJSON(
+            at: location,
+            accessMode: accessMode
+        ) else {
+            throw ClaudeCodeCredentialsKeychainError.missingLiveItem
+        }
+        return try ClaudeOAuthCredentials.validatedExtract(
+            fromKeychainItemJSON: item
+        ).map {
+            LiveClaudeOAuthCredentialRecord(
+                credentials: $0,
+                itemLocation: location
+            )
+        }
+    }
+
+    /// Reuses OAuth fields already validated as part of a live observation.
+    /// Explicit retry workflows can therefore pass the same pinned generation
+    /// to usage and persistence code without another shared-Keychain read.
+    public func claudeOAuthCredentialRecord(
+        from observation: LiveCredentialObservation
+    ) throws -> LiveClaudeOAuthCredentialRecord? {
+        guard observation.provider == .claude else {
+            throw CLISwitcherError.providerMismatch(
+                expected: .claude,
+                actual: observation.provider
+            )
+        }
+        guard let item = observation.snapshot?.items.first(where: {
+            $0.kind == .keychainJSONFields
+        }), let credentials = ClaudeOAuthCredentials(
+            claudeAiOauthJSON: item.contents
+        ) else {
+            return nil
+        }
+        return LiveClaudeOAuthCredentialRecord(
+            credentials: credentials,
+            itemLocation: observation.claudeKeychainItemLocation
+        )
+    }
+
+    /// Re-reads only Claude's nonsecret filesystem metadata around a cached
+    /// observation. This method never calls the shared Keychain source.
+    public func refreshClaudeFilesystemMetadata(
+        in observation: LiveCredentialObservation
+    ) throws -> LiveCredentialObservation {
+        try claudeCredentials.refreshFilesystemMetadata(in: observation)
     }
 
     /// A short, synchronous stabilization gate for explicit capture/switch
@@ -165,9 +317,32 @@ public final class CLISwitcher {
         enforceExpectedLiveState: Bool = false,
         accessMode: CredentialAccessMode = CredentialAccess.currentMode
     ) throws -> RestoreResult {
-        guard let snapshot = try credentialStore.loadSnapshot(for: profile.id, accessMode: accessMode) else {
+        guard let storedRecord = try storedCredentialRecord(
+            for: profile,
+            accessMode: accessMode
+        ) else {
             throw CLISwitcherError.missingStoredSnapshot(profile.id)
         }
+        return try restoreSnapshot(
+            for: profile,
+            storedRecord: storedRecord,
+            expectedLiveFingerprint: expectedLiveFingerprint,
+            enforceExpectedLiveState: enforceExpectedLiveState,
+            accessMode: accessMode
+        )
+    }
+
+    /// Restores the workflow-scoped record that was already decoded during
+    /// preflight. Mutation-boundary live reads remain, but the private app
+    /// snapshot is not loaded a second time.
+    public func restoreSnapshot(
+        for profile: AccountProfile,
+        storedRecord: StoredCredentialRecord,
+        expectedLiveFingerprint: String? = nil,
+        enforceExpectedLiveState: Bool = false,
+        accessMode: CredentialAccessMode = CredentialAccess.currentMode
+    ) throws -> RestoreResult {
+        let snapshot = storedRecord.snapshot
         guard snapshot.provider == profile.provider else {
             throw CLISwitcherError.providerMismatch(expected: profile.provider, actual: snapshot.provider)
         }
@@ -185,6 +360,16 @@ public final class CLISwitcher {
         // transaction.
         let shouldEnforceLiveState = enforceExpectedLiveState || expectedLiveFingerprint != nil
         let targetFingerprint = CredentialFingerprint.make(for: snapshot)
+        let claudeItemLocation: ClaudeKeychainItemLocation?
+        if profile.provider == .claude {
+            claudeItemLocation = try claudeCLICredentialSource.locateLiveItem(accessMode: accessMode)
+            if claudeCLICredentialSource.supportsExactItemLocations,
+               claudeItemLocation == nil {
+                throw ClaudeCodeCredentialsKeychainError.missingLiveItem
+            }
+        } else {
+            claudeItemLocation = nil
+        }
         var verifiedObservation: LiveCredentialObservation?
         let touchedPaths = try CredentialRestoreTransaction(
             homeDirectory: homeDirectory,
@@ -195,14 +380,27 @@ public final class CLISwitcher {
             snapshot,
             expectedLiveFingerprint: shouldEnforceLiveState ? .some(expectedLiveFingerprint) : nil,
             accessMode: accessMode,
+            claudeKeychainItemLocation: claudeItemLocation,
             validateRestoredCredentials: { [self] in
                 let observation: LiveCredentialObservation
                 do {
-                    observation = try liveObservation(provider: profile.provider, accessMode: accessMode)
+                    if let claudeItemLocation {
+                        let item = try claudeCLICredentialSource.readLiveItemJSON(
+                            at: claudeItemLocation,
+                            accessMode: accessMode
+                        )
+                        observation = try claudeCredentials.observe(
+                            liveItem: item,
+                            location: claudeItemLocation
+                        )
+                    } else {
+                        observation = try liveObservation(provider: profile.provider, accessMode: accessMode)
+                    }
                 } catch {
                     throw CLISwitcherError.restoreValidationFailed(
                         provider: profile.provider,
-                        reason: error.localizedDescription
+                        reason: error.localizedDescription,
+                        disposition: accessDisposition(from: error)
                     )
                 }
                 let targetMatches: Bool
@@ -219,7 +417,8 @@ public final class CLISwitcher {
                 guard observation.isLoggedIn, targetMatches else {
                     throw CLISwitcherError.restoreValidationFailed(
                         provider: profile.provider,
-                        reason: "The live credentials did not identify \(profile.label)."
+                        reason: "The live credentials did not identify \(profile.label).",
+                        disposition: nil
                     )
                 }
                 verifiedObservation = observation
@@ -255,6 +454,53 @@ public final class CLISwitcher {
         try credentialStore.hasSnapshot(for: profile.id, accessMode: accessMode)
     }
 
+    /// Loads and decodes an app-owned snapshot once for a complete workflow.
+    /// This replaces call sequences that separately queried its fingerprint,
+    /// restorability, provider payload, and Claude expiry.
+    public func storedCredentialRecord(
+        for profile: AccountProfile,
+        accessMode: CredentialAccessMode = CredentialAccess.currentMode
+    ) throws -> StoredCredentialRecord? {
+        guard let stored = try credentialStore.loadVersionedSnapshot(
+            for: profile.id,
+            accessMode: accessMode
+        ) else {
+            return nil
+        }
+        let snapshot = stored.snapshot
+        guard snapshot.provider == profile.provider else {
+            throw CLISwitcherError.providerMismatch(expected: profile.provider, actual: snapshot.provider)
+        }
+        return makeStoredCredentialRecord(
+            from: snapshot,
+            storeRevision: stored.revision
+        )
+    }
+
+    public func makeStoredCredentialRecord(
+        from snapshot: CredentialSnapshot,
+        storeRevision: CredentialStoreRevision? = nil
+    ) -> StoredCredentialRecord {
+        let expiresAt: Date?
+        if snapshot.provider == .claude,
+           let item = snapshot.items.first(where: { $0.kind == .keychainJSONFields }) {
+            expiresAt = ClaudeOAuthCredentials(claudeAiOauthJSON: item.contents)?
+                .refreshTokenExpiresAt
+        } else {
+            expiresAt = nil
+        }
+        return StoredCredentialRecord(
+            snapshot: snapshot,
+            summary: StoredCredentialSummary(
+                provider: snapshot.provider,
+                fingerprint: CredentialFingerprint.make(for: snapshot),
+                isRestorable: isRestorable(snapshot, for: snapshot.provider),
+                claudeRefreshTokenExpiresAt: expiresAt
+            ),
+            storeRevision: storeRevision
+        )
+    }
+
     /// A stored item can contain only non-login metadata (legacy Claude
     /// config fields). Such an item is useful for identity reconciliation but
     /// must never be offered as a switch target: restoring it used to strip
@@ -263,13 +509,13 @@ public final class CLISwitcher {
         for profile: AccountProfile,
         accessMode: CredentialAccessMode = CredentialAccess.currentMode
     ) throws -> Bool {
-        guard let snapshot = try credentialStore.loadSnapshot(
+        guard let stored = try credentialStore.loadVersionedSnapshot(
             for: profile.id,
             accessMode: accessMode
-        ), snapshot.provider == profile.provider else {
+        ), stored.snapshot.provider == profile.provider else {
             return false
         }
-        return isRestorable(snapshot, for: profile.provider)
+        return isRestorable(stored.snapshot, for: profile.provider)
     }
 
     private func isRestorable(_ snapshot: CredentialSnapshot, for provider: Provider) -> Bool {
@@ -309,8 +555,42 @@ public final class CLISwitcher {
     public func liveClaudeOAuthCredentials(
         accessMode: CredentialAccessMode = CredentialAccess.currentMode
     ) throws -> ClaudeOAuthCredentials? {
-        guard let item = try claudeCLICredentialSource.readLiveItemJSON(accessMode: accessMode) else { return nil }
-        return ClaudeOAuthCredentials.extract(fromKeychainItemJSON: item)
+        try liveClaudeOAuthCredentialRecord(accessMode: accessMode)?.credentials
+    }
+
+    public func liveClaudeOAuthCredentialRecord(
+        accessMode: CredentialAccessMode = CredentialAccess.currentMode
+    ) throws -> LiveClaudeOAuthCredentialRecord? {
+        if claudeCLICredentialSource.supportsExactItemLocations {
+            guard let location = try claudeCLICredentialSource.locateLiveItem(
+                accessMode: accessMode
+            ),
+            let item = try claudeCLICredentialSource.readLiveItemJSON(
+                at: location,
+                accessMode: accessMode
+            ),
+            let credentials = try ClaudeOAuthCredentials.validatedExtract(
+                fromKeychainItemJSON: item
+            ) else {
+                return nil
+            }
+            return LiveClaudeOAuthCredentialRecord(
+                credentials: credentials,
+                itemLocation: location
+            )
+        }
+        guard let item = try claudeCLICredentialSource.readLiveItemJSON(
+            accessMode: accessMode
+        ),
+        let credentials = try ClaudeOAuthCredentials.validatedExtract(
+            fromKeychainItemJSON: item
+        ) else {
+            return nil
+        }
+        return LiveClaudeOAuthCredentialRecord(
+            credentials: credentials,
+            itemLocation: nil
+        )
     }
 
     /// Merge-writes refreshed tokens into the live keychain item so the CLI
@@ -323,28 +603,45 @@ public final class CLISwitcher {
         // A thrown read must abort the write: collapsing it into nil would
         // merge into {} and drop the item's siblings (mcpOAuth). Only a
         // genuine nil (item absent) starts a fresh item.
-        let live = try claudeCLICredentialSource.readLiveItemJSON(accessMode: accessMode)
-        let merged = mergeClaudeAiOauth(credentials.rawClaudeAiOauth, intoItemJSON: live)
-        try claudeCLICredentialSource.writeLiveItemJSON(merged, accessMode: accessMode)
+        let location = try resolveClaudeKeychainItemForMutation(accessMode: accessMode)
+        let live = try readClaudeKeychainItem(at: location, accessMode: accessMode)
+        let merged = try mergeClaudeAiOauth(credentials.rawClaudeAiOauth, intoItemJSON: live)
+        try writeClaudeKeychainItem(merged, at: location, accessMode: accessMode)
     }
 
     @discardableResult
     public func replaceLiveClaudeOAuthCredentials(
         _ credentials: ClaudeOAuthCredentials,
+        at expectedItemLocation: ClaudeKeychainItemLocation? = nil,
         ifAccessTokenMatches expectedAccessToken: String,
         accessMode: CredentialAccessMode = CredentialAccess.currentMode
     ) throws -> Bool {
-        let live = try claudeCLICredentialSource.readLiveItemJSON(accessMode: accessMode)
+        let location = try expectedItemLocation
+            ?? resolveClaudeKeychainItemForMutation(accessMode: accessMode)
+        let live = try readClaudeKeychainItem(at: location, accessMode: accessMode)
         guard live.flatMap({ ClaudeOAuthCredentials.extract(fromKeychainItemJSON: $0) })?.accessToken == expectedAccessToken else {
             return false
         }
-        let merged = mergeClaudeAiOauth(credentials.rawClaudeAiOauth, intoItemJSON: live)
-        // Re-read at the last mutation boundary. Keychain has no cross-process
-        // compare-and-swap, but this prevents every detectable outside change.
-        guard try claudeCLICredentialSource.readLiveItemJSON(accessMode: accessMode) == live else {
+        let baselineCredentials = live.flatMap {
+            ClaudeOAuthCredentials.extract(fromKeychainItemJSON: $0)
+        }
+        // Re-read at the last mutation boundary. An unrelated MCP sibling may
+        // legitimately rotate while the OAuth request is in flight; preserve
+        // that latest sibling state and conflict only when `claudeAiOauth`
+        // itself changed (or the pinned item vanished/replaced).
+        guard let latest = try readClaudeKeychainItem(
+            at: location,
+            accessMode: accessMode
+        ),
+        ClaudeOAuthCredentials.extract(fromKeychainItemJSON: latest)?
+            .rawClaudeAiOauth == baselineCredentials?.rawClaudeAiOauth else {
             return false
         }
-        try claudeCLICredentialSource.writeLiveItemJSON(merged, accessMode: accessMode)
+        let merged = try mergeClaudeAiOauth(
+            credentials.rawClaudeAiOauth,
+            intoItemJSON: latest
+        )
+        try writeClaudeKeychainItem(merged, at: location, accessMode: accessMode)
         return true
     }
 
@@ -392,11 +689,127 @@ public final class CLISwitcher {
         ifAccessTokenMatches expectedAccessToken: String,
         accessMode: CredentialAccessMode = CredentialAccess.currentMode
     ) throws -> Bool {
-        guard try storedClaudeOAuthCredentials(for: profileID, accessMode: accessMode)?.accessToken == expectedAccessToken else {
+        guard let stored = try credentialStore.loadVersionedSnapshot(
+            for: profileID,
+            accessMode: accessMode
+        ) else {
             return false
         }
-        try updateStoredClaudeOAuthCredentials(credentials, for: profileID, accessMode: accessMode)
-        return true
+        return try replaceStoredClaudeOAuthCredentials(
+            credentials,
+            for: profileID,
+            using: makeStoredCredentialRecord(
+                from: stored.snapshot,
+                storeRevision: stored.revision
+            ),
+            ifAccessTokenMatches: expectedAccessToken,
+            accessMode: accessMode
+        ) != nil
+    }
+
+    /// Persists a rotated Claude credential using the snapshot generation
+    /// already decoded by the surrounding switch workflow. The credential
+    /// store performs an atomic revision CAS, so no second private-store
+    /// data read is needed and a concurrent capture still wins.
+    @discardableResult
+    public func replaceStoredClaudeOAuthCredentials(
+        _ credentials: ClaudeOAuthCredentials,
+        for profileID: UUID,
+        using storedRecord: StoredCredentialRecord,
+        ifAccessTokenMatches expectedAccessToken: String,
+        accessMode: CredentialAccessMode = CredentialAccess.currentMode
+    ) throws -> StoredCredentialRecord? {
+        guard storedRecord.snapshot.provider == .claude else {
+            throw CLISwitcherError.providerMismatch(
+                expected: .claude,
+                actual: storedRecord.snapshot.provider
+            )
+        }
+        let expectedFingerprint = storedRecord.summary.fingerprint
+        guard CredentialFingerprint.make(for: storedRecord.snapshot) == expectedFingerprint else {
+            return nil
+        }
+        var snapshot = storedRecord.snapshot
+        guard let index = snapshot.items.firstIndex(where: { $0.kind == .keychainJSONFields }),
+              ClaudeOAuthCredentials(
+                  claudeAiOauthJSON: snapshot.items[index].contents
+              )?.accessToken == expectedAccessToken else {
+            return nil
+        }
+        snapshot.items[index].contents = credentials.rawClaudeAiOauth
+        if CredentialFingerprint.make(for: snapshot) == expectedFingerprint {
+            return storedRecord
+        }
+        if let expectedRevision = storedRecord.storeRevision {
+            guard let newRevision = try credentialStore.replaceSnapshot(
+                snapshot,
+                for: profileID,
+                ifRevisionMatches: expectedRevision,
+                accessMode: accessMode
+            ) else {
+                return nil
+            }
+            return makeStoredCredentialRecord(
+                from: snapshot,
+                storeRevision: newRevision
+            )
+        }
+
+        // One-time compatibility for app-owned items saved before opaque
+        // revisions existed. Re-read immediately before the write, preserving
+        // the legacy conflict check; save stamps a revision for future flows.
+        guard let current = try credentialStore.loadSnapshot(
+            for: profileID,
+            accessMode: accessMode
+        ),
+        current.provider == .claude,
+        CredentialFingerprint.make(for: current) == expectedFingerprint else {
+            return nil
+        }
+        try credentialStore.save(snapshot: snapshot, for: profileID, accessMode: accessMode)
+        return makeStoredCredentialRecord(from: snapshot)
+    }
+
+    /// Resolve once, then keep every read/write in the mutation on the same
+    /// persistent item. Production fails closed when no exact location exists;
+    /// lightweight sources retain their compatibility behavior.
+    private func resolveClaudeKeychainItemForMutation(
+        accessMode: CredentialAccessMode
+    ) throws -> ClaudeKeychainItemLocation? {
+        let location = try claudeCLICredentialSource.locateLiveItem(accessMode: accessMode)
+        if claudeCLICredentialSource.supportsExactItemLocations, location == nil {
+            throw ClaudeCodeCredentialsKeychainError.missingLiveItem
+        }
+        return location
+    }
+
+    private func readClaudeKeychainItem(
+        at location: ClaudeKeychainItemLocation?,
+        accessMode: CredentialAccessMode
+    ) throws -> Data? {
+        if let location {
+            return try claudeCLICredentialSource.readLiveItemJSON(
+                at: location,
+                accessMode: accessMode
+            )
+        }
+        return try claudeCLICredentialSource.readLiveItemJSON(accessMode: accessMode)
+    }
+
+    private func writeClaudeKeychainItem(
+        _ data: Data,
+        at location: ClaudeKeychainItemLocation?,
+        accessMode: CredentialAccessMode
+    ) throws {
+        if let location {
+            try claudeCLICredentialSource.writeLiveItemJSON(
+                data,
+                at: location,
+                accessMode: accessMode
+            )
+        } else {
+            try claudeCLICredentialSource.writeLiveItemJSON(data, accessMode: accessMode)
+        }
     }
 
     /// The raw `~/.codex/auth.json` captured into a profile's stored snapshot,
@@ -425,14 +838,82 @@ public final class CLISwitcher {
         ifSnapshotFingerprintMatches expectedFingerprint: String,
         accessMode: CredentialAccessMode = CredentialAccess.currentMode
     ) throws -> Bool {
-        guard var snapshot = try credentialStore.loadSnapshot(for: profileID, accessMode: accessMode),
-              CredentialFingerprint.make(for: snapshot) == expectedFingerprint,
-              let index = snapshot.items.firstIndex(where: Self.isCodexAuthItem) else {
+        guard let stored = try credentialStore.loadVersionedSnapshot(
+            for: profileID,
+            accessMode: accessMode
+        ) else {
             return false
         }
+        return try replaceStoredCodexAuthJSON(
+            authJSON,
+            for: profileID,
+            using: makeStoredCredentialRecord(
+                from: stored.snapshot,
+                storeRevision: stored.revision
+            ),
+            ifSnapshotFingerprintMatches: expectedFingerprint,
+            accessMode: accessMode
+        ) != nil
+    }
+
+    /// Codex counterpart to the preloaded Claude mutation. App-server
+    /// preflight can merge its refreshed auth document into the record it was
+    /// given, then commit that generation with one read-free store CAS.
+    @discardableResult
+    public func replaceStoredCodexAuthJSON(
+        _ authJSON: Data,
+        for profileID: UUID,
+        using storedRecord: StoredCredentialRecord,
+        ifSnapshotFingerprintMatches expectedFingerprint: String,
+        accessMode: CredentialAccessMode = CredentialAccess.currentMode
+    ) throws -> StoredCredentialRecord? {
+        guard storedRecord.snapshot.provider == .codex else {
+            throw CLISwitcherError.providerMismatch(
+                expected: .codex,
+                actual: storedRecord.snapshot.provider
+            )
+        }
+        guard storedRecord.summary.fingerprint == expectedFingerprint,
+              CredentialFingerprint.make(for: storedRecord.snapshot) == expectedFingerprint else {
+            return nil
+        }
+        var snapshot = storedRecord.snapshot
+        guard let index = snapshot.items.firstIndex(where: Self.isCodexAuthItem) else {
+            return nil
+        }
         snapshot.items[index].contents = authJSON
+        // App-server preflight often returns the same auth document with only
+        // formatting differences. The semantic fingerprint deliberately
+        // canonicalizes provider-owned JSON, so avoid a needless Keychain
+        // update when no credential field changed.
+        if CredentialFingerprint.make(for: snapshot) == expectedFingerprint {
+            return storedRecord
+        }
+        if let expectedRevision = storedRecord.storeRevision {
+            guard let newRevision = try credentialStore.replaceSnapshot(
+                snapshot,
+                for: profileID,
+                ifRevisionMatches: expectedRevision,
+                accessMode: accessMode
+            ) else {
+                return nil
+            }
+            return makeStoredCredentialRecord(
+                from: snapshot,
+                storeRevision: newRevision
+            )
+        }
+
+        guard let current = try credentialStore.loadSnapshot(
+            for: profileID,
+            accessMode: accessMode
+        ),
+        current.provider == .codex,
+        CredentialFingerprint.make(for: current) == expectedFingerprint else {
+            return nil
+        }
         try credentialStore.save(snapshot: snapshot, for: profileID, accessMode: accessMode)
-        return true
+        return makeStoredCredentialRecord(from: snapshot)
     }
 
     /// Merges refreshed Codex-owned auth fields into the live auth document

@@ -102,6 +102,19 @@ final class ClaudeOAuthTokenRefresherTests: XCTestCase {
         }
     }
 
+    func testRefreshRejectedDescriptionNeverIncludesResponseBody() {
+        let secretMarker = "access-token-must-not-reach-logs"
+        let error = ClaudeOAuthError.refreshRejected(
+            status: 400,
+            body: #"{"error":"invalid_grant","token":"\#(secretMarker)"}"#
+        )
+
+        XCTAssertFalse(error.localizedDescription.contains(secretMarker))
+        XCTAssertTrue(error.localizedDescription.contains("400"))
+        XCTAssertTrue(error.localizedDescription.contains("response bytes"))
+        XCTAssertTrue(error.requiresLogin)
+    }
+
     func testThrowsMissingRefreshTokenWithoutTouchingTheNetwork() async throws {
         let httpClient = MockHTTPClient()
         let refresher = ClaudeOAuthTokenRefresher(httpClient: httpClient)
@@ -168,6 +181,7 @@ final class ClaudeOAuthTokenRefresherTests: XCTestCase {
             ).requiresLogin
         )
         XCTAssertTrue(ClaudeOAuthError.refreshRejected(status: 401, body: "").requiresLogin)
+        XCTAssertTrue(ClaudeOAuthError.refreshSuppressed(reason: "Sign in again.").requiresLogin)
         XCTAssertFalse(ClaudeOAuthError.refreshRejected(status: 408, body: "timeout").requiresLogin)
         XCTAssertFalse(ClaudeOAuthError.refreshRejected(status: 429, body: "rate limited").requiresLogin)
         XCTAssertFalse(ClaudeOAuthError.refreshRejected(status: 500, body: "server error").requiresLogin)

@@ -41,9 +41,46 @@ final class ReleaseConfigurationTests: XCTestCase {
 
     func testUpdatesCheckDailyButNeverInstallAutomatically() throws {
         let packaging = try contents("scripts/package-app.sh")
-        XCTAssertTrue(packaging.contains("<key>SUEnableAutomaticChecks</key>\n  <true/>"))
+        XCTAssertTrue(packaging.contains("SPARKLE_AUTOMATIC_CHECKS=\"true\""))
+        XCTAssertTrue(packaging.contains("<key>SUEnableAutomaticChecks</key>\n  <$SPARKLE_AUTOMATIC_CHECKS/>"))
         XCTAssertTrue(packaging.contains("<key>SUScheduledCheckInterval</key>\n  <integer>86400</integer>"))
         XCTAssertTrue(packaging.contains("<key>SUAutomaticallyUpdate</key>\n  <false/>"))
+    }
+
+    func testPackagingDefaultsToIsolatedDevelopmentVariant() throws {
+        let packaging = try contents("scripts/package-app.sh")
+
+        XCTAssertTrue(packaging.contains("APP_VARIANT=\"${APP_VARIANT:-development}\""))
+        XCTAssertTrue(packaging.contains("DISPLAY_NAME=\"Limit Lifeboat Dev\""))
+        XCTAssertTrue(packaging.contains("BUNDLE_ID=\"com.limitlifeboat.app.dev\""))
+        XCTAssertTrue(packaging.contains("CREDENTIAL_SERVICE=\"com.limitlifeboat.app.dev.credentials\""))
+        XCTAssertTrue(packaging.contains("APPLICATION_SUPPORT_NAME=\"LimitLifeboat-Dev\""))
+        XCTAssertTrue(packaging.contains("SPARKLE_AUTOMATIC_CHECKS=\"false\""))
+        XCTAssertTrue(packaging.contains("APP_DIR=\"$APP_ROOT/dist/$PRODUCT_NAME.app\""))
+    }
+
+    func testReleaseAndCIExplicitlyPackageDistributionVariant() throws {
+        let release = try contents("scripts/release.sh")
+        let ci = try contents("../../.github/workflows/ci.yml")
+
+        XCTAssertTrue(release.contains("APP_VARIANT=distribution SKIP_ADHOC_SIGN=1"))
+        XCTAssertTrue(release.contains("LimitLifeboatAppVariant \"distribution\""))
+        XCTAssertTrue(ci.contains("APP_VARIANT: distribution"))
+        XCTAssertTrue(ci.contains("LimitLifeboatAppVariant raw"))
+    }
+
+    func testReleaseAndCIVerifyStableDistributionRequirementPolicy() throws {
+        let release = try contents("scripts/release.sh")
+        let ci = try contents("../../.github/workflows/ci.yml")
+
+        XCTAssertTrue(release.contains("TeamIdentifier=$TEAM_ID"))
+        XCTAssertTrue(release.contains(#"codesign --display --requirements - "$APP_DIR""#))
+        XCTAssertTrue(release.contains("designated => identifier \\\"$BUNDLE_ID\\\""))
+        XCTAssertTrue(release.contains("anchor apple"))
+        XCTAssertTrue(release.contains("subject.OU] = \\\"$TEAM_ID\\\""))
+        XCTAssertTrue(ci.contains("Validate stable distribution signing policy"))
+        XCTAssertTrue(ci.contains(#"codesign --display --requirements - \"\$APP_DIR\""#))
+        XCTAssertTrue(ci.contains("teamIdentifier == DistributionIdentity.appleTeamIdentifier"))
     }
 
     func testPackagingEmbedsSparkleAndRemovesUnusedXPCServices() throws {

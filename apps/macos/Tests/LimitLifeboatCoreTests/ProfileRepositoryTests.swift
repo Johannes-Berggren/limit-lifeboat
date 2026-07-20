@@ -19,6 +19,19 @@ final class ProfileRepositoryTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("profiles.json").path))
     }
 
+    func testNamedApplicationSupportDirectorySelectsRequestedNamespace() throws {
+        let fileManager = ApplicationSupportFileManager(baseURL: root)
+        let repository = try ProfileRepository(
+            applicationSupportDirectoryName: "LimitLifeboat-Dev",
+            fileManager: fileManager
+        )
+
+        XCTAssertEqual(
+            repository.applicationSupportDirectory,
+            root.appendingPathComponent("LimitLifeboat-Dev", isDirectory: true)
+        )
+    }
+
     func testSaveLoadRoundTripPreservesProfiles() throws {
         let repository = try ProfileRepository(applicationSupportDirectory: root)
         // ISO8601 encoding has whole-second precision, so use whole-second dates.
@@ -115,5 +128,21 @@ final class ProfileRepositoryTests: XCTestCase {
 
         XCTAssertEqual(loaded.map(\.label), ["One", "Two"])
         XCTAssertEqual(loaded.map(\.webDataStoreKind), [.isolated, .isolated])
+    }
+}
+
+private final class ApplicationSupportFileManager: FileManager {
+    private let baseURL: URL
+
+    init(baseURL: URL) {
+        self.baseURL = baseURL
+        super.init()
+    }
+
+    override func urls(for directory: SearchPathDirectory, in domainMask: SearchPathDomainMask) -> [URL] {
+        if directory == .applicationSupportDirectory, domainMask == .userDomainMask {
+            return [baseURL]
+        }
+        return super.urls(for: directory, in: domainMask)
     }
 }

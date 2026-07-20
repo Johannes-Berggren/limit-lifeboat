@@ -17,7 +17,7 @@ enum ClaudeCodeUsageReaderError: Error, LocalizedError {
         case .cliNotFound:
             return "The claude command could not be found. Install Claude Code or make sure `claude` is on your PATH."
         case .timedOut:
-            return "Claude Code /usage timed out. If macOS showed a keychain dialog for claude, run scripts/fix-keychain-prompts.sh (see Troubleshooting in the README)."
+            return "Claude Code /usage timed out. Retry after confirming Claude Code can start normally in Terminal."
         case .launchFailed(let details):
             return "Claude Code /usage failed: \(details)"
         case .noUsageFound:
@@ -42,7 +42,7 @@ struct ClaudeCodeUsageReader {
         self.timeoutSeconds = timeoutSeconds
     }
 
-    func readUsage(oauthToken: String? = nil) async throws -> ClaudeCodeUsageReport {
+    func readUsage(oauthToken: String) async throws -> ClaudeCodeUsageReport {
         let output = try await runUsageProbe(oauthToken: oauthToken)
         guard let report = parser.parse(text: output) else {
             // Never log the raw output — the rendered TUI can contain account
@@ -54,15 +54,17 @@ struct ClaudeCodeUsageReader {
         return report
     }
 
-    private func runUsageProbe(oauthToken: String?) async throws -> String {
-        try await Task.detached(priority: .utility) {
-            try runExpectProbe(
-                homeDirectory: homeDirectory,
-                fileManager: fileManager,
-                timeoutSeconds: timeoutSeconds,
-                oauthToken: oauthToken
-            )
-        }.value
+    private func runUsageProbe(oauthToken: String) async throws -> String {
+        try await ClaudeCodeUsageLaunchGate.run(oauthToken: oauthToken) { oauthToken in
+            try await Task.detached(priority: .utility) {
+                try runExpectProbe(
+                    homeDirectory: homeDirectory,
+                    fileManager: fileManager,
+                    timeoutSeconds: timeoutSeconds,
+                    oauthToken: oauthToken
+                )
+            }.value
+        }
     }
 }
 
@@ -70,7 +72,7 @@ private func runExpectProbe(
     homeDirectory: URL,
     fileManager: FileManager,
     timeoutSeconds: TimeInterval,
-    oauthToken: String?
+    oauthToken: String
 ) throws -> String {
     let expectURL = URL(fileURLWithPath: "/usr/bin/expect")
     guard fileManager.fileExists(atPath: expectURL.path) else {
@@ -83,13 +85,21 @@ private func runExpectProbe(
         homeDirectory: homeDirectory,
         fileManager: fileManager
     )
-    let environment = environment(homeDirectory: homeDirectory, oauthToken: oauthToken)
-    process.environment = environment
+    let discoveryEnvironment = ClaudeCodeProcessLaunchPolicy.discoveryEnvironment(
+        homeDirectory: homeDirectory
+    )
     let claudeCommand = try resolveClaudeCommand(
         homeDirectory: homeDirectory,
         fileManager: fileManager,
-        environment: environment
+        environment: discoveryEnvironment
     )
+    guard let credentialedEnvironment = ClaudeCodeProcessLaunchPolicy.credentialedEnvironment(
+        homeDirectory: homeDirectory,
+        oauthToken: oauthToken
+    ) else {
+        throw ClaudeCodeUsageReaderError.launchFailed("invalid OAuth credential")
+    }
+    process.environment = credentialedEnvironment
     AppLog.usage.info("Starting the Claude Code /usage probe via \(claudeCommand.executableURL.path, privacy: .public)")
     process.arguments = [
         "-c",
@@ -126,8 +136,11 @@ private func runExpectProbe(
     let errorOutput = String(decoding: errorData, as: UTF8.self)
 
     guard process.terminationStatus == 0 else {
+        let stderrSummary = errorOutput.isEmpty
+            ? "no stderr"
+            : "\(errorData.count) bytes of stderr"
         throw ClaudeCodeUsageReaderError.launchFailed(
-            errorOutput.isEmpty ? "exit \(process.terminationStatus)" : errorOutput
+            "exit \(process.terminationStatus), \(stderrSummary)"
         )
     }
 
@@ -144,56 +157,15 @@ private func resolveClaudeCommand(
     fileManager: FileManager,
     environment: [String: String]
 ) throws -> ClaudeCommand {
-    let candidates = [
-        homeDirectory.appendingPathComponent(".local/bin/claude"),
-        URL(fileURLWithPath: "/opt/homebrew/bin/claude"),
-        URL(fileURLWithPath: "/usr/local/bin/claude")
-    ]
-
-    for candidate in candidates where fileManager.isExecutableFile(atPath: candidate.path) {
-        let help = commandOutput(executableURL: candidate, arguments: ["--help"], environment: environment)
-        return ClaudeCommand(
-            executableURL: candidate,
-            arguments: supportedArguments(fromHelp: help)
-        )
-    }
-
-    // None of the well-known install locations hit; fall back to PATH lookup
-    // (the environment already carries the fallback directories). A missing
-    // executable must fail here as `.cliNotFound` — launching a bare `env
-    // claude` would only surface as an unrecognized-output error later.
-    let resolved = commandOutput(
-        executableURL: URL(fileURLWithPath: "/usr/bin/env"),
-        arguments: ["which", "claude"],
+    for candidate in ClaudeCodeProcessLaunchPolicy.executableCandidates(
+        homeDirectory: homeDirectory,
         environment: environment
-    )
-    guard let path = resolved.split(whereSeparator: \.isNewline).first.map(String.init),
-          fileManager.isExecutableFile(atPath: path) else {
-        throw ClaudeCodeUsageReaderError.cliNotFound
+    ) where fileManager.isExecutableFile(atPath: candidate.path) {
+        // Discovery is filesystem-only. In particular, do not run `which` or
+        // `claude --help` in an environment that could ever carry a token.
+        return ClaudeCommand(executableURL: candidate, arguments: [])
     }
-    let executableURL = URL(fileURLWithPath: path)
-    let help = commandOutput(executableURL: executableURL, arguments: ["--help"], environment: environment)
-    return ClaudeCommand(
-        executableURL: executableURL,
-        arguments: supportedArguments(fromHelp: help)
-    )
-}
-
-private func supportedArguments(fromHelp help: String) -> [String] {
-    var arguments: [String] = []
-    if help.contains("--safe-mode") {
-        arguments.append("--safe-mode")
-    }
-    if help.contains("--ax-screen-reader") {
-        arguments.append("--ax-screen-reader")
-    }
-    if help.contains("--no-chrome") {
-        arguments.append("--no-chrome")
-    }
-    if help.contains("--permission-mode") {
-        arguments.append(contentsOf: ["--permission-mode", "default"])
-    }
-    return arguments
+    throw ClaudeCodeUsageReaderError.cliNotFound
 }
 
 private func commandOutput(executableURL: URL, arguments: [String], environment: [String: String]) -> String {
@@ -269,6 +241,9 @@ log_user 1
 set command [list \#(commandList)]
 eval spawn -noecho $command
 set child [exp_pid]
+# Only the Claude child needs the credential. Remove it from Expect's own
+# environment before any later helper command can be executed.
+catch {unset env(CLAUDE_CODE_OAUTH_TOKEN)}
 expect {
     -re {\$} {}
     -re {Try|Type /help|What do you want} {}
@@ -289,7 +264,7 @@ expect {
     timeout {}
     eof {}
 }
-catch {exec kill -KILL $child}
+catch {exec /bin/kill -KILL $child}
 after 200
 exit 0
 """#
@@ -303,26 +278,6 @@ private func tclQuotedString(_ value: String) -> String {
         .replacingOccurrences(of: "[", with: "\\[")
         .replacingOccurrences(of: "]", with: "\\]")
     return "\"\(escaped)\""
-}
-
-private func environment(homeDirectory: URL, oauthToken: String?) -> [String: String] {
-    var values = ProcessInfo.processInfo.environment
-    let fallbackPath = "\(homeDirectory.path)/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-    if let existingPath = values["PATH"], !existingPath.isEmpty {
-        values["PATH"] = "\(fallbackPath):\(existingPath)"
-    } else {
-        values["PATH"] = fallbackPath
-    }
-    values["NO_COLOR"] = "1"
-    values["TERM"] = "xterm-256color"
-    if let oauthToken {
-        // Lets the spawned CLI authenticate without reading its own keychain
-        // item, which pops a SecurityAgent dialog on systems where claude's
-        // code signature is not durably authorized for it (see
-        // scripts/fix-keychain-prompts.sh).
-        values["CLAUDE_CODE_OAUTH_TOKEN"] = oauthToken
-    }
-    return values
 }
 
 /// Kills a timed-out expect probe and the claude helper it spawned. The

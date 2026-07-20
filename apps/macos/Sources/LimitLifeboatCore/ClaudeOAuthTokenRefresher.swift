@@ -4,6 +4,10 @@ public enum ClaudeOAuthError: Error, LocalizedError {
     case missingRefreshToken
     case refreshTokenExpired
     case refreshRejected(status: Int, body: String)
+    /// A prior refresh attempt established that this exact credential cannot
+    /// recover. Scheduled refreshes stay quiet until the credential changes;
+    /// an explicit user retry is still allowed.
+    case refreshSuppressed(reason: String)
     case network(Error)
     case malformedResponse
 
@@ -14,8 +18,10 @@ public enum ClaudeOAuthError: Error, LocalizedError {
         case .refreshTokenExpired:
             return "The stored Claude login has expired; sign in with claude auth login again."
         case .refreshRejected(let status, let body):
-            let detail = body.isEmpty ? "no response body" : body
+            let detail = body.isEmpty ? "no response body" : "\(body.utf8.count) response bytes"
             return "Claude token refresh was rejected with status \(status) (\(detail))."
+        case .refreshSuppressed(let reason):
+            return reason
         case .network(let underlying):
             return "Claude token refresh failed to reach the server (\(underlying.localizedDescription))."
         case .malformedResponse:
@@ -29,7 +35,7 @@ public enum ClaudeOAuthError: Error, LocalizedError {
     /// sign in again.
     public var requiresLogin: Bool {
         switch self {
-        case .missingRefreshToken, .refreshTokenExpired:
+        case .missingRefreshToken, .refreshTokenExpired, .refreshSuppressed:
             return true
         case .refreshRejected(let status, let body):
             guard status != 408, status != 429, (400..<500).contains(status) else {

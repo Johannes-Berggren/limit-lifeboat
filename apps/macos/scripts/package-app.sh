@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Builds and assembles apps/macos/dist/Limit Lifeboat.app for Apple Silicon. Development
-# builds use SIGN_IDENTITY when provided, otherwise the first Apple Development
+# Builds and assembles apps/macos/dist/Limit Lifeboat.app for Apple Silicon.
+# APP_VARIANT defaults to development, which uses isolated app-owned storage
+# and disables updates and launch at login. Development builds use SIGN_IDENTITY
+# when provided, otherwise the first Apple Development
 # identity, and fall back to ad-hoc signing. scripts/release.sh re-signs for
 # distribution (set SKIP_ADHOC_SIGN=1 to leave the bundle unsigned for that
 # step).
@@ -11,9 +13,9 @@ APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$APP_ROOT/../.." && pwd)"
 CONFIGURATION="${CONFIGURATION:-release}"
 ARCHITECTURE="${ARCHITECTURE:-arm64}"
+APP_VARIANT="${APP_VARIANT:-development}"
 PRODUCT_NAME="Limit Lifeboat"
 EXECUTABLE_NAME="LimitLifeboat"
-BUNDLE_ID="com.limitlifeboat.app"
 APP_DIR="$APP_ROOT/dist/$PRODUCT_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
@@ -31,6 +33,27 @@ SPARKLE_LICENSE_FILE="$APP_ROOT/Packaging/Sparkle-LICENSE.txt"
 BUNDLED_SPARKLE_LICENSE="$RESOURCES_DIR/ThirdPartyLicenses/Sparkle.txt"
 SPARKLE_PUBLIC_KEY="sByqwP3sYWWv46jT+x7vgv7tt+iujcezHs7WX+gyP7g="
 SPARKLE_FEED_URL="https://github.com/Johannes-Berggren/limit-lifeboat/releases/latest/download/appcast.xml"
+
+case "$APP_VARIANT" in
+  development)
+    DISPLAY_NAME="Limit Lifeboat Dev"
+    BUNDLE_ID="com.limitlifeboat.app.dev"
+    CREDENTIAL_SERVICE="com.limitlifeboat.app.dev.credentials"
+    APPLICATION_SUPPORT_NAME="LimitLifeboat-Dev"
+    SPARKLE_AUTOMATIC_CHECKS="false"
+    ;;
+  distribution)
+    DISPLAY_NAME="Limit Lifeboat"
+    BUNDLE_ID="com.limitlifeboat.app"
+    CREDENTIAL_SERVICE="com.limitlifeboat.app.credentials"
+    APPLICATION_SUPPORT_NAME="LimitLifeboat"
+    SPARKLE_AUTOMATIC_CHECKS="true"
+    ;;
+  *)
+    echo "APP_VARIANT must be 'development' or 'distribution': '$APP_VARIANT'" >&2
+    exit 1
+    ;;
+esac
 
 VERSION="${VERSION:-$(tr -d '[:space:]' < "$APP_ROOT/VERSION")}"
 # Keep build numbers monotonic across native and website commits in the
@@ -108,7 +131,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleDisplayName</key>
-  <string>Limit Lifeboat</string>
+  <string>$DISPLAY_NAME</string>
   <key>CFBundleExecutable</key>
   <string>$EXECUTABLE_NAME</string>
   <key>CFBundleIconFile</key>
@@ -131,6 +154,12 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <string>14.0</string>
   <key>LSUIElement</key>
   <true/>
+  <key>LimitLifeboatAppVariant</key>
+  <string>$APP_VARIANT</string>
+  <key>LimitLifeboatApplicationSupportDirectoryName</key>
+  <string>$APPLICATION_SUPPORT_NAME</string>
+  <key>LimitLifeboatCredentialService</key>
+  <string>$CREDENTIAL_SERVICE</string>
   <key>NSAppleEventsUsageDescription</key>
   <string>Limit Lifeboat can open Terminal to help you run official CLI login commands.</string>
   <key>NSHighResolutionCapable</key>
@@ -138,7 +167,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
   <key>SUEnableAutomaticChecks</key>
-  <true/>
+  <$SPARKLE_AUTOMATIC_CHECKS/>
   <key>SUFeedURL</key>
   <string>$SPARKLE_FEED_URL</string>
   <key>SUPublicEDKey</key>
@@ -175,14 +204,24 @@ fi
 if [[ "${SKIP_ADHOC_SIGN:-0}" != "1" ]]; then
   RESOLVED_SIGN_IDENTITY="${SIGN_IDENTITY:-}"
   if [[ -z "$RESOLVED_SIGN_IDENTITY" ]]; then
-    RESOLVED_SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | awk '/"Apple Development:/ { print $2; exit }')"
+    if [[ "$APP_VARIANT" == "development" ]]; then
+      RESOLVED_SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | awk '/"Apple Development:/ { print $2; exit }')"
+    else
+      RESOLVED_SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | awk '/"Developer ID Application:/ { print $2; exit }')"
+    fi
   fi
   if [[ -z "$RESOLVED_SIGN_IDENTITY" ]]; then
     RESOLVED_SIGN_IDENTITY="-"
-    echo "Warning: no Apple Development signing identity found; using ad-hoc signing." >&2
-    echo "Keychain 'Always Allow' approvals may not survive the next rebuild. Set SIGN_IDENTITY to use a stable identity." >&2
+  fi
+  if [[ "$RESOLVED_SIGN_IDENTITY" == "-" ]]; then
+    echo "Warning: no stable signing identity selected for the $APP_VARIANT variant; using ad-hoc signing." >&2
+    if [[ "$APP_VARIANT" == "development" ]]; then
+      echo "This build cannot claim durable Keychain authorization; approvals may not survive the next rebuild. Set SIGN_IDENTITY to an Apple Development identity." >&2
+    else
+      echo "This test package cannot launch as a distribution build. Releases must use the pinned-team Developer ID Application identity." >&2
+    fi
   else
-    echo "Signing development app with '$RESOLVED_SIGN_IDENTITY'."
+    echo "Signing $APP_VARIANT app with '$RESOLVED_SIGN_IDENTITY'."
   fi
 
   codesign --force --sign "$RESOLVED_SIGN_IDENTITY" \
@@ -193,7 +232,19 @@ if [[ "${SKIP_ADHOC_SIGN:-0}" != "1" ]]; then
   codesign --force --sign "$RESOLVED_SIGN_IDENTITY" \
     --entitlements "$ENTITLEMENTS" \
     "$APP_DIR"
+  codesign --verify --all-architectures --strict --verbose=2 "$APP_DIR"
   codesign --verify --all-architectures --strict --verbose=2 "$SPARKLE_FRAMEWORK"
+
+  if [[ "$APP_VARIANT" == "development" ]]; then
+    SIGNING_DETAILS="$(codesign --display --verbose=4 "$APP_DIR" 2>&1)"
+    if grep -Fq "Authority=Apple Development:" <<< "$SIGNING_DETAILS" \
+      && grep -Eq '^TeamIdentifier=[A-Z0-9]{10}$' <<< "$SIGNING_DETAILS"; then
+      echo "Development bundle has a stable Apple Development requirement; native Always Allow authorization can survive rebuilds."
+    else
+      echo "Warning: this development bundle is not signed with a stable Apple Development identity." >&2
+      echo "The app will label Keychain authorization as nondurable and may ask again after rebuilding." >&2
+    fi
+  fi
 fi
 
-echo "Built $APP_DIR (version $VERSION, build $BUILD_NUMBER)"
+echo "Built $APP_DIR (variant $APP_VARIANT, version $VERSION, build $BUILD_NUMBER)"

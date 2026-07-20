@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Foundation
+import LimitLifeboatCore
 @preconcurrency import Sparkle
 
 enum AppInfo {
@@ -17,20 +18,28 @@ enum AppInfo {
 final class AppUpdater: NSObject, ObservableObject, @preconcurrency SPUStandardUserDriverDelegate {
     @Published private(set) var availableVersion: String?
     @Published private(set) var canCheckForUpdates = false
-    @Published private(set) var automaticallyChecksForUpdates = true
+    @Published private(set) var automaticallyChecksForUpdates = false
+
+    let isEnabled: Bool
 
     private var cancellables: Set<AnyCancellable> = []
     private var updateUIIsActive = false
-
-    private lazy var controller = SPUStandardUpdaterController(
-        startingUpdater: true,
-        updaterDelegate: nil,
-        userDriverDelegate: self
-    )
+    private var controller: SPUStandardUpdaterController?
 
     override init() {
+        self.isEnabled = ApplicationVariant.current.supportsUpdates
         super.init()
 
+        guard isEnabled else {
+            return
+        }
+
+        let controller = SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: nil,
+            userDriverDelegate: self
+        )
+        self.controller = controller
         let updater = controller.updater
         canCheckForUpdates = updater.canCheckForUpdates
         automaticallyChecksForUpdates = updater.automaticallyChecksForUpdates
@@ -51,11 +60,11 @@ final class AppUpdater: NSObject, ObservableObject, @preconcurrency SPUStandardU
     }
 
     func setAutomaticallyChecksForUpdates(_ enabled: Bool) {
-        controller.updater.automaticallyChecksForUpdates = enabled
+        controller?.updater.automaticallyChecksForUpdates = enabled
     }
 
     func checkForUpdates() {
-        guard controller.updater.canCheckForUpdates else {
+        guard let controller, controller.updater.canCheckForUpdates else {
             return
         }
 
@@ -66,7 +75,7 @@ final class AppUpdater: NSObject, ObservableObject, @preconcurrency SPUStandardU
     }
 
     var supportsGentleScheduledUpdateReminders: Bool {
-        true
+        isEnabled
     }
 
     func standardUserDriverShouldHandleShowingScheduledUpdate(

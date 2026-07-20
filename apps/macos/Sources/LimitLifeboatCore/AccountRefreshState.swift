@@ -70,7 +70,7 @@ public enum RefreshOutcomePolicy {
                 state: .needsLogin(reason: "No captured OAuth credentials are available for this account."),
                 attemptTUIFallback: false
             )
-        case .keychainLocked:
+        case .keychainLocked, .liveCredentialAccessDenied:
             return RefreshOutcome(state: .keychainLocked, attemptTUIFallback: false)
         case .interactiveRefreshRequired:
             // The login is fine; a background cycle just declined to rotate it.
@@ -87,12 +87,11 @@ public enum RefreshOutcomePolicy {
                 ),
                 attemptTUIFallback: false
             )
-        case .rotationDeferred:
-            // An inactive account whose background rotation was skipped keeps
-            // its last snapshot with no visible problem. The caller intercepts
-            // this before mapping, so this is only a safe fallback: `.idle`
-            // shows the row normally (a stale-timestamp footer, no error).
-            return RefreshOutcome(state: .idle, attemptTUIFallback: false)
+        case .credentialUnavailable(let underlying):
+            return RefreshOutcome(
+                state: .readFailed(reason: reason(underlying)),
+                attemptTUIFallback: false
+            )
         case .unauthorized:
             // The API already tried one forced token refresh. A second
             // rejection confirms that this saved login needs user recovery;

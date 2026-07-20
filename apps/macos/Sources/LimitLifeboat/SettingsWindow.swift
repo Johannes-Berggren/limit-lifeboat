@@ -55,6 +55,7 @@ enum LaunchAtLogin {
     /// does not crash (same constraint as notifications).
     static var isSupported: Bool {
         Bundle.main.bundleIdentifier != nil
+            && ApplicationVariant.current.supportsLaunchAtLogin
     }
 
     static var isEnabled: Bool {
@@ -161,27 +162,36 @@ struct SettingsView: View {
 
                     Section("Updates") {
                         LabeledContent("Version", value: AppInfo.version)
-                        Toggle(
-                            "Automatically check for updates",
-                            isOn: Binding(
-                                get: { updater.automaticallyChecksForUpdates },
-                                set: { updater.setAutomaticallyChecksForUpdates($0) }
+                        if updater.isEnabled {
+                            Toggle(
+                                "Automatically check for updates",
+                                isOn: Binding(
+                                    get: { updater.automaticallyChecksForUpdates },
+                                    set: { updater.setAutomaticallyChecksForUpdates($0) }
+                                )
                             )
-                        )
-                        if let version = updater.availableVersion {
+                            if let version = updater.availableVersion {
+                                Label(
+                                    "Version \(version) is ready to install.",
+                                    systemImage: "arrow.down.circle.fill"
+                                )
+                                .foregroundStyle(DS.accent)
+                            }
+                            Button(
+                                updater.availableVersion.map { "Install version \($0)…" }
+                                    ?? "Check for Updates…"
+                            ) {
+                                updater.checkForUpdates()
+                            }
+                            .disabled(!updater.canCheckForUpdates)
+                        } else {
                             Label(
-                                "Version \(version) is ready to install.",
-                                systemImage: "arrow.down.circle.fill"
+                                "Updates are disabled in development builds.",
+                                systemImage: "hammer"
                             )
-                            .foregroundStyle(DS.accent)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                         }
-                        Button(
-                            updater.availableVersion.map { "Install version \($0)…" }
-                                ?? "Check for Updates…"
-                        ) {
-                            updater.checkForUpdates()
-                        }
-                        .disabled(!updater.canCheckForUpdates)
                     }
 
                     Section("History") {

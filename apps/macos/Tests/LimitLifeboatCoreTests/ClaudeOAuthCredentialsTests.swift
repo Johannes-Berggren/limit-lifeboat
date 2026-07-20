@@ -137,7 +137,7 @@ final class ClaudeOAuthCredentialsTests: XCTestCase {
         """.utf8)
         let newObject = Data(#"{"accessToken": "fresh-access", "refreshToken": "fresh-refresh"}"#.utf8)
 
-        let merged = mergeClaudeAiOauth(newObject, intoItemJSON: existing)
+        let merged = try mergeClaudeAiOauth(newObject, intoItemJSON: existing)
         let item = try XCTUnwrap(try JSONSerialization.jsonObject(with: merged) as? [String: Any])
 
         let claudeAiOauth = try XCTUnwrap(item["claudeAiOauth"] as? [String: Any])
@@ -153,12 +153,38 @@ final class ClaudeOAuthCredentialsTests: XCTestCase {
     func testMergeClaudeAiOauthIntoMissingItemStartsFresh() throws {
         let newObject = Data(#"{"accessToken": "fresh-access"}"#.utf8)
 
-        let merged = mergeClaudeAiOauth(newObject, intoItemJSON: nil)
+        let merged = try mergeClaudeAiOauth(newObject, intoItemJSON: nil)
         let item = try XCTUnwrap(try JSONSerialization.jsonObject(with: merged) as? [String: Any])
 
         XCTAssertEqual(item.count, 1)
         let claudeAiOauth = try XCTUnwrap(item["claudeAiOauth"] as? [String: Any])
         XCTAssertEqual(claudeAiOauth["accessToken"] as? String, "fresh-access")
+    }
+
+    func testMergeClaudeAiOauthRejectsMalformedExistingItem() {
+        XCTAssertThrowsError(
+            try mergeClaudeAiOauth(
+                Data(#"{"accessToken":"fresh-access"}"#.utf8),
+                intoItemJSON: Data("not-json".utf8)
+            )
+        ) { error in
+            guard case ClaudeCodeCredentialsKeychainError.malformedCredentialJSON = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+    }
+
+    func testMergeClaudeAiOauthRejectsMalformedIncomingPayload() {
+        XCTAssertThrowsError(
+            try mergeClaudeAiOauth(
+                Data("not-json".utf8),
+                intoItemJSON: Data(#"{"mcpOAuth":{"keep":true}}"#.utf8)
+            )
+        ) { error in
+            guard case ClaudeCodeCredentialsKeychainError.malformedCredentialJSON = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
     }
 
     private func makeCredentials(expiresAt: Date) throws -> ClaudeOAuthCredentials {
@@ -176,13 +202,19 @@ final class ClaudeOAuthCredentialsTests: XCTestCase {
 
 final class ClaudeCodeCredentialsKeychainTests: XCTestCase {
     func testReadUpdateAndDeleteExistingItem() throws {
+        let disposable = try DisposableKeychainTestSupport()
         let service = "com.limitlifeboat.app.claude-tests.\(UUID().uuidString)"
         let account = "test-\(UUID().uuidString)"
-        let keychain = ClaudeCodeCredentialsKeychain(serviceName: service, accountName: account)
-        defer { deleteItem(service: service, account: account) }
+        let keychain = ClaudeCodeCredentialsKeychain(
+            serviceName: service,
+            accountName: account,
+            securityClient: SystemClaudeKeychainSecurityClient(
+                searchList: [disposable.keychain]
+            )
+        )
 
         let first = Data(#"{"claudeAiOauth":{"accessToken":"one"},"mcpOAuth":{"server":"keep"}}"#.utf8)
-        try addItem(first, service: service, account: account)
+        try disposable.addGenericPassword(data: first, service: service, account: account)
         XCTAssertEqual(try keychain.readLiveItemJSON(), first)
 
         let second = Data(#"{"claudeAiOauth":{"accessToken":"two"},"mcpOAuth":{"server":"keep"}}"#.utf8)
@@ -194,25 +226,48 @@ final class ClaudeCodeCredentialsKeychainTests: XCTestCase {
         XCTAssertNoThrow(try keychain.deleteLiveItem(), "Deleting an already-missing item is idempotent")
     }
 
-    func testSecurityToolInteroperability() throws {
+    func testDisposableCustomKeychainDiscoveryAndPinnedAccessIntegration() throws {
         try XCTSkipUnless(
-            ProcessInfo.processInfo.environment["RUN_KEYCHAIN_INTEROP_TESTS"] == "1",
-            "Opt-in only: /usr/bin/security can display a real macOS authorization dialog."
+            ProcessInfo.processInfo.environment["RUN_DISPOSABLE_KEYCHAIN_TESTS"] == "1",
+            "Opt-in disposable-Keychain integration suite."
         )
 
+        let disposable = try DisposableKeychainTestSupport()
         let service = "com.limitlifeboat.app.claude-tests.\(UUID().uuidString)"
         let account = "test-\(UUID().uuidString)"
-        defer { deleteItem(service: service, account: account) }
+        let keychain = ClaudeCodeCredentialsKeychain(
+            serviceName: service,
+            accountName: account,
+            securityClient: SystemClaudeKeychainSecurityClient(
+                searchList: [disposable.keychain]
+            )
+        )
 
         let item = Data(#"{"claudeAiOauth":{"accessToken":"one"},"mcpOAuth":{"server":"keep"}}"#.utf8)
-        try addItem(item, service: service, account: account)
-        XCTAssertEqual(try readWithSecurityTool(service: service, account: account), item)
+        try disposable.addGenericPassword(data: item, service: service, account: account)
+
+        let location = try XCTUnwrap(keychain.locateLiveItem(accessMode: .nonInteractive))
+        XCTAssertEqual(
+            URL(fileURLWithPath: location.keychainPath).resolvingSymlinksInPath(),
+            URL(fileURLWithPath: disposable.path).resolvingSymlinksInPath()
+        )
+        XCTAssertEqual(
+            try keychain.readLiveItemJSON(at: location, accessMode: .nonInteractive),
+            item
+        )
     }
 
-    func testWriteRefusesToCreateClaudeOwnedItem() {
+    func testWriteRefusesToCreateClaudeOwnedItem() throws {
+        let disposable = try DisposableKeychainTestSupport()
         let service = "com.limitlifeboat.app.claude-tests.\(UUID().uuidString)"
         let account = "test-\(UUID().uuidString)"
-        let keychain = ClaudeCodeCredentialsKeychain(serviceName: service, accountName: account)
+        let keychain = ClaudeCodeCredentialsKeychain(
+            serviceName: service,
+            accountName: account,
+            securityClient: SystemClaudeKeychainSecurityClient(
+                searchList: [disposable.keychain]
+            )
+        )
 
         XCTAssertThrowsError(try keychain.writeLiveItemJSON(Data("{}".utf8))) { error in
             guard case ClaudeCodeCredentialsKeychainError.missingLiveItem = error else {
@@ -244,46 +299,4 @@ final class ClaudeCodeCredentialsKeychainTests: XCTestCase {
         XCTAssertTrue(error.localizedDescription.localizedCaseInsensitiveContains("relaunch"))
     }
 
-    private func deleteItem(service: String, account: String) {
-        SecItemDelete([
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ] as CFDictionary)
-    }
-
-    private func addItem(_ data: Data, service: String, account: String) throws {
-        let status = SecItemAdd([
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        ] as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw ClaudeCodeCredentialsKeychainError.keychainError(status)
-        }
-    }
-
-    private func readWithSecurityTool(service: String, account: String) throws -> Data {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["find-generic-password", "-s", service, "-a", account, "-w"]
-        let output = Pipe()
-        let errors = Pipe()
-        process.standardOutput = output
-        process.standardError = errors
-
-        try process.run()
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        let errorData = errors.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-
-        XCTAssertEqual(
-            process.terminationStatus,
-            0,
-            String(decoding: errorData, as: UTF8.self)
-        )
-        return Data(data.dropLast(data.last == 0x0A ? 1 : 0))
-    }
 }
