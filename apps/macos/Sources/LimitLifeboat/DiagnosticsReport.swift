@@ -9,7 +9,10 @@ import OSLog
 /// they must never interpolate tokens, emails, or account labels — accounts
 /// are referenced by their internal UUIDs only (see `AppLog`).
 enum DiagnosticsReport {
-    static func generate(now: Date = Date()) throws -> String {
+    static func generate(
+        now: Date = Date(),
+        applicationSupportDirectory: URL? = nil
+    ) throws -> String {
         let store = try OSLogStore(scope: .currentProcessIdentifier)
         let formatter = ISO8601DateFormatter()
         var lines = [
@@ -20,6 +23,15 @@ enum DiagnosticsReport {
             ""
         ]
 
+        // The persisted event log first: it survives relaunches, so the event
+        // that caused an overnight logout is still here even after the unified
+        // log's current-process scope has been reset.
+        if let applicationSupportDirectory {
+            lines.append(contentsOf: persistedEventLines(applicationSupportDirectory: applicationSupportDirectory))
+            lines.append("")
+        }
+
+        lines.append("This session's log entries:")
         let entries = try store.getEntries()
             .compactMap { $0 as? OSLogEntryLog }
             .filter { $0.subsystem == AppLog.subsystem }
@@ -30,6 +42,22 @@ enum DiagnosticsReport {
             lines.append("\(formatter.string(from: entry.date)) [\(entry.category)] \(label(for: entry.level)): \(entry.composedMessage)")
         }
         return lines.joined(separator: "\n")
+    }
+
+    /// Reads the durable app-events log directly (a fresh read-only store, off
+    /// the live @MainActor one) and renders it via the Core formatter.
+    private static func persistedEventLines(applicationSupportDirectory: URL) -> [String] {
+        let store = AppEventStore(applicationSupportDirectory: applicationSupportDirectory)
+        do {
+            try store.load()
+        } catch {
+            return ["Recent app events (persisted): could not read the event log — \(error.localizedDescription)"]
+        }
+        let events = store.recentEvents()
+        guard !events.isEmpty else {
+            return ["Recent app events (persisted): none recorded yet."]
+        }
+        return ["Recent app events (persisted):"] + AppEventStore.diagnosticsLines(for: events)
     }
 
     private static func label(for level: OSLogEntryLog.Level) -> String {

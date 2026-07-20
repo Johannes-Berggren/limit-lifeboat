@@ -14,7 +14,8 @@ final class SettingsWindowController {
                 rootView: SettingsView(
                     settings: state.settings,
                     updater: state.updater,
-                    exportUsageHistory: { [weak state] in state?.exportAllUsageHistoryCSV() }
+                    exportUsageHistory: { [weak state] in state?.exportAllUsageHistoryCSV() },
+                    applicationSupportDirectory: state.applicationSupportDirectory
                 )
             )
             let window = NSWindow(contentViewController: hosting)
@@ -82,6 +83,9 @@ struct SettingsView: View {
     /// Optional so previews and tests can construct the view without an
     /// AppState behind it.
     var exportUsageHistory: (() -> Void)? = nil
+    /// Where the durable event log lives, so diagnostics can include events
+    /// that predate this app session. Optional for the same preview/test reason.
+    var applicationSupportDirectory: URL? = nil
 
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
     @State private var launchAtLoginMessage: String?
@@ -241,8 +245,9 @@ struct SettingsView: View {
             do {
                 // Reading the log store can take a moment; keep it off the
                 // main actor so the window stays responsive.
+                let directory = applicationSupportDirectory
                 let report = try await Task.detached(priority: .userInitiated) {
-                    try DiagnosticsReport.generate()
+                    try DiagnosticsReport.generate(applicationSupportDirectory: directory)
                 }.value
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(report, forType: .string)

@@ -98,6 +98,63 @@ final class AppEventStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.events(in: everything).count, 1)
     }
 
+    func testCredentialRefreshEventRoundTrips() throws {
+        let store = makeStore()
+        let credentialEvent = AppEvent(
+            timestamp: now,
+            kind: .credentialRefresh,
+            provider: .claude,
+            toProfileID: accountA,
+            interactive: false,
+            outcome: .invalidGrant,
+            codePath: "background"
+        )
+        try store.append(credentialEvent)
+
+        let reloaded = makeStore()
+        try reloaded.load()
+        let everything = DateInterval(start: now.addingTimeInterval(-3600), end: now)
+        XCTAssertEqual(reloaded.events(in: everything), [credentialEvent])
+    }
+
+    func testLegacySwitchLineWithoutNewFieldsStillDecodes() throws {
+        // A .cliSwitch line written before the credential fields existed must
+        // still decode (new fields default to nil).
+        let url = root.appendingPathComponent("app-events.jsonl")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let legacyLine = #"{"interactive":true,"kind":"cliSwitch","provider":"claude","timestamp":"2026-06-30T00:00:00Z","toProfileID":"\#(accountA.uuidString)"}"# + "\n"
+        try Data(legacyLine.utf8).write(to: url)
+
+        let store = makeStore()
+        try store.load()
+        let everything = DateInterval(start: Date(timeIntervalSince1970: 0), end: now)
+        let events = store.events(in: everything)
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.first?.kind, .cliSwitch)
+        XCTAssertNil(events.first?.outcome)
+        XCTAssertNil(events.first?.codePath)
+    }
+
+    func testDiagnosticsLinesArePrivacySafe() {
+        let event = AppEvent(
+            timestamp: now,
+            kind: .credentialRefresh,
+            provider: .claude,
+            toProfileID: accountA,
+            interactive: false,
+            outcome: .rotationWithheld,
+            codePath: "background"
+        )
+        let lines = AppEventStore.diagnosticsLines(for: [event])
+        XCTAssertEqual(lines.count, 1)
+        let line = lines[0]
+        XCTAssertTrue(line.contains("credentialRefresh"))
+        XCTAssertTrue(line.contains("rotationWithheld"))
+        XCTAssertTrue(line.contains(accountA.uuidString))
+        // Only non-secret markers (UUIDs, outcome, code path) — never tokens.
+        XCTAssertFalse(line.contains("Bearer"))
+    }
+
     func testRemoveAccountDropsEventsTouchingIt() throws {
         let store = makeStore()
         try store.append(event(at: now.addingTimeInterval(-300), to: accountA))

@@ -141,6 +141,35 @@ final class WeeklyDigestPlannerTests: XCTestCase {
         XCTAssertTrue(digest!.body.contains("switched the CLI 3× (2 automatic)."))
     }
 
+    func testBuildCountsOnlyCliSwitchesNotCredentialEvents() {
+        let period = planner.period(endingAt: now, calendar: utcCalendar)
+        let digest = planner.build(
+            accounts: [account(label: "Solo", windows: [window(readings: [(hoursAgo: 24, usedPercent: 42)])])],
+            events: [
+                AppEvent(
+                    timestamp: now.addingTimeInterval(-10 * 3600),
+                    kind: .cliSwitch,
+                    provider: .claude,
+                    toProfileID: accountID,
+                    interactive: true
+                ),
+                AppEvent(
+                    timestamp: now.addingTimeInterval(-5 * 3600),
+                    kind: .credentialRefresh,
+                    provider: .claude,
+                    toProfileID: accountID,
+                    interactive: false,
+                    outcome: .invalidGrant,
+                    codePath: "background"
+                )
+            ],
+            period: period
+        )
+
+        XCTAssertTrue(digest!.body.contains("switched the CLI 1×"))
+        XCTAssertFalse(digest!.body.contains("2×"), "credentialRefresh events must not be counted as switches")
+    }
+
     /// The dedupe carry-forward: an account whose only reading predates the
     /// period (flat usage all week) still reports that level as its peak.
     func testBuildCarriesPrePeriodReadingsForward() {

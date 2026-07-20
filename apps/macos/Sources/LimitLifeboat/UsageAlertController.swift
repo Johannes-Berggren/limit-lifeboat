@@ -12,9 +12,12 @@ import UserNotifications
 enum NotificationSwitchAction {
     static let categoryBest = "limit-switch"
     static let categoryThisAccount = "limit-switch-here"
+    static let categoryRefresh = "limit-refresh"
     static let actionID = "switch-now"
+    static let refreshActionID = "refresh-now"
     static let actionKey = "action"
     static let actionValue = "switch"
+    static let refreshActionValue = "refresh"
     static let providerKey = "provider"
     static let targetKey = "target"
 }
@@ -106,6 +109,20 @@ final class UsageAlertController {
         )
     }
 
+    /// Nudges the user when the active account's usage tracking has been paused
+    /// too long (its access token expired while the CLI was idle, so background
+    /// refresh declined to rotate the live login). The "Refresh Now" action
+    /// runs the same user-initiated retry the row's Retry button does.
+    func handleUsagePausedStuck(profile: AccountProfile) {
+        postNotification(
+            identifier: "usage-paused-\(profile.id.uuidString)",
+            title: "\(profile.label): usage tracking paused",
+            body: "Limit Lifeboat paused refreshing \(profile.provider.displayName) usage so it won't disturb your active login. Tap Refresh Now to update it.",
+            categoryIdentifier: NotificationSwitchAction.categoryRefresh,
+            userInfo: refreshUserInfo(provider: profile.provider, targetID: profile.id)
+        )
+    }
+
     func handleAutoSwitch(fromLabel: String?, toLabel: String, provider: Provider, reason: String?) {
         var parts: [String] = []
         if let fromLabel {
@@ -182,6 +199,19 @@ final class UsageAlertController {
         return info
     }
 
+    /// The refresh-action payload, distinct from the switch payload so the
+    /// click handler routes it to a user-initiated retry rather than a switch.
+    private func refreshUserInfo(provider: Provider, targetID: UUID?) -> [String: Any] {
+        var info: [String: Any] = [
+            NotificationSwitchAction.actionKey: NotificationSwitchAction.refreshActionValue,
+            NotificationSwitchAction.providerKey: provider.rawValue
+        ]
+        if let targetID {
+            info[NotificationSwitchAction.targetKey] = targetID.uuidString
+        }
+        return info
+    }
+
     /// Feedback for a clicked switch action that did not result in a switch —
     /// the user acted on a notification, so silence would read as a break.
     func handleNotificationSwitchOutcome(title: String, body: String) {
@@ -230,7 +260,14 @@ final class UsageAlertController {
             ],
             intentIdentifiers: []
         )
-        center.setNotificationCategories([switchToBest, switchToThisAccount])
+        let refreshNow = UNNotificationCategory(
+            identifier: NotificationSwitchAction.categoryRefresh,
+            actions: [
+                UNNotificationAction(identifier: NotificationSwitchAction.refreshActionID, title: "Refresh Now")
+            ],
+            intentIdentifiers: []
+        )
+        center.setNotificationCategories([switchToBest, switchToThisAccount, refreshNow])
     }
 
     /// Per-window near-limit alerts. Session (5h) windows only notify when the

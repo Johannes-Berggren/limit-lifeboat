@@ -1,0 +1,30 @@
+import Foundation
+
+/// Decides when to nudge the user that the active Claude account's usage
+/// tracking has been paused too long. The active login's access token can
+/// expire while the CLI is idle; a background cycle then declines to rotate it
+/// (rotating the live login is what causes real logouts), leaving the row in
+/// `.usagePaused` until an explicit Retry. Without a nudge this can sit silent
+/// for hours and read as "logged out". Pure so the timing is unit-testable;
+/// `UsageAlertController` owns the actual posting.
+public struct UsagePausedAlertPolicy: Sendable {
+    /// How long the active account may stay paused before it's worth a
+    /// notification. Time-based rather than cycle-based because the refresh
+    /// interval is user-configurable.
+    public var threshold: TimeInterval
+
+    public init(threshold: TimeInterval = 15 * 60) {
+        self.threshold = threshold
+    }
+
+    /// Notify only once per paused episode, and only after the pause has
+    /// persisted past `threshold`. Callers clear `pausedSince` and the
+    /// already-notified flag the moment the account reaches any other state,
+    /// which re-arms this for the next episode.
+    public func shouldNotify(pausedSince: Date?, now: Date, alreadyNotified: Bool) -> Bool {
+        guard let pausedSince, !alreadyNotified else {
+            return false
+        }
+        return now.timeIntervalSince(pausedSince) >= threshold
+    }
+}

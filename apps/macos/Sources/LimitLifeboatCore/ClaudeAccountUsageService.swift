@@ -101,6 +101,11 @@ public enum ClaudeAccountUsageFetchError: Error, LocalizedError {
     /// The active CLI credential needs rotation, but a background task must
     /// not consume its refresh token out from under Claude Code.
     case interactiveRefreshRequired
+    /// A different profile owns the live CLI login for this same Claude account
+    /// (e.g. the same account under another organization). Rotating this copy's
+    /// refresh token would invalidate the active login's single-use chain, so
+    /// it is never rotated — the account must be switched to instead.
+    case accountActiveElsewhere
     /// Duplicate, malformed, ambiguous, or otherwise unsafe provider-owned
     /// credential state. This is deliberately not an authorization failure and
     /// must never trigger a CLI fallback.
@@ -119,6 +124,8 @@ public enum ClaudeAccountUsageFetchError: Error, LocalizedError {
             return error.localizedDescription
         case .interactiveRefreshRequired:
             return "The active Claude login needs an explicit Retry before its access token can be refreshed."
+        case .accountActiveElsewhere:
+            return "This account shares its Claude login with the active CLI account; switch to it to refresh."
         case .credentialUnavailable(let underlying):
             return "The shared Claude credential could not be used safely (\(underlying.localizedDescription))."
         case .refreshFailed(let underlying):
@@ -204,6 +211,7 @@ public struct ClaudeAccountUsageService {
     public func fetchSnapshot(
         for profile: AccountProfile,
         isActiveCLI: Bool,
+        accountIsLiveElsewhere: Bool = false,
         now: Date = Date(),
         accessMode: CredentialAccessMode = CredentialAccess.currentMode,
         userExplicitlyRequestedRefresh: Bool = false,
@@ -214,6 +222,7 @@ public struct ClaudeAccountUsageService {
         try await fetchSnapshotResult(
             for: profile,
             isActiveCLI: isActiveCLI,
+            accountIsLiveElsewhere: accountIsLiveElsewhere,
             now: now,
             accessMode: accessMode,
             userExplicitlyRequestedRefresh: userExplicitlyRequestedRefresh,
@@ -252,6 +261,9 @@ public struct ClaudeAccountUsageService {
             return try await fetchSnapshotResult(
                 for: profile,
                 isActiveCLI: isActiveCLI,
+                // A switch is activating this target, so its own chain is the one
+                // being made live — never treat it as a shared-account sibling.
+                accountIsLiveElsewhere: false,
                 now: now,
                 accessMode: accessMode,
                 userExplicitlyRequestedRefresh: userExplicitlyRequestedRefresh,
@@ -272,6 +284,7 @@ public struct ClaudeAccountUsageService {
     private func fetchSnapshotResult(
         for profile: AccountProfile,
         isActiveCLI: Bool,
+        accountIsLiveElsewhere: Bool,
         now: Date,
         accessMode: CredentialAccessMode,
         userExplicitlyRequestedRefresh: Bool,
@@ -284,6 +297,7 @@ public struct ClaudeAccountUsageService {
         let resolution = try await resolveCredentials(
             for: profile,
             isActiveCLI: isActiveCLI,
+            accountIsLiveElsewhere: accountIsLiveElsewhere,
             now: now,
             accessMode: accessMode,
             userExplicitlyRequestedRefresh: userExplicitlyRequestedRefresh,
@@ -335,6 +349,7 @@ public struct ClaudeAccountUsageService {
     public func fetchAccountInfo(
         for profile: AccountProfile,
         isActiveCLI: Bool,
+        accountIsLiveElsewhere: Bool = false,
         now: Date = Date(),
         accessMode: CredentialAccessMode = CredentialAccess.currentMode,
         userExplicitlyRequestedRefresh: Bool = false,
@@ -344,6 +359,7 @@ public struct ClaudeAccountUsageService {
         let resolution = try await resolveCredentials(
             for: profile,
             isActiveCLI: isActiveCLI,
+            accountIsLiveElsewhere: accountIsLiveElsewhere,
             now: now,
             accessMode: accessMode,
             userExplicitlyRequestedRefresh: userExplicitlyRequestedRefresh,
@@ -410,13 +426,46 @@ public struct ClaudeAccountUsageService {
         var preloadedStoredRecordAtRead: StoredCredentialRecord?
         var liveAccessWasDenied: Bool
         var isActiveCLI: Bool
+        /// A sibling profile owns the live CLI login for this same account —
+        /// this copy shares the active login's single-use chain and must never
+        /// be rotated in any mode.
+        var accountIsLiveElsewhere: Bool
         var wasRefreshed: Bool
+        /// Whether a rotation is permitted at all: the user asked for it (Retry
+        /// or a switch preflight, `userExplicitlyRequestedRefresh`) or the
+        /// access mode is `.userInitiated`. Background polling never rotates.
         var allowsActiveCredentialRefresh: Bool
     }
 
     private enum StoredCredentialSource {
         case provider
         case preloaded(StoredCredentialRecord)
+    }
+
+    /// The single rotation gate both guard sites share. A shared-account sibling
+    /// is never rotated (it would strand the live login). The active login is
+    /// rotated only on an explicit account action (`allowsActiveCredentialRefresh`)
+    /// so a background cycle can't race Claude Code's own refresh. An inactive
+    /// account has a single owner and rotates normally; repeated failures are
+    /// throttled by the terminal-refresh suppression instead.
+    private static func mayRotate(
+        isActiveCLI: Bool,
+        accountIsLiveElsewhere: Bool,
+        allowsActiveCredentialRefresh: Bool
+    ) -> Bool {
+        if accountIsLiveElsewhere {
+            return false
+        }
+        if isActiveCLI {
+            return allowsActiveCredentialRefresh
+        }
+        return true
+    }
+
+    private static func rotationBlockedError(
+        accountIsLiveElsewhere: Bool
+    ) -> ClaudeAccountUsageFetchError {
+        accountIsLiveElsewhere ? .accountActiveElsewhere : .interactiveRefreshRequired
     }
 
     /// Active profiles consider both copies and use the credential generation
@@ -426,6 +475,7 @@ public struct ClaudeAccountUsageService {
     private func resolveCredentials(
         for profile: AccountProfile,
         isActiveCLI: Bool,
+        accountIsLiveElsewhere: Bool,
         now: Date,
         accessMode: CredentialAccessMode,
         userExplicitlyRequestedRefresh: Bool,
@@ -588,8 +638,12 @@ public struct ClaudeAccountUsageService {
                     ? ClaudeAccountUsageFetchError.keychainLocked
                     : ClaudeAccountUsageFetchError.interactiveRefreshRequired
             }
-            guard !isActiveCLI || allowsActiveCredentialRefresh else {
-                throw ClaudeAccountUsageFetchError.interactiveRefreshRequired
+            guard Self.mayRotate(
+                isActiveCLI: isActiveCLI,
+                accountIsLiveElsewhere: accountIsLiveElsewhere,
+                allowsActiveCredentialRefresh: allowsActiveCredentialRefresh
+            ) else {
+                throw Self.rotationBlockedError(accountIsLiveElsewhere: accountIsLiveElsewhere)
             }
             active = try await refreshAndPersist(
                 CredentialResolution(
@@ -600,6 +654,7 @@ public struct ClaudeAccountUsageService {
                     preloadedStoredRecordAtRead: preloadedStoredRecord,
                     liveAccessWasDenied: liveAccessDenied,
                     isActiveCLI: isActiveCLI,
+                    accountIsLiveElsewhere: accountIsLiveElsewhere,
                     wasRefreshed: false,
                     allowsActiveCredentialRefresh: allowsActiveCredentialRefresh
                 ),
@@ -653,6 +708,7 @@ public struct ClaudeAccountUsageService {
             preloadedStoredRecordAtRead: preloadedStoredRecord,
             liveAccessWasDenied: liveAccessDenied,
             isActiveCLI: isActiveCLI,
+            accountIsLiveElsewhere: accountIsLiveElsewhere,
             wasRefreshed: wasRefreshed,
             allowsActiveCredentialRefresh: allowsActiveCredentialRefresh
         )
@@ -710,8 +766,12 @@ public struct ClaudeAccountUsageService {
         now: Date,
         accessMode: CredentialAccessMode
     ) async throws -> ClaudeOAuthCredentials {
-        guard !resolution.isActiveCLI || resolution.allowsActiveCredentialRefresh else {
-            throw ClaudeAccountUsageFetchError.interactiveRefreshRequired
+        guard Self.mayRotate(
+            isActiveCLI: resolution.isActiveCLI,
+            accountIsLiveElsewhere: resolution.accountIsLiveElsewhere,
+            allowsActiveCredentialRefresh: resolution.allowsActiveCredentialRefresh
+        ) else {
+            throw Self.rotationBlockedError(accountIsLiveElsewhere: resolution.accountIsLiveElsewhere)
         }
         if resolution.isActiveCLI, resolution.liveAccessTokenAtRead == nil {
             // A stored access token may serve usage while the provider-owned
@@ -751,7 +811,8 @@ public struct ClaudeAccountUsageService {
 
         // For an active explicit Retry, protect the provider-owned live login
         // first. Both writes are compare-and-swap operations; an account or
-        // credential change during the network request always wins.
+        // credential change during the network request always wins (the live
+        // item is not ours to overwrite blindly).
         var persisted = false
         var storedPersisted = false
         var liveWriteError: Error?
@@ -770,10 +831,16 @@ public struct ClaudeAccountUsageService {
                 persisted = livePersisted || persisted
             } catch {
                 liveWriteError = error
-                AppLog.credentials.info("Could not write the refreshed token back to the live Claude Code item: \(error.localizedDescription, privacy: .public)")
+                AppLog.credentials.error("Could not write the refreshed token back to the live Claude Code item for account \(profile.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
         }
 
+        // The stored snapshot is ours, and the server has already consumed the
+        // old refresh token — the rotated generation is now the only valid one.
+        // A dropped write here means a guaranteed invalid_grant next cycle, so
+        // `persisted` gates whether the refresh is treated as successful at all
+        // (see the guard below): a failed save fails the refresh rather than
+        // silently continuing on a token the disk no longer holds.
         do {
             if let expectedStoredAccessToken = resolution.storedAccessTokenAtRead {
                 if let storedRecord = resolution.preloadedStoredRecordAtRead {
@@ -803,7 +870,7 @@ public struct ClaudeAccountUsageService {
                 persisted = true
             }
         } catch {
-            AppLog.credentials.info("Could not persist the refreshed token for account \(profile.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            AppLog.credentials.error("Could not persist the refreshed token for account \(profile.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
 
         if liveWriteError != nil || liveWriteConflict {

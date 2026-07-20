@@ -138,7 +138,7 @@ final class ClaudeAccountUsageServiceTests: XCTestCase {
         ])
 
         let service = makeService(http: http, credentials: store)
-        _ = try await service.fetchSnapshot(for: profile, isActiveCLI: false, now: now)
+        _ = try await service.fetchSnapshot(for: profile, isActiveCLI: false, now: now, accessMode: .userInitiated)
 
         XCTAssertEqual(http.requests.count, 2)
         XCTAssertEqual(http.requests[0].url, ClaudeOAuthConstants.tokenEndpoint)
@@ -416,7 +416,7 @@ final class ClaudeAccountUsageServiceTests: XCTestCase {
         ])
 
         let service = makeService(http: http, credentials: store)
-        _ = try await service.fetchSnapshot(for: profile, isActiveCLI: false, now: now)
+        _ = try await service.fetchSnapshot(for: profile, isActiveCLI: false, now: now, accessMode: .userInitiated)
 
         XCTAssertEqual(http.requests.count, 3)
         XCTAssertEqual(http.requests[1].url, ClaudeOAuthConstants.tokenEndpoint)
@@ -438,7 +438,7 @@ final class ClaudeAccountUsageServiceTests: XCTestCase {
 
         let service = makeService(http: http, credentials: store)
         do {
-            _ = try await service.fetchSnapshot(for: profile, isActiveCLI: false, now: now)
+            _ = try await service.fetchSnapshot(for: profile, isActiveCLI: false, now: now, accessMode: .userInitiated)
             XCTFail("Expected unauthorized")
         } catch let error as ClaudeAccountUsageFetchError {
             guard case .unauthorized = error else {
@@ -460,7 +460,7 @@ final class ClaudeAccountUsageServiceTests: XCTestCase {
 
         let service = makeService(http: http, credentials: store)
         do {
-            _ = try await service.fetchSnapshot(for: profile, isActiveCLI: false, now: now)
+            _ = try await service.fetchSnapshot(for: profile, isActiveCLI: false, now: now, accessMode: .userInitiated)
             XCTFail("Expected refreshFailed")
         } catch let error as ClaudeAccountUsageFetchError {
             guard case .refreshFailed = error else {
@@ -601,6 +601,180 @@ final class ClaudeAccountUsageServiceTests: XCTestCase {
         XCTAssertEqual(store.live?.accessToken, "stale")
         XCTAssertEqual(store.stored[profile.id]?.accessToken, "fresh")
         XCTAssertEqual(http.requests.count, 1)
+    }
+
+    // MARK: - Shared-account rotation protection
+
+    func testSharedAccountInactiveExpiredDoesNotRotateInBackground() async {
+        let store = FakeCredentialProvider()
+        store.stored[profile.id] = makeCredentials(
+            accessToken: "stale",
+            refreshToken: "refresh-1",
+            expiresAt: now.addingTimeInterval(-60)
+        )
+        let http = ScriptedHTTPClient(responses: [])
+
+        let service = makeService(http: http, credentials: store)
+        do {
+            _ = try await service.fetchSnapshot(
+                for: profile,
+                isActiveCLI: false,
+                accountIsLiveElsewhere: true,
+                now: now,
+                accessMode: .nonInteractive
+            )
+            XCTFail("Expected a shared-account profile to defer rotation")
+        } catch let error as ClaudeAccountUsageFetchError {
+            guard case .accountActiveElsewhere = error else {
+                return XCTFail("Expected accountActiveElsewhere, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error \(error)")
+        }
+
+        XCTAssertTrue(http.requests.isEmpty, "The shared chain must not be rotated")
+        XCTAssertEqual(store.stored[profile.id]?.refreshToken, "refresh-1")
+    }
+
+    func testSharedAccountInactiveDoesNotRotateEvenOnUserInitiated() async {
+        let store = FakeCredentialProvider()
+        store.stored[profile.id] = makeCredentials(
+            accessToken: "stale",
+            refreshToken: "refresh-1",
+            expiresAt: now.addingTimeInterval(-60)
+        )
+        let http = ScriptedHTTPClient(responses: [])
+
+        let service = makeService(http: http, credentials: store)
+        do {
+            _ = try await service.fetchSnapshot(
+                for: profile,
+                isActiveCLI: false,
+                accountIsLiveElsewhere: true,
+                now: now,
+                accessMode: .userInitiated
+            )
+            XCTFail("Expected a shared-account profile to refuse rotation even on Retry")
+        } catch let error as ClaudeAccountUsageFetchError {
+            guard case .accountActiveElsewhere = error else {
+                return XCTFail("Expected accountActiveElsewhere, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error \(error)")
+        }
+
+        XCTAssertTrue(http.requests.isEmpty)
+        XCTAssertEqual(store.stored[profile.id]?.refreshToken, "refresh-1")
+    }
+
+    func testSharedAccountValidTokenStillFetchesUsage() async throws {
+        let store = FakeCredentialProvider()
+        store.stored[profile.id] = makeCredentials(
+            accessToken: "stored-token",
+            refreshToken: "refresh-1",
+            expiresAt: now.addingTimeInterval(3600)
+        )
+        let http = ScriptedHTTPClient(responses: [(usageJSON, 200)])
+
+        let service = makeService(http: http, credentials: store)
+        _ = try await service.fetchSnapshot(
+            for: profile,
+            isActiveCLI: false,
+            accountIsLiveElsewhere: true,
+            now: now
+        )
+
+        XCTAssertEqual(http.requests.count, 1, "A valid shared-account token needs no refresh")
+        XCTAssertEqual(http.requests[0].value(forHTTPHeaderField: "Authorization"), "Bearer stored-token")
+        XCTAssertEqual(store.stored[profile.id]?.refreshToken, "refresh-1")
+    }
+
+    func testSharedAccountUnauthorizedDoesNotSpendRefreshToken() async {
+        let store = FakeCredentialProvider()
+        store.stored[profile.id] = makeCredentials(
+            accessToken: "stored-token",
+            refreshToken: "refresh-1",
+            expiresAt: now.addingTimeInterval(3600)
+        )
+        let http = ScriptedHTTPClient(responses: [(Data("{}".utf8), 401)])
+
+        let service = makeService(http: http, credentials: store)
+        do {
+            _ = try await service.fetchSnapshot(
+                for: profile,
+                isActiveCLI: false,
+                accountIsLiveElsewhere: true,
+                now: now
+            )
+            XCTFail("Expected the 401 retry to be blocked for a shared account")
+        } catch let error as ClaudeAccountUsageFetchError {
+            guard case .accountActiveElsewhere = error else {
+                return XCTFail("Expected accountActiveElsewhere, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error \(error)")
+        }
+
+        XCTAssertEqual(http.requests.count, 1, "Only the usage call — no forced refresh")
+        XCTAssertEqual(store.stored[profile.id]?.refreshToken, "refresh-1")
+    }
+
+    func testNormalInactiveRefreshesOnUserActionWhenNotShared() async throws {
+        // A non-shared inactive account still rotates on a user action (Retry
+        // or switch preflight) — only background cycles defer.
+        let store = FakeCredentialProvider()
+        store.stored[profile.id] = makeCredentials(
+            accessToken: "stale",
+            refreshToken: "refresh-1",
+            expiresAt: now.addingTimeInterval(-60)
+        )
+        let http = ScriptedHTTPClient(responses: [
+            (refreshJSON(accessToken: "fresh"), 200),
+            (usageJSON, 200)
+        ])
+
+        let service = makeService(http: http, credentials: store)
+        _ = try await service.fetchSnapshot(
+            for: profile,
+            isActiveCLI: false,
+            accountIsLiveElsewhere: false,
+            now: now,
+            accessMode: .userInitiated
+        )
+
+        XCTAssertEqual(store.stored[profile.id]?.accessToken, "fresh")
+    }
+
+    func testSharedAccountSiblingBlockedEvenOnExplicitRequest() async {
+        // An explicit request does not override the shared-account guard:
+        // rotating a sibling's chain would still strand the active login.
+        let store = FakeCredentialProvider()
+        store.stored[profile.id] = makeCredentials(
+            accessToken: "stale",
+            refreshToken: "refresh-1",
+            expiresAt: now.addingTimeInterval(-60)
+        )
+        let http = ScriptedHTTPClient(responses: [])
+
+        let service = makeService(http: http, credentials: store)
+        do {
+            _ = try await service.fetchSnapshot(
+                for: profile,
+                isActiveCLI: false,
+                accountIsLiveElsewhere: true,
+                now: now,
+                accessMode: .nonInteractive,
+                userExplicitlyRequestedRefresh: true
+            )
+            XCTFail("Expected a shared-account sibling to stay protected")
+        } catch let error as ClaudeAccountUsageFetchError {
+            guard case .accountActiveElsewhere = error else {
+                return XCTFail("Expected accountActiveElsewhere, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error \(error)")
+        }
+        XCTAssertTrue(http.requests.isEmpty)
     }
 
     func testEmptyWindowsResponseThrowsInsteadOfOverwritingSnapshot() async {

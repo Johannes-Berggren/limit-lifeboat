@@ -121,6 +121,57 @@ final class CLIAccountSyncPlannerTests: XCTestCase {
         XCTAssertEqual(planner.plan(provider: .claude, currentIdentity: identity, profiles: [sameOrg]), .create)
     }
 
+    func testFingerprintMatchPrefersIdentityMatchingSibling() {
+        // Two profiles for one Anthropic account share byte-identical stored
+        // chains; a blind `.first` could activate the wrong org.
+        let team = profile(.claude, email: "user@example.com", accountID: "acct-1", organization: "Team", organizationID: "org-team")
+        let individual = profile(.claude, email: "user@example.com", accountID: "acct-1", organization: "Individual", organizationID: "org-individual")
+        let identity = AccountIdentity(
+            email: "user@example.com",
+            organization: "Team",
+            organizationID: "org-team",
+            accountID: "acct-1",
+            source: .claudeCodeUsage
+        )
+
+        XCTAssertEqual(
+            planner.plan(
+                provider: .claude,
+                currentIdentity: identity,
+                profiles: [individual, team], // individual first: blind .first would misfire
+                liveCredentialFingerprint: "shared-fp",
+                storedCredentialFingerprints: [individual.id: "shared-fp", team.id: "shared-fp"],
+                profilesWithStoredCredentials: [individual.id, team.id]
+            ),
+            .activate(team.id)
+        )
+    }
+
+    func testFingerprintMatchPrefersActiveSiblingWhenIdentityAmbiguous() {
+        let inactive = profile(.claude, email: "user@example.com", accountID: "acct-1", organizationID: "org-a")
+        var active = profile(.claude, email: "user@example.com", accountID: "acct-1", organizationID: "org-b")
+        active.isActiveCLI = true
+        // The live identity matches neither sibling's org.
+        let identity = AccountIdentity(
+            email: "user@example.com",
+            organizationID: "org-c",
+            accountID: "acct-1",
+            source: .claudeCodeUsage
+        )
+
+        XCTAssertEqual(
+            planner.plan(
+                provider: .claude,
+                currentIdentity: identity,
+                profiles: [inactive, active], // inactive first: blind .first would misfire
+                liveCredentialFingerprint: "shared-fp",
+                storedCredentialFingerprints: [inactive.id: "shared-fp", active.id: "shared-fp"],
+                profilesWithStoredCredentials: [inactive.id, active.id]
+            ),
+            .activate(active.id)
+        )
+    }
+
     private func profile(
         _ provider: Provider,
         email: String,

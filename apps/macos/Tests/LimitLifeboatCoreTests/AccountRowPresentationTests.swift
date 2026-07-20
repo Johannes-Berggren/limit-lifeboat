@@ -65,6 +65,28 @@ final class AccountRowPresentationTests: XCTestCase {
         XCTAssertNotNil(presentation.footerNote)
     }
 
+    func testUsagePausedShowsCalmRefreshAffordanceAndKeepsSwitchHealthy() {
+        let profile = AccountProfile(provider: .claude, label: "Claude", isActiveCLI: true)
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: nil,
+            hasStoredSnapshot: true,
+            refreshState: .usagePaused,
+            adviceReason: nil
+        )
+
+        XCTAssertEqual(presentation.refreshProblem?.text, "Usage paused — click to refresh")
+        XCTAssertEqual(presentation.refreshProblem?.icon, "pause.circle")
+        XCTAssertEqual(presentation.refreshProblem?.tone, .secondary)
+        XCTAssertEqual(presentation.refreshProblem?.action, .retry)
+        // Unlike .needsLogin, a paused login is not treated as expired: its
+        // switch help stays the healthy copy, not "log in again".
+        XCTAssertNotEqual(
+            presentation.switchHelp,
+            "Log in to this account again before switching the CLI to it"
+        )
+    }
+
     func testEveryWindowRemainsVisibleInStableDisplayOrder() {
         let profile = AccountProfile(provider: .claude, label: "Claude", isActiveCLI: true)
         let windows = [

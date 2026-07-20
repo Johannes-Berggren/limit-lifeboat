@@ -1,11 +1,28 @@
 import Foundation
 
-/// One app-performed action worth counting later (currently just CLI
-/// switches, for the weekly digest). External logins detected by
-/// reconciliation are deliberately NOT events — they are not app actions.
+/// One app-performed action worth counting later. CLI switches feed the weekly
+/// digest; credential-lifecycle events (refreshes, heals) are durable forensics
+/// for diagnosing logouts, since the unified log's `.info` credential messages
+/// don't survive a relaunch. External logins detected by reconciliation are
+/// deliberately NOT events — they are not app actions.
 public struct AppEvent: Codable, Equatable, Sendable {
     public enum Kind: String, Codable, Sendable {
         case cliSwitch
+        /// The app attempted (or completed) an OAuth token refresh for a
+        /// profile — records the outcome so a later invalid_grant can be traced
+        /// back to whichever cycle rotated the chain.
+        case credentialRefresh
+    }
+
+    /// The result of a credential-refresh attempt. Privacy-safe: no token bytes.
+    public enum CredentialOutcome: String, Codable, Sendable {
+        case success
+        case invalidGrant
+        case refreshFailed
+        case unauthorized
+        /// Rotation was deliberately withheld (active login idle, or the account
+        /// is live under another profile) — no token was spent.
+        case rotationWithheld
     }
 
     public var timestamp: Date
@@ -16,6 +33,11 @@ public struct AppEvent: Codable, Equatable, Sendable {
     /// True for user-initiated switches (in-app or notification click),
     /// false for auto-switch.
     public var interactive: Bool
+    /// Credential-event fields (nil for `.cliSwitch`, so existing logged lines
+    /// still decode and encode identically).
+    public var outcome: CredentialOutcome?
+    /// Which code path produced the event, e.g. "background" or "userRetry".
+    public var codePath: String?
 
     public init(
         timestamp: Date,
@@ -23,7 +45,9 @@ public struct AppEvent: Codable, Equatable, Sendable {
         provider: Provider,
         toProfileID: UUID,
         fromProfileID: UUID? = nil,
-        interactive: Bool
+        interactive: Bool,
+        outcome: CredentialOutcome? = nil,
+        codePath: String? = nil
     ) {
         self.timestamp = timestamp
         self.kind = kind
@@ -31,6 +55,8 @@ public struct AppEvent: Codable, Equatable, Sendable {
         self.toProfileID = toProfileID
         self.fromProfileID = fromProfileID
         self.interactive = interactive
+        self.outcome = outcome
+        self.codePath = codePath
     }
 }
 
@@ -90,6 +116,41 @@ public final class AppEventStore {
 
     public func events(in interval: DateInterval) -> [AppEvent] {
         cache.filter { $0.timestamp >= interval.start && $0.timestamp <= interval.end }
+    }
+
+    /// The most recent events, oldest-first, for diagnostics reports. Reads the
+    /// persisted log directly so it survives an app relaunch (unlike the
+    /// current-process unified log).
+    public func recentEvents(limit: Int = 200) -> [AppEvent] {
+        guard cache.count > limit else {
+            return cache
+        }
+        return Array(cache.suffix(limit))
+    }
+
+    /// Renders events as privacy-safe diagnostic lines: UUIDs, outcomes, and
+    /// code paths only, never token material or account labels.
+    public static func diagnosticsLines(for events: [AppEvent]) -> [String] {
+        let formatter = ISO8601DateFormatter()
+        return events.map { event in
+            var parts = [
+                formatter.string(from: event.timestamp),
+                event.kind.rawValue,
+                event.provider.rawValue,
+                "to=\(event.toProfileID.uuidString)"
+            ]
+            if let from = event.fromProfileID {
+                parts.append("from=\(from.uuidString)")
+            }
+            if let outcome = event.outcome {
+                parts.append("outcome=\(outcome.rawValue)")
+            }
+            if let codePath = event.codePath {
+                parts.append("path=\(codePath)")
+            }
+            parts.append("interactive=\(event.interactive)")
+            return parts.joined(separator: " ")
+        }
     }
 
     public func prune(now: Date = Date()) throws {

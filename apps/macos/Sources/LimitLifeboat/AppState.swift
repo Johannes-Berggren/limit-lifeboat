@@ -41,6 +41,9 @@ final class AppState: ObservableObject {
     let updater: AppUpdater
 
     private let repository: ProfileRepository
+    /// Where the durable stores live, exposed so diagnostics can read the
+    /// persisted event log off the live @MainActor store.
+    var applicationSupportDirectory: URL { repository.applicationSupportDirectory }
     private let cliSwitcher: CLISwitcher
     private let codeSignatureStatus: ApplicationCodeSignatureStatus
     private let parser = UsageTextParser()
@@ -106,6 +109,19 @@ final class AppState: ObservableObject {
     /// identity rarely change, and some accounts legitimately map to no plan
     /// label, so one attempt per launch is enough.
     private var accountInfoFetched: Set<UUID> = []
+    /// When each active Claude profile first entered the `.usagePaused` state,
+    /// and which have already been notified about it — so a login that merely
+    /// needs a nudge doesn't sit silently failing for hours. Cleared the moment
+    /// the profile reaches any other state (re-arming the next episode).
+    private var claudeUsagePausedSince: [UUID: Date] = [:]
+    private var notifiedUsagePaused: Set<UUID> = []
+    private let usagePausedAlertPolicy = UsagePausedAlertPolicy()
+    /// The last credential outcome recorded per Claude profile, so the durable
+    /// event log only appends on transitions (episode start/recovery).
+    private var lastClaudeCredentialOutcome: [UUID: AppEvent.CredentialOutcome] = [:]
+    /// Same-provider profiles already warned this launch about sharing one
+    /// Anthropic account (a rotation-hostile configuration) — logged once.
+    private var warnedSharedAccountProfiles: Set<UUID> = []
 
     init(
         repository: ProfileRepository,
@@ -473,6 +489,33 @@ final class AppState: ObservableObject {
     /// re-resolves against the current advice (see NotificationSwitchResolver).
     /// The user acted deliberately, so every outcome is answered with a
     /// notification rather than failing silently into a closed popover.
+    /// Handles the "Refresh Now" action on a usage-paused notification: runs
+    /// the same user-initiated retry the row's Retry button does, so the active
+    /// login's expired access token is rotated without opening the popover.
+    func performNotificationRefresh(provider: Provider, profileID: UUID?) async {
+        let target = profileID.flatMap { id in profiles.first { $0.id == id } }
+            ?? activeProfile(for: provider)
+        guard let target else {
+            usageAlertController.handleNotificationSwitchOutcome(
+                title: "Could not refresh",
+                body: "That \(provider.displayName) account is no longer saved in Limit Lifeboat."
+            )
+            return
+        }
+        // Re-arm the paused nudge: if this refresh actually succeeds the state
+        // clears anyway, but if it's dropped because a background cycle is
+        // mid-flight (retryRefreshInteractively guards on isRefreshing), the
+        // next cycle can nudge again instead of leaving the tap silently unmet.
+        notifiedUsagePaused.remove(target.id)
+        await CredentialAccess.userInitiated(
+            reason: "access saved credentials for \(target.label)"
+        ) {
+            await retryRefreshInteractively(for: target)
+        }
+        updateSwitchAdvice()
+        updateMenuBarSummary()
+    }
+
     func performNotificationSwitch(provider: Provider, embeddedTargetID: UUID?) async {
         let resolution = NotificationSwitchResolver().resolve(
             embeddedTargetID: embeddedTargetID,
@@ -558,6 +601,45 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Which stored credential fingerprints appear on more than one holder
+    /// (another profile's snapshot or the live keychain item), computed once
+    /// per cycle so each Claude profile can be checked against
+    /// `RotationProtectionPolicy` without re-reading the keychain per profile.
+    private func claudeRotationContext() -> (duplicated: Set<String>, byProfile: [UUID: String]) {
+        var byProfile: [UUID: String] = [:]
+        var counts: [String: Int] = [:]
+        for profile in profiles where profile.provider == .claude {
+            guard let fingerprint = try? cliSwitcher.storedCredentialFingerprint(for: profile.id) else {
+                continue
+            }
+            byProfile[profile.id] = fingerprint
+            counts[fingerprint, default: 0] += 1
+        }
+        // The live item's fingerprint is directly comparable to the stored ones
+        // (the sync planner matches them for `.activate`). Counting it lets an
+        // inactive profile that holds the active login's exact chain register as
+        // a duplicate holder even when identities don't reveal the sharing.
+        if let liveFingerprint = try? cliSwitcher.liveObservation(provider: .claude).credentialFingerprint {
+            counts[liveFingerprint, default: 0] += 1
+        }
+        let duplicated = Set(counts.filter { $0.value > 1 }.map(\.key))
+        return (duplicated, byProfile)
+    }
+
+    /// Whether rotating `profile`'s refresh token in the background could
+    /// invalidate a chain the live CLI login relies on.
+    private func claudeAccountIsLiveElsewhere(
+        _ profile: AccountProfile,
+        context: (duplicated: Set<String>, byProfile: [UUID: String])
+    ) -> Bool {
+        RotationProtectionPolicy.accountIsLiveElsewhere(
+            profile: profile,
+            among: profiles,
+            storedFingerprint: context.byProfile[profile.id],
+            duplicatedStoredFingerprints: context.duplicated
+        )
+    }
+
     /// Polls every Claude account through the usage API (active first, so its
     /// numbers land even if an inactive account's refresh stalls). The slow
     /// expect-probe of the CLI remains the fallback for the active account.
@@ -582,7 +664,11 @@ final class AppState: ObservableObject {
             .filter { $0.provider == .claude }
             .sorted { $0.isActiveCLI && !$1.isActiveCLI }
 
+        warnIfSharedClaudeAccounts(claudeProfiles)
+        let context = claudeRotationContext()
+
         for profile in claudeProfiles {
+            let liveElsewhere = claudeAccountIsLiveElsewhere(profile, context: context)
             refreshStates[profile.id] = .refreshing
             let liveContext: AutomaticClaudeUsageLiveContext?
             if profile.isActiveCLI {
@@ -602,12 +688,16 @@ final class AppState: ObservableObject {
                 let snapshot = try await claudeUsageService.fetchSnapshot(
                     for: profile,
                     isActiveCLI: profile.isActiveCLI,
+                    accountIsLiveElsewhere: liveElsewhere,
                     liveCredentialReadPolicy: liveContext?.readPolicy ?? .read,
                     credentialDidResolve: { resolvedUsageCredentials = $0 }
                 )
                 applySnapshot(snapshot, for: profile)
+                clearUsagePaused(for: profile.id)
+                recordClaudeCredentialOutcome(.success, for: profile, codePath: "background")
                 await enrichAccountInfoIfMissing(
                     for: profile,
+                    accountIsLiveElsewhere: liveElsewhere,
                     liveCredentialReadPolicy: liveContext?.readPolicy,
                     resolvedCredentials: resolvedUsageCredentials
                 )
@@ -634,8 +724,14 @@ final class AppState: ObservableObject {
                 } else {
                     AppLog.usage.error("Usage fetch failed for account \(profile.id, privacy: .public): \(fetchError.localizedDescription, privacy: .public)")
                 }
+                recordClaudeCredentialOutcome(
+                    Self.credentialOutcome(for: fetchError),
+                    for: profile,
+                    codePath: "background"
+                )
                 let outcome = RefreshOutcomePolicy.outcome(for: fetchError, isActiveCLI: profile.isActiveCLI)
                 if outcome.attemptTUIFallback {
+                    clearUsagePaused(for: profile.id)
                     await refreshActiveClaudeCodeUsage(
                         onFailure: outcome.state,
                         for: profile,
@@ -643,9 +739,112 @@ final class AppState: ObservableObject {
                         usageCredentialWasResolved: resolvedUsageCredentials != nil
                     )
                 } else {
-                    refreshStates[profile.id] = outcome.state
+                    applyClaudeRefreshState(outcome.state, for: profile)
                 }
             }
+        }
+    }
+
+    /// Sets a Claude profile's refresh state and maintains the "usage paused too
+    /// long" nudge for the active account. A login stuck in `.usagePaused`
+    /// (access token expired while the CLI was idle) is healthy but silent, so
+    /// after a threshold it earns one actionable notification.
+    private func applyClaudeRefreshState(_ state: AccountRefreshState, for profile: AccountProfile) {
+        refreshStates[profile.id] = state
+        guard profile.isActiveCLI, state == .usagePaused else {
+            clearUsagePaused(for: profile.id)
+            return
+        }
+        let now = Date()
+        let pausedSince = claudeUsagePausedSince[profile.id] ?? now
+        claudeUsagePausedSince[profile.id] = pausedSince
+        if usagePausedAlertPolicy.shouldNotify(
+            pausedSince: pausedSince,
+            now: now,
+            alreadyNotified: notifiedUsagePaused.contains(profile.id)
+        ) {
+            notifiedUsagePaused.insert(profile.id)
+            usageAlertController.handleUsagePausedStuck(profile: profile)
+        }
+    }
+
+    private func clearUsagePaused(for profileID: UUID) {
+        claudeUsagePausedSince[profileID] = nil
+        notifiedUsagePaused.remove(profileID)
+    }
+
+    /// The rotation-hostile configuration behind most "logged out" reports: two
+    /// profiles mapping to one Anthropic account (e.g. the same account under
+    /// two organizations). Logged once per launch so the next incident's
+    /// diagnostics show it.
+    private func warnIfSharedClaudeAccounts(_ claudeProfiles: [AccountProfile]) {
+        var byAccount: [String: [UUID]] = [:]
+        for profile in claudeProfiles {
+            guard let accountID = profile.identity?.accountID else { continue }
+            byAccount[accountID, default: []].append(profile.id)
+        }
+        for (_, ids) in byAccount where ids.count > 1 {
+            // Log once per launch per shared-account group: skip if every
+            // profile in the group has already been warned about.
+            guard !ids.allSatisfy({ warnedSharedAccountProfiles.contains($0) }) else {
+                continue
+            }
+            for id in ids {
+                warnedSharedAccountProfiles.insert(id)
+            }
+            AppLog.credentials.notice("Two or more profiles share one Claude account (\(ids.count, privacy: .public) profiles); their logins share a single rotating refresh-token chain.")
+        }
+    }
+
+    /// Maps a fetch failure to a durable credential outcome, or nil for
+    /// transient noise (network, absent token) that should not disturb a
+    /// profile's recorded episode.
+    private static func credentialOutcome(for error: ClaudeAccountUsageFetchError) -> AppEvent.CredentialOutcome? {
+        switch error {
+        case .interactiveRefreshRequired, .accountActiveElsewhere:
+            return .rotationWithheld
+        case .unauthorized:
+            return .unauthorized
+        case .refreshFailed(let underlying):
+            if let oauth = underlying as? ClaudeOAuthError, oauth.requiresLogin {
+                return .invalidGrant
+            }
+            return .refreshFailed
+        // A locked/denied keychain or unusable provider credential is an access
+        // problem, not a credential outcome — it's surfaced via the keychain row
+        // state and its own logging, so it isn't recorded as a refresh event.
+        case .keychainLocked, .liveCredentialAccessDenied, .credentialUnavailable,
+             .noCredentials, .transport:
+            return nil
+        }
+    }
+
+    /// Appends a credential-refresh event only when a profile's outcome changes,
+    /// so the durable log is a compact transition trail (episode start and
+    /// recovery) rather than one line per five-minute cycle.
+    private func recordClaudeCredentialOutcome(
+        _ outcome: AppEvent.CredentialOutcome?,
+        for profile: AccountProfile,
+        codePath: String
+    ) {
+        guard let outcome, lastClaudeCredentialOutcome[profile.id] != outcome else {
+            return
+        }
+        lastClaudeCredentialOutcome[profile.id] = outcome
+        do {
+            try eventStore.append(
+                AppEvent(
+                    timestamp: Date(),
+                    kind: .credentialRefresh,
+                    provider: .claude,
+                    toProfileID: profile.id,
+                    interactive: CredentialAccess.currentMode == .userInitiated,
+                    outcome: outcome,
+                    codePath: codePath
+                )
+            )
+        } catch {
+            AppLog.history.error("Could not record credential event for account \(profile.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -654,6 +853,7 @@ final class AppState: ObservableObject {
     /// older builds (for example Team Premium previously showing as Max 5x).
     private func enrichAccountInfoIfMissing(
         for profile: AccountProfile,
+        accountIsLiveElsewhere: Bool,
         liveCredentialReadPolicy suppliedPolicy: ClaudeLiveCredentialReadPolicy? = nil,
         resolvedCredentials: ClaudeOAuthCredentials? = nil
     ) async {
@@ -673,6 +873,7 @@ final class AppState: ObservableObject {
                 info = try await claudeUsageService.fetchAccountInfo(
                     for: profile,
                     isActiveCLI: profile.isActiveCLI,
+                    accountIsLiveElsewhere: accountIsLiveElsewhere,
                     liveCredentialReadPolicy: livePolicy,
                     liveCredentialAccessDenied: { liveDenial = $0 }
                 )
@@ -1827,6 +2028,10 @@ final class AppState: ObservableObject {
             AppLog.history.error("Could not delete switch events for account \(profile.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
         burnRateEstimates[profile.id] = nil
+        claudeUsagePausedSince[profile.id] = nil
+        notifiedUsagePaused.remove(profile.id)
+        lastClaudeCredentialOutcome[profile.id] = nil
+        warnedSharedAccountProfiles.remove(profile.id)
         usageAlertController.forgetProfile(profile.id)
         persistProfiles()
         saveSnapshots()
@@ -3085,12 +3290,14 @@ final class AppState: ObservableObject {
         switch profile.provider {
         case .claude:
             lastClaudeRefreshAttempt = Date()
+            let liveElsewhere = claudeAccountIsLiveElsewhere(profile, context: claudeRotationContext())
             refreshStates[profile.id] = .refreshing
             var resolvedUsageCredentials: ClaudeOAuthCredentials?
             do {
                 let snapshot = try await claudeUsageService.fetchSnapshot(
                     for: profile,
                     isActiveCLI: profile.isActiveCLI,
+                    accountIsLiveElsewhere: liveElsewhere,
                     userExplicitlyRequestedRefresh: true,
                     liveCredentialReadPolicy: profile.isActiveCLI
                         ? .preloaded(retryLiveRecord)
@@ -3098,8 +3305,11 @@ final class AppState: ObservableObject {
                     credentialDidResolve: { resolvedUsageCredentials = $0 }
                 )
                 applySnapshot(snapshot, for: profile)
+                clearUsagePaused(for: profile.id)
+                recordClaudeCredentialOutcome(.success, for: profile, codePath: "userRetry")
                 await enrichAccountInfoIfMissing(
                     for: profile,
+                    accountIsLiveElsewhere: liveElsewhere,
                     liveCredentialReadPolicy: profile.isActiveCLI
                         ? .preloaded(retryLiveRecord)
                         : nil,
@@ -3114,8 +3324,14 @@ final class AppState: ObservableObject {
                         resolveItemIfNeeded: false
                     )
                 }
+                recordClaudeCredentialOutcome(
+                    Self.credentialOutcome(for: fetchError),
+                    for: profile,
+                    codePath: "userRetry"
+                )
                 let outcome = RefreshOutcomePolicy.outcome(for: fetchError, isActiveCLI: profile.isActiveCLI)
                 if outcome.attemptTUIFallback {
+                    clearUsagePaused(for: profile.id)
                     await refreshActiveClaudeCodeUsage(
                         onFailure: outcome.state,
                         for: profile,
@@ -3123,7 +3339,7 @@ final class AppState: ObservableObject {
                         usageCredentialWasResolved: resolvedUsageCredentials != nil
                     )
                 } else {
-                    refreshStates[profile.id] = outcome.state
+                    applyClaudeRefreshState(outcome.state, for: profile)
                 }
             }
         case .codex:

@@ -47,16 +47,28 @@ final class RefreshOutcomePolicyTests: XCTestCase {
         }
     }
 
-    func testActiveBackgroundRotationRequirementIsRetryableWithoutCLIFallback() {
+    func testInteractiveRefreshRequiredMapsToUsagePaused() {
         let outcome = RefreshOutcomePolicy.outcome(
             for: .interactiveRefreshRequired,
             isActiveCLI: true
         )
-        guard case .readFailed(let reason) = outcome.state else {
-            return XCTFail("Expected a retryable read failure, got \(outcome.state)")
-        }
-        XCTAssertTrue(reason.contains("explicit Retry"))
+        XCTAssertEqual(outcome.state, .usagePaused)
         XCTAssertFalse(outcome.attemptTUIFallback)
+        // A paused login is not expired: it keeps its healthy switch affordance.
+        XCTAssertFalse(outcome.state.requiresLogin)
+        XCTAssertTrue(outcome.state.isProblem)
+    }
+
+    func testAccountActiveElsewhereIsCalmReadFailureWithoutFallback() {
+        for active in [true, false] {
+            let outcome = RefreshOutcomePolicy.outcome(for: .accountActiveElsewhere, isActiveCLI: active)
+            guard case .readFailed(let reason) = outcome.state else {
+                return XCTFail("Expected a calm read failure, got \(outcome.state)")
+            }
+            XCTAssertTrue(reason.lowercased().contains("switch"))
+            XCTAssertFalse(outcome.attemptTUIFallback)
+            XCTAssertFalse(outcome.state.requiresLogin)
+        }
     }
 
     func testTransportFailureIsReadFailedAndActiveFallsBack() {
