@@ -28,10 +28,11 @@ final class AppState: ObservableObject {
     /// perform a Keychain query. The cache is populated non-interactively at
     /// launch and updated at every credential mutation boundary.
     @Published private(set) var storedSnapshotStatuses: [UUID: StoredSnapshotStatus] = [:]
-    /// Set when the shared Claude keychain item's partition list may be missing
-    /// this app's team, so the UI can highlight the manual "Fix Repeated
-    /// Keychain Prompts…" action. Cleared once a live probe confirms it.
-    @Published var keychainRepairSuggested = false
+    /// Item-scoped authorization health for Claude's provider-owned legacy
+    /// Keychain item. `ready` is entered only after a fresh noninteractive data
+    /// read succeeds; metadata probes and ACL guesses can never clear a known
+    /// denial.
+    @Published private(set) var claudeKeychainAuthorizationState: ClaudeKeychainAuthorizationState = .unknown
     /// Claude's fixed per-device login expiry, cached alongside snapshot
     /// presence so SwiftUI never reads Keychain-backed credentials in `body`.
     @Published private(set) var claudeLoginExpirations: [UUID: Date] = [:]
@@ -41,6 +42,7 @@ final class AppState: ObservableObject {
 
     private let repository: ProfileRepository
     private let cliSwitcher: CLISwitcher
+    private let codeSignatureStatus: ApplicationCodeSignatureStatus
     private let parser = UsageTextParser()
     private let identityExtractor = AccountIdentityExtractor()
     private let syncPlanner = CLIAccountSyncPlanner()
@@ -63,6 +65,26 @@ final class AppState: ObservableObject {
     private var authPollTask: Task<Void, Never>?
     private var authStateMonitor: AuthStateMonitor?
     private var authObservationInteractive = false
+    /// Exactly one live-credential reconciliation may run for a provider at a
+    /// time. Callers that arrive while a probe is in flight await that probe
+    /// instead of multiplying Keychain reads.
+    private var reconciliationFlights: [Provider: (id: UUID, origin: AuthChangeOrigin, task: Task<Void, Never>)] = [:]
+    /// Duplicate switch clicks for the same account await one workflow instead
+    /// of racing for the provider mutation gate.
+    private var switchFlights: [Provider: (id: UUID, profileID: UUID, task: Task<Bool, Never>)] = [:]
+    /// A single read is enough when the provider-owned state has not changed
+    /// since the last accepted observation. Only a newly observed key is
+    /// followed by the delayed stability-confirmation read.
+    private var acceptedStabilityKeys: [Provider: String] = [:]
+    /// Ownership tokens prevent an old workflow's defer from releasing a gate
+    /// that has already been deliberately handed off to a login watcher.
+    private var credentialMutationsInProgress: [Provider: UUID] = [:]
+    private var deferredReconciliationOrigins: [Provider: AuthChangeOrigin] = [:]
+    private var deferredAutomaticSwitchProviders: Set<Provider> = []
+    private var deferredFullRefresh = false
+    private var deferredClaudeLoginResume = false
+    private var claudeAuthorizationInProgress = false
+    private var pendingClaudeLoginCompletion: PendingClaudeLoginCompletion?
     private var wakeObserver: NSObjectProtocol?
     private var cancellables: Set<AnyCancellable> = []
     /// Popover-open refreshes are throttled on attempts, not outcomes — an
@@ -85,9 +107,15 @@ final class AppState: ObservableObject {
     /// label, so one attempt per launch is enough.
     private var accountInfoFetched: Set<UUID> = []
 
-    init(repository: ProfileRepository, cliSwitcher: CLISwitcher, settings: SettingsStore? = nil) throws {
+    init(
+        repository: ProfileRepository,
+        cliSwitcher: CLISwitcher,
+        settings: SettingsStore? = nil,
+        codeSignatureStatus: ApplicationCodeSignatureStatus = .unsupported
+    ) throws {
         self.repository = repository
         self.cliSwitcher = cliSwitcher
+        self.codeSignatureStatus = codeSignatureStatus
         self.claudeUsageService = ClaudeAccountUsageService(credentials: cliSwitcher)
         self.settings = settings ?? SettingsStore()
         self.updater = AppUpdater()
@@ -149,6 +177,10 @@ final class AppState: ObservableObject {
         refreshTask?.cancel()
         loginFollowUpTasks.values.forEach { $0.cancel() }
         authPollTask?.cancel()
+        reconciliationFlights.values.forEach { $0.task.cancel() }
+        reconciliationFlights.removeAll()
+        switchFlights.values.forEach { $0.task.cancel() }
+        switchFlights.removeAll()
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
         }
@@ -164,6 +196,16 @@ final class AppState: ObservableObject {
         loginFollowUpTasks.removeAll()
         authPollTask?.cancel()
         authPollTask = nil
+        reconciliationFlights.values.forEach { $0.task.cancel() }
+        reconciliationFlights.removeAll()
+        switchFlights.values.forEach { $0.task.cancel() }
+        switchFlights.removeAll()
+        credentialMutationsInProgress.removeAll()
+        deferredReconciliationOrigins.removeAll()
+        deferredAutomaticSwitchProviders.removeAll()
+        deferredFullRefresh = false
+        deferredClaudeLoginResume = false
+        pendingClaudeLoginCompletion = nil
         authStateMonitor = nil
         statusMessage = "The running app bundle was replaced or deleted. Relaunch Limit Lifeboat to continue."
     }
@@ -186,11 +228,6 @@ final class AppState: ObservableObject {
         guard authObservationInteractive != interactive else { return }
         authObservationInteractive = interactive
         startAuthPolling()
-        if interactive {
-            for provider in Provider.allCases {
-                Task { await reconcileStableExternalChange(provider: provider, origin: .popover) }
-            }
-        }
     }
 
     func startBackgroundRefresh() {
@@ -199,6 +236,7 @@ final class AppState: ObservableObject {
             while !Task.isCancelled {
                 let minutes = self?.settings.refreshIntervalMinutes ?? 10
                 try? await Task.sleep(nanoseconds: UInt64(max(1, minutes)) * 60_000_000_000)
+                guard !Task.isCancelled else { return }
                 await self?.refreshAll()
             }
         }
@@ -215,9 +253,6 @@ final class AppState: ObservableObject {
             Task { @MainActor [weak self] in
                 // Give the network and the CLIs a moment to come back.
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
-                for provider in Provider.allCases {
-                    await self?.reconcileStableExternalChange(provider: provider, origin: .wake)
-                }
                 await self?.refreshAll()
             }
         }
@@ -227,18 +262,28 @@ final class AppState: ObservableObject {
     /// and start network-backed usage checks only when either provider has
     /// outlived the configured interval.
     func refreshIfStale() {
-        // Both providers can be changed by another app. Reconcile them before
-        // rendering or attributing usage, even when usage itself is still fresh.
-        do {
-            _ = try reconcileLiveCredentials(provider: .codex, origin: .popover)
-        } catch {
-            AppLog.credentials.error("Popover Codex reconcile failed: \(error.localizedDescription, privacy: .public)")
-        }
-        Task { await reconcileStableExternalChange(provider: .claude, origin: .popover) }
-        if shouldRefreshClaudeNow() || shouldRefreshCodexNow() {
-            Task { await refreshAll() }
-        } else {
-            updateMenuBarSummary()
+        // The in-flight full refresh already owns the popover's refresh path.
+        // Asking for a local reconciliation here would only enqueue another
+        // live Keychain read after its provider mutation gate is released.
+        guard !isRefreshing else { return }
+        let needsUsageRefresh = shouldRefreshClaudeNow() || shouldRefreshCodexNow()
+        Task { [weak self] in
+            guard let self else { return }
+            // A scheduled refresh may have acquired the refresh flight after
+            // the popover's synchronous check but before this task ran. Do
+            // not enqueue a second reconciliation behind that flight.
+            guard !self.isRefreshing else { return }
+            if needsUsageRefresh {
+                // refreshAll owns the one reconciliation pass for both
+                // providers. Starting a second popover probe here used to
+                // create 4-6 immediate reads of Claude's shared item.
+                await self.refreshAll()
+            } else {
+                for provider in Provider.allCases {
+                    await self.reconcileStableExternalChange(provider: provider, origin: .popover)
+                }
+                self.updateMenuBarSummary()
+            }
         }
     }
 
@@ -276,6 +321,17 @@ final class AppState: ObservableObject {
     // MARK: - Refresh (local-first)
 
     func refreshAll() async {
+        // Refresh is allowed to be started by a button, but it remains a
+        // prompt-free workflow. In particular, never inherit the interactive
+        // session of a surrounding switch/login task.
+        if CredentialAccess.currentMode != .nonInteractive {
+            await CredentialAccess.nonInteractive { await refreshAll() }
+            return
+        }
+        guard credentialMutationsInProgress.isEmpty else {
+            deferredFullRefresh = true
+            return
+        }
         guard !isRefreshing else {
             return
         }
@@ -295,11 +351,30 @@ final class AppState: ObservableObject {
             await reconcileStableExternalChange(provider: provider, origin: .scheduledRefresh)
         }
 
+        // A user action may acquire a mutation gate while a reconciliation is
+        // awaiting its confirmation delay. Do not continue into token reads or
+        // refresh writes in parallel with that action.
+        guard credentialMutationsInProgress.isEmpty else {
+            deferredFullRefresh = true
+            return
+        }
+
         // Both providers now use account-specific live usage sources for every
         // captured profile. Codex's account-blind local logs remain only as an
         // active-account fallback for old CLIs and transient network failures.
+        guard let claudeMutation = beginCredentialMutation(for: .claude) else {
+            deferredFullRefresh = true
+            return
+        }
         await refreshClaudeUsage()
+        finishCredentialMutation(for: .claude, owner: claudeMutation)
+
+        guard let codexMutation = beginCredentialMutation(for: .codex) else {
+            deferredFullRefresh = true
+            return
+        }
         await refreshCodexUsage()
+        finishCredentialMutation(for: .codex, owner: codexMutation)
         notifyElapsedResets()
         updateSwitchAdvice()
         updateMenuBarSummary()
@@ -472,7 +547,7 @@ final class AppState: ObservableObject {
         let previousLabel = activeProfile(for: provider)?.label
         Task { [weak self] in
             guard let self else { return }
-            if await self.switchCLI(to: target, interactive: false) {
+            if await self.switchCLI(to: target, interactive: false, automatic: true) {
                 self.usageAlertController.handleAutoSwitch(
                     fromLabel: previousLabel,
                     toLabel: target.label,
@@ -487,6 +562,21 @@ final class AppState: ObservableObject {
     /// numbers land even if an inactive account's refresh stalls). The slow
     /// expect-probe of the CLI remains the fallback for the active account.
     private func refreshClaudeUsage() async {
+        let counter = CredentialKeychainIOCounter()
+        await CredentialAccess.counting(counter) {
+            await refreshClaudeUsageImpl()
+            logCredentialWorkflow(
+                workflow: "usage",
+                provider: .claude,
+                origin: "scheduled_refresh",
+                access: "noninteractive",
+                status: usageWorkflowStatus(provider: .claude),
+                counts: counter.snapshot
+            )
+        }
+    }
+
+    private func refreshClaudeUsageImpl() async {
         lastClaudeRefreshAttempt = Date()
         let claudeProfiles = profiles
             .filter { $0.provider == .claude }
@@ -494,14 +584,33 @@ final class AppState: ObservableObject {
 
         for profile in claudeProfiles {
             refreshStates[profile.id] = .refreshing
+            let liveContext: AutomaticClaudeUsageLiveContext?
+            if profile.isActiveCLI {
+                guard let resolved = automaticClaudeUsageLiveContext() else {
+                    refreshStates[profile.id] = .readFailed(
+                        reason: claudeKeychainAuthorizationDiagnostic
+                            ?? "The shared Claude credential is unavailable."
+                    )
+                    continue
+                }
+                liveContext = resolved
+            } else {
+                liveContext = nil
+            }
+            var resolvedUsageCredentials: ClaudeOAuthCredentials?
             do {
                 let snapshot = try await claudeUsageService.fetchSnapshot(
                     for: profile,
-                    isActiveCLI: profile.isActiveCLI
+                    isActiveCLI: profile.isActiveCLI,
+                    liveCredentialReadPolicy: liveContext?.readPolicy ?? .read,
+                    credentialDidResolve: { resolvedUsageCredentials = $0 }
                 )
-                refreshClaudeLoginExpiration(for: profile)
                 applySnapshot(snapshot, for: profile)
-                await enrichAccountInfoIfMissing(for: profile)
+                await enrichAccountInfoIfMissing(
+                    for: profile,
+                    liveCredentialReadPolicy: liveContext?.readPolicy,
+                    resolvedCredentials: resolvedUsageCredentials
+                )
             } catch {
                 // Map the failure to a visible, retryable state rather than
                 // swallowing it. The active account may still recover via the
@@ -509,6 +618,17 @@ final class AppState: ObservableObject {
                 // snapshot (a missing token is expected until the account has
                 // been the active login once).
                 let fetchError = (error as? ClaudeAccountUsageFetchError) ?? .transport(error)
+                if profile.isActiveCLI,
+                   case .credentialUnavailable(let underlying) = fetchError {
+                    recordClaudeKeychainFailure(underlying)
+                }
+                if case .liveCredentialAccessDenied(let underlying, let item) = fetchError {
+                    recordClaudeKeychainFailure(
+                        underlying,
+                        item: item,
+                        resolveItemIfNeeded: false
+                    )
+                }
                 if case .noCredentials = fetchError {
                     AppLog.usage.debug("No captured token yet for account \(profile.id, privacy: .public); skipping its usage fetch")
                 } else {
@@ -516,7 +636,12 @@ final class AppState: ObservableObject {
                 }
                 let outcome = RefreshOutcomePolicy.outcome(for: fetchError, isActiveCLI: profile.isActiveCLI)
                 if outcome.attemptTUIFallback {
-                    await refreshActiveClaudeCodeUsage(onFailure: outcome.state, for: profile)
+                    await refreshActiveClaudeCodeUsage(
+                        onFailure: outcome.state,
+                        for: profile,
+                        resolvedUsageCredentials: resolvedUsageCredentials,
+                        usageCredentialWasResolved: resolvedUsageCredentials != nil
+                    )
                 } else {
                     refreshStates[profile.id] = outcome.state
                 }
@@ -527,18 +652,51 @@ final class AppState: ObservableObject {
     /// Plan tier and identity rarely change; fetch them at most once per
     /// launch. This also lets new mapping logic repair labels written by
     /// older builds (for example Team Premium previously showing as Max 5x).
-    private func enrichAccountInfoIfMissing(for profile: AccountProfile) async {
+    private func enrichAccountInfoIfMissing(
+        for profile: AccountProfile,
+        liveCredentialReadPolicy suppliedPolicy: ClaudeLiveCredentialReadPolicy? = nil,
+        resolvedCredentials: ClaudeOAuthCredentials? = nil
+    ) async {
         guard !accountInfoFetched.contains(profile.id) else {
             return
         }
+        let livePolicy = suppliedPolicy ?? .read
+        var liveDenial: CredentialAccessDisposition?
         let info: ClaudeAPIAccountInfo
         do {
-            info = try await claudeUsageService.fetchAccountInfo(
-                for: profile,
-                isActiveCLI: profile.isActiveCLI
-            )
-            refreshClaudeLoginExpiration(for: profile)
+            if let resolvedCredentials {
+                info = try await claudeUsageService.fetchAccountInfo(
+                    for: profile,
+                    resolvedCredentials: resolvedCredentials
+                )
+            } else {
+                info = try await claudeUsageService.fetchAccountInfo(
+                    for: profile,
+                    isActiveCLI: profile.isActiveCLI,
+                    liveCredentialReadPolicy: livePolicy,
+                    liveCredentialAccessDenied: { liveDenial = $0 }
+                )
+            }
+            if let liveDenial {
+                recordAutomaticClaudeLiveDenial(liveDenial)
+            }
         } catch {
+            if let liveDenial {
+                recordAutomaticClaudeLiveDenial(liveDenial)
+            }
+            if profile.isActiveCLI,
+               let fetchError = error as? ClaudeAccountUsageFetchError,
+               case .credentialUnavailable(let underlying) = fetchError {
+                recordClaudeKeychainFailure(underlying)
+            }
+            if let fetchError = error as? ClaudeAccountUsageFetchError,
+               case .liveCredentialAccessDenied(let underlying, let item) = fetchError {
+                recordClaudeKeychainFailure(
+                    underlying,
+                    item: item,
+                    resolveItemIfNeeded: false
+                )
+            }
             // Thrown errors (network, missing token) retry next cycle.
             AppLog.usage.debug("Account info fetch failed for account \(profile.id, privacy: .public); retrying next cycle: \(error.localizedDescription, privacy: .public)")
             return
@@ -577,25 +735,98 @@ final class AppState: ObservableObject {
     /// Resolves which profile the current live CLI login belongs to, refreshing
     /// `storedSnapshotStatuses` as a side effect. Shared by `reconcileLiveCredentials`
     /// and the non-activating capture path so ownership is decided one way only.
+    private struct LiveOwnershipPlan {
+        var action: CLIAccountSyncAction
+        /// Secret-bearing decoded records live only for this reconciliation
+        /// workflow. AppState retains summaries, never this map.
+        var storedRecords: [UUID: StoredCredentialRecord]
+    }
+
+    /// Secret-bearing records live only for one switch or login-completion task. The class is
+    /// passed down the stack but is never assigned to AppState, so finishing
+    /// or cancelling the task releases every decoded credential.
+    private final class SwitchStoredCredentialWorkflow {
+        let provider: Provider
+        private(set) var loadedProfileIDs: Set<UUID> = []
+        private(set) var records: [UUID: StoredCredentialRecord] = [:]
+
+        init(provider: Provider) {
+            self.provider = provider
+        }
+
+        func record(for profileID: UUID) -> StoredCredentialRecord? {
+            records[profileID]
+        }
+
+        func markLoaded(_ record: StoredCredentialRecord?, for profileID: UUID) {
+            loadedProfileIDs.insert(profileID)
+            records[profileID] = record
+        }
+    }
+
+    private func storedCredentialRecord(
+        for profile: AccountProfile,
+        workflow: SwitchStoredCredentialWorkflow?
+    ) throws -> StoredCredentialRecord? {
+        guard let workflow else {
+            return try cliSwitcher.storedCredentialRecord(for: profile)
+        }
+        precondition(workflow.provider == profile.provider)
+        if workflow.loadedProfileIDs.contains(profile.id) {
+            return workflow.record(for: profile.id)
+        }
+        let record = try cliSwitcher.storedCredentialRecord(for: profile)
+        workflow.markLoaded(record, for: profile.id)
+        return record
+    }
+
+    private func loadSwitchStoredCredentialWorkflow(
+        for provider: Provider
+    ) throws -> SwitchStoredCredentialWorkflow {
+        let workflow = SwitchStoredCredentialWorkflow(provider: provider)
+        for profile in profiles where profile.provider == provider {
+            do {
+                let record = try storedCredentialRecord(for: profile, workflow: workflow)
+                cacheStoredCredentialSummary(record, for: profile)
+            } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
+                storedSnapshotStatuses[profile.id] = .locked
+                throw error
+            }
+        }
+        return workflow
+    }
+
     private func planLiveOwnership(
         provider: Provider,
         observation: LiveCredentialObservation,
-        preferredLoginProfileID: UUID? = nil
-    ) throws -> CLIAccountSyncAction {
+        preferredLoginProfileID: UUID? = nil,
+        storedCredentialWorkflow: SwitchStoredCredentialWorkflow? = nil
+    ) throws -> LiveOwnershipPlan {
         var storedFingerprints: [UUID: String] = [:]
         var profilesWithStoredCredentials: Set<UUID> = []
+        var storedRecords: [UUID: StoredCredentialRecord] = [:]
         for profile in profiles where profile.provider == provider {
             do {
-                if let fingerprint = try cliSwitcher.storedCredentialFingerprint(for: profile.id) {
-                    storedFingerprints[profile.id] = fingerprint
-                    if try cliSwitcher.hasRestorableSnapshot(for: profile) {
+                if let record = try storedCredentialRecord(
+                    for: profile,
+                    workflow: storedCredentialWorkflow
+                ) {
+                    storedRecords[profile.id] = record
+                    storedFingerprints[profile.id] = record.summary.fingerprint
+                    if record.summary.isRestorable {
                         profilesWithStoredCredentials.insert(profile.id)
                         storedSnapshotStatuses[profile.id] = .present
                     } else {
                         storedSnapshotStatuses[profile.id] = .absent
                     }
+                    if provider == .claude {
+                        claudeLoginExpirations[profile.id] = record.summary.claudeRefreshTokenExpiresAt
+                    }
                 } else {
                     storedSnapshotStatuses[profile.id] = .absent
+                    if provider == .claude {
+                        claudeLoginExpirations[profile.id] = nil
+                    }
                 }
             } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
                 storedSnapshotStatuses[profile.id] = .locked
@@ -618,7 +849,7 @@ final class AppState: ObservableObject {
            !profiles.contains(where: { $0.provider == provider && $0.identity?.matches(identity) == true }) {
             action = .adopt(preferred.id)
         }
-        return action
+        return LiveOwnershipPlan(action: action, storedRecords: storedRecords)
     }
 
     /// Syncs the active-CLI flags and identities from the current terminal
@@ -629,19 +860,21 @@ final class AppState: ObservableObject {
         provider: Provider,
         origin: AuthChangeOrigin,
         observation suppliedObservation: LiveCredentialObservation? = nil,
-        preferredLoginProfileID: UUID? = nil
+        preferredLoginProfileID: UUID? = nil,
+        storedCredentialWorkflow: SwitchStoredCredentialWorkflow? = nil
     ) throws -> AccountProfile? {
         let observation = try suppliedObservation ?? cliSwitcher.liveObservation(provider: provider)
         let previousActiveID = activeProfile(for: provider)?.id
-        let action = try planLiveOwnership(
+        let ownershipPlan = try planLiveOwnership(
             provider: provider,
             observation: observation,
-            preferredLoginProfileID: preferredLoginProfileID
+            preferredLoginProfileID: preferredLoginProfileID,
+            storedCredentialWorkflow: storedCredentialWorkflow
         )
         var changed = false
         var activeID: UUID?
 
-        switch action {
+        switch ownershipPlan.action {
         case .deactivateAll:
             changed = AccountProfileUpdater.setActiveCLI(
                 profiles: &profiles,
@@ -703,13 +936,24 @@ final class AppState: ObservableObject {
            observation.isLoggedIn,
            observation.snapshot != nil {
             do {
-                _ = try cliSwitcher.storeObservation(observation, for: active)
-                storedSnapshotStatuses[active.id] = .present
-                refreshClaudeLoginExpiration(for: active)
+                let snapshot = try cliSwitcher.storeObservation(
+                    observation,
+                    for: active,
+                    storedRecord: ownershipPlan.storedRecords[active.id]
+                )
+                storedCredentialWorkflow?.markLoaded(
+                    cliSwitcher.makeStoredCredentialRecord(from: snapshot),
+                    for: active.id
+                )
+                cacheStoredSnapshotSummary(snapshot, for: active)
             } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
                 storedSnapshotStatuses[active.id] = .locked
                 throw error
             }
+        }
+        acceptedStabilityKeys[provider] = observation.stabilityKey
+        if provider == .claude {
+            recordSuccessfulClaudeKeychainRead(observation)
         }
         let newActiveID = active?.id
         let isExternalOrigin = origin == .fileEvent
@@ -729,26 +973,224 @@ final class AppState: ObservableObject {
     }
 
     private func reconcileStableExternalChange(provider: Provider, origin: AuthChangeOrigin) async {
+        guard credentialMutationsInProgress[provider] == nil else {
+            deferredReconciliationOrigins[provider] = origin
+            return
+        }
+        if let existing = reconciliationFlights[provider] {
+            await existing.task.value
+            return
+        }
+
+        let flightID = UUID()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await CredentialAccess.nonInteractive {
+                await self.performStableExternalReconciliation(provider: provider, origin: origin)
+            }
+        }
+        reconciliationFlights[provider] = (flightID, origin, task)
+        await task.value
+        if reconciliationFlights[provider]?.id == flightID {
+            reconciliationFlights[provider] = nil
+        }
+    }
+
+    /// Acquires the provider's mutation gate and cancels any reconciliation
+    /// that is between its first and confirmation reads. The cancelled origin
+    /// is replayed once the mutation completes, so outside changes are delayed
+    /// rather than lost.
+    private func beginCredentialMutation(for provider: Provider) -> UUID? {
+        guard credentialMutationsInProgress[provider] == nil else {
+            return nil
+        }
+        if let flight = reconciliationFlights.removeValue(forKey: provider) {
+            flight.task.cancel()
+            deferredReconciliationOrigins[provider] = flight.origin
+        }
+        let owner = UUID()
+        credentialMutationsInProgress[provider] = owner
+        return owner
+    }
+
+    private func finishCredentialMutation(for provider: Provider, owner: UUID) {
+        guard credentialMutationsInProgress[provider] == owner else {
+            return
+        }
+        credentialMutationsInProgress[provider] = nil
+        let deferredOrigin = deferredReconciliationOrigins.removeValue(forKey: provider)
+        let shouldReconsiderAutomaticSwitch = deferredAutomaticSwitchProviders.remove(provider) != nil
+        let shouldResumeFullRefresh = deferredFullRefresh && credentialMutationsInProgress.isEmpty
+        let shouldResumeClaudeLogin = provider == .claude
+            && deferredClaudeLoginResume
+            && pendingClaudeLoginCompletion != nil
+        if shouldResumeClaudeLogin {
+            deferredClaudeLoginResume = false
+        }
+        if shouldResumeFullRefresh {
+            deferredFullRefresh = false
+        }
+        if shouldReconsiderAutomaticSwitch {
+            // A busy gate is a deferral, not a failed attempt eligible for the
+            // one-hour backoff.
+            lastAutoSwitchAttempt[provider] = nil
+        }
+        guard deferredOrigin != nil
+                || shouldReconsiderAutomaticSwitch
+                || shouldResumeFullRefresh
+                || shouldResumeClaudeLogin else {
+            return
+        }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await CredentialAccess.independentWorkflow {
+                if shouldResumeClaudeLogin {
+                    await self.resumePendingClaudeLoginCompletionIfPossible()
+                }
+                if let deferredOrigin {
+                    await self.reconcileStableExternalChange(
+                        provider: provider,
+                        origin: deferredOrigin
+                    )
+                }
+                if shouldReconsiderAutomaticSwitch {
+                    self.updateSwitchAdvice()
+                }
+                if shouldResumeFullRefresh {
+                    await Task.yield()
+                    await self.refreshAll()
+                }
+            }
+        }
+    }
+
+    private func finishCurrentCredentialMutation(for provider: Provider) {
+        guard let owner = credentialMutationsInProgress[provider] else {
+            return
+        }
+        finishCredentialMutation(for: provider, owner: owner)
+    }
+
+    private func performStableExternalReconciliation(provider: Provider, origin: AuthChangeOrigin) async {
+        let counter = CredentialKeychainIOCounter()
+        var attemptedClaudeLocation: ClaudeKeychainItemLocation?
         do {
-            let first = try cliSwitcher.liveObservation(provider: provider)
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            guard !Task.isCancelled else { return }
-            let second = try cliSwitcher.liveObservation(provider: provider)
-            guard first.stabilityKey == second.stabilityKey else { return }
-            _ = try reconcileLiveCredentials(provider: provider, origin: origin, observation: second)
+            let outcome = try await CredentialAccess.counting(counter) { () async throws -> String in
+                let first: LiveCredentialObservation
+                if provider == .claude {
+                    switch automaticClaudeLiveAccess() {
+                    case .read(let pinnedItem):
+                        let location = try pinnedItem ?? cliSwitcher
+                            .locateClaudeKeychainItem(accessMode: .nonInteractive)
+                        attemptedClaudeLocation = location
+                        if let location {
+                            first = try cliSwitcher.liveClaudeObservation(
+                                at: location,
+                                accessMode: .nonInteractive
+                            )
+                        } else {
+                            first = try cliSwitcher.liveObservation(provider: .claude)
+                        }
+                        // Any exact successful noninteractive data read is
+                        // sufficient to clear an older item-scoped denial.
+                        recordSuccessfulClaudeKeychainRead(first)
+                    case .knownDenied:
+                        if let active = activeProfile(for: .claude) {
+                            refreshStates[active.id] = .keychainLocked
+                        }
+                        return "authorization_suppressed"
+                    case .unavailable:
+                        return "credential_unavailable"
+                    }
+                } else {
+                    first = try cliSwitcher.liveObservation(provider: provider)
+                }
+                if acceptedStabilityKeys[provider] == first.stabilityKey {
+                    return "unchanged"
+                }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard !Task.isCancelled else { return "cancelled" }
+                let second: LiveCredentialObservation
+                if provider == .claude,
+                   let firstLocation = first.claudeKeychainItemLocation {
+                    guard let secondLocation = try cliSwitcher.locateClaudeKeychainItem(
+                        accessMode: .nonInteractive
+                    ), secondLocation.modificationStamp == firstLocation.modificationStamp else {
+                        return "unstable"
+                    }
+                    attemptedClaudeLocation = secondLocation
+                    second = try cliSwitcher.liveClaudeObservation(
+                        at: secondLocation,
+                        accessMode: .nonInteractive
+                    )
+                    recordSuccessfulClaudeKeychainRead(second)
+                } else {
+                    second = try cliSwitcher.liveObservation(provider: provider)
+                }
+                guard first.stabilityKey == second.stabilityKey else { return "unstable" }
+                _ = try reconcileLiveCredentials(provider: provider, origin: origin, observation: second)
+                return "reconciled"
+            }
+            logCredentialWorkflow(
+                workflow: "reconcile",
+                provider: provider,
+                origin: origin.rawValue,
+                access: "noninteractive",
+                status: outcome,
+                counts: counter.snapshot
+            )
         } catch {
+            logCredentialWorkflow(
+                workflow: "reconcile",
+                provider: provider,
+                origin: origin.rawValue,
+                access: "noninteractive",
+                status: isCredentialAccessDenied(error) ? "access_denied" : "failed",
+                counts: counter.snapshot
+            )
+            if provider == .claude,
+               error is ClaudeCodeCredentialsKeychainError {
+                recordClaudeKeychainFailure(
+                    error,
+                    item: attemptedClaudeLocation,
+                    resolveItemIfNeeded: false
+                )
+            }
             if isCredentialAccessDenied(error) {
                 if let active = activeProfile(for: provider) {
                     refreshStates[active.id] = .keychainLocked
-                }
-                if provider == .claude {
-                    markKeychainRepairSuggested()
                 }
                 return
             }
             AppLog.credentials.error("Could not reconcile \(provider.displayName, privacy: .public) credentials (origin: \(String(describing: origin), privacy: .public)): \(error.localizedDescription, privacy: .public)")
             statusMessage = "Could not reconcile \(provider.displayName) credentials: \(error.localizedDescription)"
         }
+    }
+
+    private func logCredentialWorkflow(
+        workflow: String,
+        provider: Provider,
+        origin: String,
+        access: String,
+        status: String,
+        counts: CredentialKeychainIOCounts
+    ) {
+        AppLog.credentials.debug(
+            "workflow=\(workflow, privacy: .public) provider=\(provider.rawValue, privacy: .public) origin=\(origin, privacy: .public) access=\(access, privacy: .public) status=\(status, privacy: .public) keychain_metadata_reads=\(counts.metadataReads, privacy: .public) keychain_reads=\(counts.dataReads, privacy: .public) keychain_writes=\(counts.writes, privacy: .public)"
+        )
+    }
+
+    private func usageWorkflowStatus(provider: Provider) -> String {
+        let providerProfiles = profiles.filter { $0.provider == provider }
+        guard !providerProfiles.isEmpty else { return "no_accounts" }
+        let failures = providerProfiles.reduce(into: 0) { count, profile in
+            if refreshStates[profile.id]?.isProblem == true {
+                count += 1
+            }
+        }
+        if failures == 0 { return "completed" }
+        if failures == providerProfiles.count { return "failed" }
+        return "partial"
     }
 
     private func isCredentialAccessDenied(_ error: Error) -> Bool {
@@ -759,6 +1201,137 @@ final class AppState: ObservableObject {
             return error.isKeychainAccessDenied
         }
         return false
+    }
+
+    private enum AutomaticClaudeLiveAccess {
+        /// A non-nil item is the exact replacement/modification generation
+        /// which may receive one retry while the older denial remains sticky.
+        case read(pinnedItem: ClaudeKeychainItemLocation?)
+        case knownDenied
+        case unavailable
+    }
+
+    private struct AutomaticClaudeUsageLiveContext {
+        var readPolicy: ClaudeLiveCredentialReadPolicy
+    }
+
+    /// Converts a remembered denial into metadata-only polling. The shared
+    /// secret is tried again automatically only after Claude changes the exact
+    /// item generation; explicit Authorize continues to bypass this gate.
+    private func automaticClaudeLiveAccess() -> AutomaticClaudeLiveAccess {
+        switch claudeKeychainAuthorizationState {
+        case .needsAuthorization(let deniedItem, let disposition):
+            do {
+                let currentItem = try cliSwitcher.locateClaudeKeychainItem(
+                    accessMode: .nonInteractive
+                )
+                if deniedItem == nil, let currentItem {
+                    claudeKeychainAuthorizationState = .needsAuthorization(
+                        item: currentItem,
+                        disposition: disposition
+                    )
+                }
+                if claudeKeychainAuthorizationState.suppressesAutomaticDataRead(
+                    currentItem: currentItem
+                ) {
+                    return .knownDenied
+                }
+                // Replacement or modification creates a candidate new
+                // authorization context. Keep the old denial sticky until an
+                // exact read of this pinned generation actually succeeds.
+                return .read(pinnedItem: currentItem)
+            } catch {
+                recordClaudeKeychainFailure(error, resolveItemIfNeeded: false)
+                if case .needsAuthorization = claudeKeychainAuthorizationState {
+                    return .knownDenied
+                }
+                return .unavailable
+            }
+        case .authorizing, .failed:
+            return .unavailable
+        case .unknown, .ready, .notFound:
+            return .read(pinnedItem: nil)
+        }
+    }
+
+    private func recordAutomaticClaudeLiveDenial(
+        _ disposition: CredentialAccessDisposition
+    ) {
+        let item = try? cliSwitcher.locateClaudeKeychainItem(
+            accessMode: .nonInteractive
+        )
+        recordClaudeKeychainDisposition(
+            disposition,
+            item: item
+        )
+    }
+
+    /// Resolves metadata first and decrypts only that exact item. Returning
+    /// successfully records readiness for the same generation; callers retain
+    /// the attempted location when reporting a denial, so a concurrent
+    /// replacement can never inherit the old item's failure state.
+    private func readAutomaticClaudeOAuthCredentials(
+        pinnedItem: ClaudeKeychainItemLocation?,
+        attemptedItem: inout ClaudeKeychainItemLocation?
+    ) throws -> ClaudeOAuthCredentials? {
+        let location = try pinnedItem ?? cliSwitcher.locateClaudeKeychainItem(
+            accessMode: .nonInteractive
+        )
+        attemptedItem = location
+        guard let location else {
+            claudeKeychainAuthorizationState = .notFound
+            return nil
+        }
+        let record = try cliSwitcher.liveClaudeOAuthCredentialRecord(
+            at: location,
+            accessMode: .nonInteractive
+        )
+        claudeKeychainAuthorizationState = .ready(location)
+        return record?.credentials
+    }
+
+    /// Performs the scheduled usage workflow's single exact shared-item read
+    /// up front. The resulting record is reused by the usage API, optional
+    /// account-info lookup, and `/usage` fallback; known denial keeps those
+    /// paths on the independently stored credential without another live read.
+    private func automaticClaudeUsageLiveContext() -> AutomaticClaudeUsageLiveContext? {
+        switch automaticClaudeLiveAccess() {
+        case .knownDenied:
+            return AutomaticClaudeUsageLiveContext(
+                readPolicy: .knownDenied
+            )
+        case .unavailable:
+            return nil
+        case .read(let pinnedItem):
+            var attemptedItem = pinnedItem
+            do {
+                let credentials = try readAutomaticClaudeOAuthCredentials(
+                    pinnedItem: pinnedItem,
+                    attemptedItem: &attemptedItem
+                )
+                let record = credentials.map {
+                    LiveClaudeOAuthCredentialRecord(
+                        credentials: $0,
+                        itemLocation: attemptedItem
+                    )
+                }
+                return AutomaticClaudeUsageLiveContext(
+                    readPolicy: .preloaded(record)
+                )
+            } catch {
+                recordClaudeKeychainFailure(
+                    error,
+                    item: attemptedItem,
+                    resolveItemIfNeeded: false
+                )
+                if isCredentialAccessDenied(error) {
+                    return AutomaticClaudeUsageLiveContext(
+                        readPolicy: .knownDenied
+                    )
+                }
+                return nil
+            }
+        }
     }
 
     private func defaultLabel(for identity: AccountIdentity, provider: Provider) -> String {
@@ -772,24 +1345,72 @@ final class AppState: ObservableObject {
     /// The slow `/usage` CLI probe, used only as the active-account fallback
     /// when the usage API failed. `failureState` is what the row should show if
     /// even this local read cannot recover a reading.
-    private func refreshActiveClaudeCodeUsage(onFailure failureState: AccountRefreshState, for profile: AccountProfile) async {
-        guard cliSwitcher.validateActiveLogin(provider: .claude) else {
+    private func refreshActiveClaudeCodeUsage(
+        onFailure failureState: AccountRefreshState,
+        for profile: AccountProfile,
+        resolvedUsageCredentials: ClaudeOAuthCredentials? = nil,
+        usageCredentialWasResolved: Bool = false
+    ) async {
+        // Hand the CLI the live token so it never reads its own keychain item
+        // (a SecurityAgent prompt on systems where claude's signature isn't
+        // durably authorized). Resolve the app-owned snapshot independently:
+        // a denied provider item must not prevent a valid captured token from
+        // serving this prompt-free fallback.
+        let credentials: ClaudeOAuthCredentials?
+        if usageCredentialWasResolved {
+            // The API service already selected live vs stored and enforced all
+            // active-account rotation rules. Reuse that exact generation.
+            credentials = resolvedUsageCredentials
+        } else {
+            var liveCredentials: ClaudeOAuthCredentials?
+            switch automaticClaudeLiveAccess() {
+            case .knownDenied:
+                break
+            case .unavailable:
+                refreshStates[profile.id] = failureState
+                statusMessage = "Claude Code /usage was not launched because the shared credential is unavailable."
+                return
+            case .read(let pinnedItem):
+                var attemptedItem = pinnedItem
+                do {
+                    liveCredentials = try readAutomaticClaudeOAuthCredentials(
+                        pinnedItem: pinnedItem,
+                        attemptedItem: &attemptedItem
+                    )
+                } catch {
+                    recordClaudeKeychainFailure(
+                        error,
+                        item: attemptedItem,
+                        resolveItemIfNeeded: false
+                    )
+                    if !isCredentialAccessDenied(error) {
+                        // Duplicate, malformed, or ambiguous live state is not
+                        // equivalent to denial and must never be hidden by a
+                        // stored-token fallback.
+                        refreshStates[profile.id] = failureState
+                        statusMessage = "Claude Code /usage was not launched: \(error.localizedDescription)"
+                        return
+                    }
+                }
+            }
+            let storedCredentials = try? cliSwitcher.storedCredentialRecord(
+                for: profile,
+                accessMode: .nonInteractive
+            )?.claudeOAuthCredentials
+            credentials = ClaudeUsageProbeCredentialSelector.select(
+                live: liveCredentials,
+                stored: storedCredentials
+            )
+        }
+        guard let oauthToken = credentials?.accessToken, !oauthToken.isEmpty else {
+            // Never launch Claude without a token: doing so lets the child
+            // process escape this app's noninteractive Keychain policy.
             refreshStates[profile.id] = failureState
             return
         }
 
         refreshStage = "Reading Claude Code /usage — can take ~20 seconds…"
         defer { refreshStage = nil }
-
-        // Hand the CLI the live token so it never reads its own keychain item
-        // (a SecurityAgent prompt on systems where claude's signature isn't
-        // durably authorized). An expired token is withheld rather than
-        // refreshed: a background probe must not mutate the live login.
-        var oauthToken: String?
-        if let credentials = (try? cliSwitcher.liveClaudeOAuthCredentials()) ?? nil,
-           !credentials.isExpired() {
-            oauthToken = credentials.accessToken
-        }
 
         do {
             let report = try await claudeCodeUsageReader.readUsage(oauthToken: oauthToken)
@@ -809,6 +1430,21 @@ final class AppState: ObservableObject {
     /// limit API. Accounts are serialized (active first) so copied refresh
     /// tokens are never used concurrently by this app.
     private func refreshCodexUsage() async {
+        let counter = CredentialKeychainIOCounter()
+        await CredentialAccess.counting(counter) {
+            await refreshCodexUsageImpl()
+            logCredentialWorkflow(
+                workflow: "usage",
+                provider: .codex,
+                origin: "scheduled_refresh",
+                access: "noninteractive",
+                status: usageWorkflowStatus(provider: .codex),
+                counts: counter.snapshot
+            )
+        }
+    }
+
+    private func refreshCodexUsageImpl() async {
         lastCodexRefreshAttempt = Date()
         let codexProfiles = profiles
             .filter { $0.provider == .codex }
@@ -832,8 +1468,9 @@ final class AppState: ObservableObject {
         refreshStates[profile.id] = .refreshing
         for _ in 0..<2 {
             do {
-                guard let fingerprint = try cliSwitcher.storedCredentialFingerprint(for: profile.id),
-                      let authJSON = try cliSwitcher.storedCodexAuthJSON(for: profile.id) else {
+                guard let record = try cliSwitcher.storedCredentialRecord(for: profile),
+                      record.summary.isRestorable,
+                      let authJSON = record.codexAuthJSON else {
                     if !refreshCodexLocalFallback(for: profile) {
                         refreshStates[profile.id] = .needsLogin(
                             reason: "No saved Codex credentials are available for live usage checks."
@@ -841,6 +1478,7 @@ final class AppState: ObservableObject {
                     }
                     return
                 }
+                let fingerprint = record.summary.fingerprint
 
                 let result = try await codexUsageService.fetchSnapshot(
                     for: profile,
@@ -850,9 +1488,10 @@ final class AppState: ObservableObject {
                 )
 
                 if result.updatedAuthJSON != authJSON {
-                    guard try cliSwitcher.replaceStoredCodexAuthJSON(
+                    guard let updatedRecord = try cliSwitcher.replaceStoredCodexAuthJSON(
                         result.updatedAuthJSON,
                         for: profile.id,
+                        using: record,
                         ifSnapshotFingerprintMatches: fingerprint
                     ) else {
                         // A concurrent capture won. Re-read that newer snapshot
@@ -860,7 +1499,7 @@ final class AppState: ObservableObject {
                         // older refresh token.
                         continue
                     }
-                    storedSnapshotStatuses[profile.id] = .present
+                    cacheStoredCredentialSummary(updatedRecord, for: profile)
 
                     // Keep the live login in sync only when it still has the
                     // exact credentials copied for this check and the same
@@ -883,7 +1522,6 @@ final class AppState: ObservableObject {
                 applySnapshot(result.snapshot, for: profile)
                 return
             } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
-                storedSnapshotStatuses[profile.id] = .locked
                 refreshStates[profile.id] = .keychainLocked
                 return
             } catch let error as CodexAccountUsageError {
@@ -953,7 +1591,7 @@ final class AppState: ObservableObject {
         let info: CodexAccountInfo?
         if profile.isActiveCLI {
             info = CodexIdentityReader().accountInfo()
-        } else if let data = try? cliSwitcher.storedCodexAuthJSON(for: profile.id) {
+        } else if let data = try? cliSwitcher.storedCredentialRecord(for: profile)?.codexAuthJSON {
             info = CodexIdentityReader.accountInfo(fromAuthJSON: data)
         } else {
             info = nil
@@ -1139,16 +1777,37 @@ final class AppState: ObservableObject {
             return
         }
 
-        do {
-            try CredentialAccess.userInitiated(
-                reason: "remove saved credentials for \(profile.label)"
-            ) {
-                try cliSwitcher.deleteStoredSnapshot(for: profile.id)
-            }
-            storedSnapshotStatuses[profile.id] = .absent
-        } catch {
-            statusMessage = "Could not delete stored credentials for \(profile.label): \(error.localizedDescription)"
+        guard let mutationOwner = beginCredentialMutation(for: profile.provider) else {
+            statusMessage = "Wait for the current \(profile.provider.displayName) credential operation to finish before removing this account."
+            return
         }
+        defer {
+            finishCredentialMutation(for: profile.provider, owner: mutationOwner)
+        }
+
+        let counter = CredentialKeychainIOCounter()
+        let deleted = CredentialAccess.counting(counter) { () -> Bool in
+            do {
+                try cliSwitcher.deleteStoredSnapshot(
+                    for: profile.id,
+                    accessMode: .nonInteractive
+                )
+                storedSnapshotStatuses[profile.id] = .absent
+                return true
+            } catch {
+                statusMessage = "Could not delete stored credentials for \(profile.label): \(error.localizedDescription)"
+                return false
+            }
+        }
+        logCredentialWorkflow(
+            workflow: "snapshot_delete",
+            provider: profile.provider,
+            origin: "explicit_action",
+            access: "noninteractive",
+            status: deleted ? "completed" : "failed",
+            counts: counter.snapshot
+        )
+        guard deleted else { return }
         if profile.webDataStoreKind == .isolated {
             WKWebsiteDataStore.remove(forIdentifier: profile.webDataStoreID) { _ in }
         }
@@ -1184,25 +1843,161 @@ final class AppState: ObservableObject {
     func switchCLI(
         to profile: AccountProfile,
         interactive: Bool = true,
-        allowKeychainRepairRetry: Bool = true
+        automatic: Bool = false
     ) async -> Bool {
-        if interactive, CredentialAccess.currentMode != .userInitiated {
-            return await CredentialAccess.userInitiated(
-                reason: "switch the CLI to \(profile.label)"
-            ) {
-                storedSnapshotStatuses[profile.id] = readStoredSnapshotStatus(for: profile)
-                return await switchCLI(
+        if let existing = switchFlights[profile.provider] {
+            if existing.profileID == profile.id {
+                return await existing.task.value
+            }
+            if automatic {
+                deferredAutomaticSwitchProviders.insert(profile.provider)
+            }
+            statusMessage = automatic
+                ? "Automatic switch deferred while another credential operation is in progress."
+                : "A \(profile.provider.displayName) credential operation is already in progress."
+            return false
+        }
+
+        let flightID = UUID()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return false }
+            let counter = CredentialKeychainIOCounter()
+            return await CredentialAccess.counting(counter) {
+                let result = await self.performSwitchCLI(
                     to: profile,
-                    interactive: true,
-                    allowKeychainRepairRetry: allowKeychainRepairRetry
+                    interactive: interactive,
+                    automatic: automatic,
+                    storedCredentialWorkflow: nil
+                )
+                self.logCredentialWorkflow(
+                    workflow: "switch",
+                    provider: profile.provider,
+                    origin: automatic ? "automatic" : "manual",
+                    access: interactive && profile.provider == .claude
+                        ? "mixed"
+                        : "noninteractive",
+                    status: result ? "completed" : "aborted",
+                    counts: counter.snapshot
+                )
+                return result
+            }
+        }
+        switchFlights[profile.provider] = (flightID, profile.id, task)
+        let result = await task.value
+        if switchFlights[profile.provider]?.id == flightID {
+            switchFlights[profile.provider] = nil
+        }
+        return result
+    }
+
+    private func performSwitchCLI(
+        to profile: AccountProfile,
+        interactive: Bool,
+        automatic: Bool,
+        storedCredentialWorkflow: SwitchStoredCredentialWorkflow?
+    ) async -> Bool {
+        if storedCredentialWorkflow == nil {
+            guard let mutationOwner = beginCredentialMutation(for: profile.provider) else {
+                if automatic {
+                    deferredAutomaticSwitchProviders.insert(profile.provider)
+                }
+                statusMessage = interactive
+                    ? "A \(profile.provider.displayName) credential operation is already in progress."
+                    : (automatic
+                        ? "Automatic switch deferred while another credential operation is in progress."
+                        : "A \(profile.provider.displayName) credential operation is already in progress.")
+                return false
+            }
+            defer { finishCredentialMutation(for: profile.provider, owner: mutationOwner) }
+
+            if !interactive, profile.provider == .claude {
+                switch automaticClaudeLiveAccess() {
+                case .read(let pinnedItem):
+                    if let pinnedItem {
+                        var attemptedItem: ClaudeKeychainItemLocation? = pinnedItem
+                        do {
+                            _ = try readAutomaticClaudeOAuthCredentials(
+                                pinnedItem: pinnedItem,
+                                attemptedItem: &attemptedItem
+                            )
+                        } catch {
+                            recordClaudeKeychainFailure(
+                                error,
+                                item: attemptedItem,
+                                resolveItemIfNeeded: false
+                            )
+                            refreshStates[profile.id] = isKeychainAccessDenied(error)
+                                ? .keychainLocked
+                                : .readFailed(reason: error.localizedDescription)
+                            statusMessage = "Automatic switch stopped before touching the denied Claude credential again."
+                            return false
+                        }
+                    }
+                case .knownDenied, .unavailable:
+                    refreshStates[profile.id] = .keychainLocked
+                    statusMessage = automatic
+                        ? "Automatic switch deferred until Claude Keychain access is authorized."
+                        : "Switch stopped until Claude Keychain access is authorized."
+                    return false
+                }
+            }
+
+            let workflow: SwitchStoredCredentialWorkflow
+            do {
+                workflow = try await CredentialAccess.nonInteractive {
+                    try loadSwitchStoredCredentialWorkflow(for: profile.provider)
+                }
+            } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
+                storedSnapshotStatuses[profile.id] = .locked
+                refreshStates[profile.id] = .keychainLocked
+                if interactive {
+                    showError(
+                        message: "Saved credentials are not accessible",
+                        details: "Limit Lifeboat could not read the saved accounts without prompting. Relaunch the installed app, then retry."
+                    )
+                }
+                return false
+            } catch {
+                statusMessage = "Could not prepare the switch: \(error.localizedDescription)"
+                reportSwitchProblem(
+                    interactive: interactive,
+                    message: "Could not prepare the switch",
+                    details: error.localizedDescription
+                )
+                return false
+            }
+
+            if interactive {
+                // The explicit authorization action above is the only
+                // prompt-capable Keychain operation. Preflight, capture,
+                // restore, validation, and rollback all fail closed instead
+                // of displaying a second password dialog.
+                return await CredentialAccess.nonInteractive {
+                    await performSwitchCLI(
+                        to: profile,
+                        interactive: true,
+                        automatic: automatic,
+                        storedCredentialWorkflow: workflow
+                    )
+                }
+            }
+            return await CredentialAccess.nonInteractive {
+                await performSwitchCLI(
+                    to: profile,
+                    interactive: false,
+                    automatic: automatic,
+                    storedCredentialWorkflow: workflow
                 )
             }
         }
 
-        guard hasStoredSnapshot(for: profile) else {
+        guard let storedCredentialWorkflow,
+              let targetStoredRecord = storedCredentialWorkflow.record(for: profile.id),
+              targetStoredRecord.summary.isRestorable else {
             refreshStates[profile.id] = .needsLogin(
                 reason: "No saved credentials are available for this account."
             )
+            finishCurrentCredentialMutation(for: profile.provider)
             handleLoginRequired(
                 for: profile,
                 reason: "No saved credentials are available. Log in once and the app will capture them automatically.",
@@ -1212,15 +2007,21 @@ final class AppState: ObservableObject {
         }
 
         if case .needsLogin(let reason) = refreshStates[profile.id] {
+            finishCurrentCredentialMutation(for: profile.provider)
             handleLoginRequired(for: profile, reason: reason, interactive: interactive)
             return false
         }
 
-        switch await preflightSwitchTarget(profile) {
+        switch await preflightSwitchTarget(
+            profile,
+            storedRecord: targetStoredRecord,
+            storedCredentialWorkflow: storedCredentialWorkflow
+        ) {
         case .ready:
             break
         case .requiresLogin(let reason):
             refreshStates[profile.id] = .needsLogin(reason: reason)
+            finishCurrentCredentialMutation(for: profile.provider)
             handleLoginRequired(for: profile, reason: reason, interactive: interactive)
             updateSwitchAdvice()
             return false
@@ -1252,17 +2053,17 @@ final class AppState: ObservableObject {
             }
         }
 
-        // Proactively repair the Claude keychain partition list before the
-        // first SecItem read of the switch. The OS access dialog appears
-        // synchronously mid-read, so fixing it up front turns a burst of
-        // password prompts into one. Gated on the cached flag (the probe is a
-        // slow whole-keychain dump, so it must not run on every switch);
-        // proceed regardless of the user's choice — declining only means the OS
-        // dialog may still appear.
-        if interactive, profile.provider == .claude, keychainRepairSuggested {
-            await repairClaudeKeychainPartitionList(
-                reason: "so switching to \(profile.label) no longer asks for your password every time"
-            )
+        // Do not authorize the current/old item until the target has passed
+        // the prompt-free stored-credential and login preflights. A target
+        // that needs login may replace the item and should require at most one
+        // authorization for the resulting item, never one for each side.
+        if interactive, profile.provider == .claude {
+            guard await authorizeClaudeKeychainAccess(
+                reason: "before switching to \(profile.label)",
+                allowDuringCredentialMutation: true
+            ) else {
+                return false
+            }
         }
 
         // Capture the currently active login first so nothing is lost.
@@ -1283,17 +2084,15 @@ final class AppState: ObservableObject {
                 _ = try reconcileLiveCredentials(
                     provider: profile.provider,
                     origin: interactive ? .manualSwitch : .automaticSwitch,
-                    observation: outgoingObservation
+                    observation: outgoingObservation,
+                    storedCredentialWorkflow: storedCredentialWorkflow
                 )
             }
         } catch {
-            if interactive, profile.provider == .claude, allowKeychainRepairRetry, isKeychainAccessDenied(error) {
-                markKeychainRepairSuggested()
-                if await repairClaudeKeychainPartitionList(
-                    reason: "so \(profile.label) can be switched without repeated prompts"
-                ) {
-                    return await switchCLI(to: profile, interactive: true, allowKeychainRepairRetry: false)
-                }
+            if profile.provider == .claude,
+               error is ClaudeCodeCredentialsKeychainError,
+               isKeychainAccessDenied(error) {
+                recordClaudeKeychainFailure(error)
             }
             statusMessage = "Switch cancelled: \(error.localizedDescription)"
             reportSwitchProblem(
@@ -1320,6 +2119,8 @@ final class AppState: ObservableObject {
         do {
             let result = try cliSwitcher.restoreSnapshot(
                 for: profile,
+                storedRecord: storedCredentialWorkflow.record(for: profile.id)
+                    ?? targetStoredRecord,
                 expectedLiveFingerprint: outgoingObservation.credentialFingerprint,
                 enforceExpectedLiveState: true
             )
@@ -1327,7 +2128,8 @@ final class AppState: ObservableObject {
             _ = try reconcileLiveCredentials(
                 provider: profile.provider,
                 origin: interactive ? .manualSwitch : .automaticSwitch,
-                observation: verified
+                observation: verified,
+                storedCredentialWorkflow: storedCredentialWorkflow
             )
 
             statusMessage = "Switched \(profile.provider.displayName) CLI to \(profile.label)."
@@ -1352,28 +2154,47 @@ final class AppState: ObservableObject {
             if interactive {
                 lastManualSwitchAt[profile.provider] = Date()
                 Task {
-                    await CredentialAccess.nonInteractive { await refreshAll() }
+                    await CredentialAccess.independentWorkflow {
+                        await CredentialAccess.nonInteractive { await refreshAll() }
+                    }
                 }
             }
             return true
         } catch {
             AppLog.switching.error("Switch to account \(profile.id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
             if let storeError = error as? CredentialStoreError, case .decodeFailed = storeError {
-                // The stored snapshot is unreadable (e.g. written by an older
-                // build). Clear it so this account falls back to the re-capture
-                // path, and tell the user how to restore it. The current login
-                // was already captured above, so nothing is lost.
-                do {
-                    try cliSwitcher.deleteStoredSnapshot(for: profile.id)
-                } catch {
-                    AppLog.credentials.error("Could not clear the unreadable snapshot for account \(profile.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                }
-                storedSnapshotStatuses[profile.id] = .absent
-                statusMessage = "Cleared unreadable credentials for \(profile.label)."
+                // Malformed credential material is fail-closed. Never delete
+                // the only saved login as an error-recovery side effect; the
+                // user must explicitly recreate the provider login or remove
+                // the account after deciding the old snapshot is expendable.
+                refreshStates[profile.id] = .needsLogin(
+                    reason: "The saved credential snapshot is unreadable and was left unchanged."
+                )
+                statusMessage = "Saved credentials for \(profile.label) are unreadable; no changes were made."
                 reportSwitchProblem(
                     interactive: interactive,
                     message: "Saved credentials for \(profile.label) were unreadable",
-                    details: "They were likely written by an older version and have been cleared. Log into this account once in the terminal (\(profile.provider.loginCommand)); the app captures its credentials automatically."
+                    details: "They were left unchanged. Relaunch the stable installed build, or explicitly log into this account again (\(profile.provider.loginCommand)) to recreate the snapshot."
+                )
+            } else if credentialAccessDisposition(for: error) == .userCancelled {
+                statusMessage = "Switch cancelled."
+            } else if let storeError = error as? CredentialStoreError,
+                      storeError.isKeychainAccessDenied {
+                storedSnapshotStatuses[profile.id] = .locked
+                refreshStates[profile.id] = .keychainLocked
+                statusMessage = "Saved credentials are not accessible. Relaunch the installed app, then retry."
+                reportSwitchProblem(
+                    interactive: interactive,
+                    message: "Saved credentials are not accessible",
+                    details: storeError.localizedDescription
+                )
+            } else if profile.provider == .claude, isKeychainAccessDenied(error) {
+                recordClaudeKeychainFailure(error)
+                statusMessage = "Switch failed for \(profile.label): \(error.localizedDescription)"
+                reportSwitchProblem(
+                    interactive: interactive,
+                    message: "Switch stopped before another password prompt",
+                    details: "Authorize Keychain access from the More menu, then retry. \(error.localizedDescription)"
                 )
             } else if let switcherError = error as? CLISwitcherError,
                       case .restoreValidationFailed = switcherError {
@@ -1385,18 +2206,11 @@ final class AppState: ObservableObject {
                 )
                 if interactive {
                     Task {
-                        await CredentialAccess.nonInteractive { await refreshAll() }
+                        await CredentialAccess.independentWorkflow {
+                            await CredentialAccess.nonInteractive { await refreshAll() }
+                        }
                     }
                 }
-            } else if interactive, profile.provider == .claude, allowKeychainRepairRetry, isKeychainAccessDenied(error) {
-                markKeychainRepairSuggested()
-                if await repairClaudeKeychainPartitionList(
-                    reason: "so switching to \(profile.label) stops asking for your password"
-                ) {
-                    return await switchCLI(to: profile, interactive: true, allowKeychainRepairRetry: false)
-                }
-                statusMessage = "Switch failed for \(profile.label): \(error.localizedDescription)"
-                reportSwitchProblem(interactive: interactive, message: "Switch failed", details: error.localizedDescription)
             } else {
                 statusMessage = "Switch failed for \(profile.label): \(error.localizedDescription)"
                 reportSwitchProblem(interactive: interactive, message: "Switch failed", details: error.localizedDescription)
@@ -1411,20 +2225,59 @@ final class AppState: ObservableObject {
         case temporarilyUnavailable(reason: String)
     }
 
-    private func preflightSwitchTarget(_ profile: AccountProfile) async -> SwitchPreflightResult {
+    private func preflightSwitchTarget(
+        _ profile: AccountProfile,
+        storedRecord: StoredCredentialRecord,
+        storedCredentialWorkflow: SwitchStoredCredentialWorkflow
+    ) async -> SwitchPreflightResult {
         switch profile.provider {
         case .claude:
             do {
-                let snapshot = try await claudeUsageService.fetchSnapshot(
+                let result = try await claudeUsageService.fetchSnapshot(
                     for: profile,
                     isActiveCLI: profile.isActiveCLI,
+                    storedRecord: storedRecord,
                     accessMode: CredentialAccess.currentMode
                 )
-                refreshClaudeLoginExpiration(for: profile)
-                applySnapshot(snapshot, for: profile)
+                // Inactive resolution is owned by the stored snapshot, so a
+                // changed generation was compare-and-swap persisted there.
+                // An active preflight may instead have selected a fresher
+                // live token without writing the private copy; keep the
+                // cached record byte-for-byte aligned with its real owner.
+                let updatedRecord = profile.isActiveCLI
+                    ? storedRecord
+                    : updatedClaudeStoredRecord(
+                        storedRecord,
+                        replacing: result.credentials
+                    )
+                storedCredentialWorkflow.markLoaded(updatedRecord, for: profile.id)
+                cacheStoredCredentialSummary(updatedRecord, for: profile)
+                applySnapshot(result.snapshot, for: profile)
                 return .ready
             } catch {
-                let fetchError = (error as? ClaudeAccountUsageFetchError) ?? .transport(error)
+                let fetchError: ClaudeAccountUsageFetchError
+                if let preflightError = error as? ClaudeAccountUsagePreflightError {
+                    if let latest = preflightError.latestPersistedCredentials {
+                        let updatedRecord = updatedClaudeStoredRecord(
+                            storedCredentialWorkflow.record(for: profile.id)
+                                ?? storedRecord,
+                            replacing: latest
+                        )
+                        storedCredentialWorkflow.markLoaded(updatedRecord, for: profile.id)
+                        cacheStoredCredentialSummary(updatedRecord, for: profile)
+                    }
+                    fetchError = preflightError.underlying
+                } else {
+                    fetchError = (error as? ClaudeAccountUsageFetchError)
+                        ?? .transport(error)
+                }
+                if case .liveCredentialAccessDenied(let underlying, let item) = fetchError {
+                    recordClaudeKeychainFailure(
+                        underlying,
+                        item: item,
+                        resolveItemIfNeeded: false
+                    )
+                }
                 let outcome = RefreshOutcomePolicy.outcome(for: fetchError, isActiveCLI: profile.isActiveCLI)
                 if case .needsLogin(let reason) = outcome.state {
                     return .requiresLogin(reason: reason)
@@ -1435,66 +2288,72 @@ final class AppState: ObservableObject {
                 return .temporarilyUnavailable(reason: error.localizedDescription)
             }
         case .codex:
-            return await preflightCodexSwitchTarget(profile)
+            return await preflightCodexSwitchTarget(
+                profile,
+                storedRecord: storedRecord,
+                storedCredentialWorkflow: storedCredentialWorkflow
+            )
         }
     }
 
-    private func preflightCodexSwitchTarget(_ profile: AccountProfile) async -> SwitchPreflightResult {
+    private func preflightCodexSwitchTarget(
+        _ profile: AccountProfile,
+        storedRecord: StoredCredentialRecord,
+        storedCredentialWorkflow: SwitchStoredCredentialWorkflow
+    ) async -> SwitchPreflightResult {
         guard let executablePath = cliSwitcher.resolveExecutablePath(command: Provider.codex.commandName) else {
             return .temporarilyUnavailable(reason: "The Codex executable could not be found.")
         }
 
-        for _ in 0..<2 {
-            do {
-                guard let fingerprint = try cliSwitcher.storedCredentialFingerprint(for: profile.id),
-                      let authJSON = try cliSwitcher.storedCodexAuthJSON(for: profile.id) else {
-                    return .requiresLogin(reason: "The saved Codex account has no usable ChatGPT credentials.")
-                }
-                let result = await codexAuthPreflightService.preflight(
-                    authJSON: authJSON,
-                    executableURL: URL(fileURLWithPath: executablePath),
-                    expectedIdentity: profile.identity
-                )
-                switch result {
-                case .requiresLogin(let reason):
-                    return .requiresLogin(reason: reason)
-                case .temporarilyUnavailable(let reason):
-                    return .temporarilyUnavailable(reason: reason)
-                case .ready(let updatedAuthJSON):
-                    if try cliSwitcher.replaceStoredCodexAuthJSON(
-                        updatedAuthJSON,
-                        for: profile.id,
-                        ifSnapshotFingerprintMatches: fingerprint
-                    ) {
-                        storedSnapshotStatuses[profile.id] = .present
-                        if let info = CodexIdentityReader.accountInfo(fromAuthJSON: updatedAuthJSON) {
-                            accountInfoFetched.insert(profile.id)
-                            if AccountProfileUpdater.enrich(
-                                profiles: &profiles,
-                                profileID: profile.id,
-                                enrichment: AccountProfileEnrichment(
-                                    planLabel: info.planLabel,
-                                    identity: info.identity
-                                )
-                            ) {
-                                persistProfiles()
-                            }
-                        }
-                        return .ready
-                    }
-                    // A concurrent capture won. Re-read and preflight that
-                    // newer snapshot once instead of overwriting it.
-                }
-            } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
-                storedSnapshotStatuses[profile.id] = .locked
-                return .temporarilyUnavailable(reason: "Keychain access is required to verify this account.")
-            } catch {
-                return .temporarilyUnavailable(reason: error.localizedDescription)
+        do {
+            guard storedRecord.summary.isRestorable,
+                  let authJSON = storedRecord.codexAuthJSON else {
+                return .requiresLogin(reason: "The saved Codex account has no usable ChatGPT credentials.")
             }
+            let result = await codexAuthPreflightService.preflight(
+                authJSON: authJSON,
+                executableURL: URL(fileURLWithPath: executablePath),
+                expectedIdentity: profile.identity
+            )
+            switch result {
+            case .requiresLogin(let reason):
+                return .requiresLogin(reason: reason)
+            case .temporarilyUnavailable(let reason):
+                return .temporarilyUnavailable(reason: reason)
+            case .ready(let updatedAuthJSON):
+                guard let updatedRecord = try cliSwitcher.replaceStoredCodexAuthJSON(
+                    updatedAuthJSON,
+                    for: profile.id,
+                    using: storedRecord,
+                    ifSnapshotFingerprintMatches: storedRecord.summary.fingerprint
+                ) else {
+                    return .temporarilyUnavailable(
+                        reason: "The saved Codex credentials changed while they were being verified. Try again."
+                    )
+                }
+                storedCredentialWorkflow.markLoaded(updatedRecord, for: profile.id)
+                cacheStoredCredentialSummary(updatedRecord, for: profile)
+                if let info = CodexIdentityReader.accountInfo(fromAuthJSON: updatedAuthJSON) {
+                    accountInfoFetched.insert(profile.id)
+                    if AccountProfileUpdater.enrich(
+                        profiles: &profiles,
+                        profileID: profile.id,
+                        enrichment: AccountProfileEnrichment(
+                            planLabel: info.planLabel,
+                            identity: info.identity
+                        )
+                    ) {
+                        persistProfiles()
+                    }
+                }
+                return .ready
+            }
+        } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
+            storedSnapshotStatuses[profile.id] = .locked
+            return .temporarilyUnavailable(reason: "Keychain access is required to verify this account.")
+        } catch {
+            return .temporarilyUnavailable(reason: error.localizedDescription)
         }
-        return .temporarilyUnavailable(
-            reason: "The saved Codex credentials changed while they were being verified. Try again."
-        )
     }
 
     private func handleLoginRequired(
@@ -1524,225 +2383,446 @@ final class AppState: ObservableObject {
         }
     }
 
-    // MARK: - Keychain partition-list repair
+    // MARK: - Claude Keychain authorization
 
-    private func makeKeychainPartitionRepair() -> KeychainPartitionRepair {
-        KeychainPartitionRepair(
-            requiredPartitions: DistributionIdentity.requiredClaudeKeychainPartitions
-        )
-    }
-
-    private func confirmKeychainPartitionComplete() {
-        keychainRepairSuggested = false
-    }
-
-    /// A live keychain denial means the last observed complete item may have
-    /// been replaced. Flag the action immediately; the metadata probe confirms
-    /// the current item's ACL without prompting.
-    private func markKeychainRepairSuggested() {
-        keychainRepairSuggested = true
-    }
-
-    /// Non-interactive launch probe: highlights the manual repair action when
-    /// the shared Claude keychain item's partition list is missing this app's
-    /// team. It runs once per launch and after a newly observed Claude login,
-    /// while access denials immediately mark the action as potentially needed.
-    /// No result is persisted across launches, and the probe never prompts.
-    func refreshKeychainRepairSuggestion() async {
-        switch await claudeKeychainPartitionStatus() {
-        case .complete:
-            confirmKeychainPartitionComplete()
-        case .missing:
-            keychainRepairSuggested = true
-        case .unparseable, .itemNotFound, .none:
-            // Not logged in yet, or the probe failed: nothing actionable to flag.
-            keychainRepairSuggested = false
+    var shouldHighlightClaudeKeychainAuthorization: Bool {
+        if case .needsAuthorization = claudeKeychainAuthorizationState {
+            return true
         }
-    }
-
-    /// Reads the partition-list status of the shared `Claude Code-credentials`
-    /// item off the main actor. This never prompts for a password. Returns nil
-    /// if the probe itself failed (treated as "don't interrupt the user").
-    private func claudeKeychainPartitionStatus() async -> KeychainPartitionStatus? {
-        let repair = makeKeychainPartitionRepair()
-        return await Task.detached(priority: .userInitiated) {
-            try? repair.status()
-        }.value
-    }
-
-    /// True for errors that mean the Keychain denied access (rather than a
-    /// missing item), unwrapping the switch/transaction error wrappers.
-    private func isKeychainAccessDenied(_ error: Error) -> Bool {
-        if let error = error as? ClaudeCodeCredentialsKeychainError {
-            return error.isKeychainAccessDenied
-        }
-        if let error = error as? CredentialStoreError {
-            return error.isKeychainAccessDenied
-        }
-        if let error = error as? CLISwitcherError, case .backupFailed(_, let underlying) = error {
-            return isKeychainAccessDenied(underlying)
+        if case .failed = claudeKeychainAuthorizationState {
+            return true
         }
         return false
     }
 
-    private struct KeychainRepairAttempt: Sendable {
-        var outcome: KeychainPartitionRepairOutcome?
-        var wrongPassword = false
-        var message: String?
+    var claudeKeychainAuthorizationDiagnostic: String? {
+        guard case .failed(let message) = claudeKeychainAuthorizationState else {
+            return nil
+        }
+        return message
     }
 
-    /// Applies an already-computed safe write plan on a background task,
-    /// mapping thrown errors to a Sendable result.
-    private func runKeychainRepair(
-        _ repair: KeychainPartitionRepair,
-        csv: String,
-        added: [String],
-        password: String
-    ) async -> KeychainRepairAttempt {
-        await Task.detached(priority: .userInitiated) {
-            do {
-                let outcome = try repair.apply(csv: csv, added: added, password: password)
-                return KeychainRepairAttempt(outcome: outcome)
-            } catch let error as KeychainPartitionRepairError {
-                if case .wrongPassword = error {
-                    return KeychainRepairAttempt(wrongPassword: true, message: error.localizedDescription)
-                }
-                return KeychainRepairAttempt(message: error.localizedDescription)
-            } catch {
-                return KeychainRepairAttempt(message: error.localizedDescription)
-            }
-        }.value
-    }
-
-    /// Shared entry point for the proactive switch gate, the reactive fallback,
-    /// and the manual menu item. Adds this app's team to the item's partition
-    /// list so `Always Allow` finally sticks. Returns true when the list ends up
-    /// complete (already-complete or newly repaired). Prompts for the login
-    /// password only when a write is actually required.
-    @discardableResult
-    func repairClaudeKeychainPartitionList(reason: String) async -> Bool {
-        let repair = makeKeychainPartitionRepair()
-
-        // One slow dump (it enumerates the whole keychain) to decide everything
-        // before prompting; surface progress so the pause is not a silent hang.
-        statusMessage = "Checking keychain access…"
-        guard let plan = await Task.detached(priority: .userInitiated, operation: {
-            try? repair.plan()
-        }).value else {
-            statusMessage = "Could not inspect keychain access."
-            showError(
-                message: "Could not inspect the keychain item",
-                details: "The existing keychain access list could not be read, so no password was requested and no changes were made."
-            )
+    var canAuthorizeClaudeKeychain: Bool {
+        if case .failed = claudeKeychainAuthorizationState {
             return false
         }
-        let csv: String
-        let added: [String]
-        switch plan {
-        case .complete:
-            confirmKeychainPartitionComplete()
-            statusMessage = "Keychain access is already set up — no changes needed."
+        return true
+    }
+
+    var isAuthorizingClaudeKeychain: Bool {
+        if case .authorizing = claudeKeychainAuthorizationState {
             return true
-        case .itemNotFound:
-            statusMessage = "No Claude Code keychain item was found."
-            showError(
-                message: "Claude Code isn't logged in yet",
-                details: "There's no Claude Code keychain item to repair. Log in with `claude` (/login) first, then try again."
-            )
-            return false
-        case .unparseable:
-            statusMessage = "Could not safely read the keychain access list."
-            showError(
-                message: "Could not safely inspect keychain access",
-                details: "The existing partition list could not be parsed. No password was requested and no changes were made."
-            )
-            return false
-        case .needsWrite(let plannedCSV, let plannedAdded):
-            csv = plannedCSV
-            added = plannedAdded
         }
+        return false
+    }
 
-        guard var password = promptForLoginKeychainPassword(
-            message: "Enter your macOS login password once \(reason). It's used only to authorize this one keychain change and is never stored."
-        ) else {
-            statusMessage = "Keychain repair cancelled."
-            return false
+    var hasNondurableDevelopmentSignature: Bool {
+        let variant = ApplicationVariant.current
+        return variant == .development
+            && !codeSignatureStatus.supportsDurableAuthorization(for: variant)
+    }
+
+    /// A prompt-free health check. Unknown inspection errors intentionally do
+    /// not erase a previously observed authorization denial.
+    func refreshClaudeKeychainAuthorizationState() async {
+        await CredentialAccess.nonInteractive {
+            guard case .read(let pinnedItem) = automaticClaudeLiveAccess() else {
+                return
+            }
+            var attemptedItem = pinnedItem
+            do {
+                _ = try readAutomaticClaudeOAuthCredentials(
+                    pinnedItem: pinnedItem,
+                    attemptedItem: &attemptedItem
+                )
+            } catch {
+                recordClaudeKeychainFailure(
+                    error,
+                    item: attemptedItem,
+                    resolveItemIfNeeded: false
+                )
+            }
         }
+    }
 
-        statusMessage = "Updating keychain access…"
-        for attempt in 0..<3 {
-            let result = await runKeychainRepair(
-                repair,
-                csv: csv,
-                added: added,
-                password: password
+    /// The sole prompt-capable path for Claude's provider-owned item. macOS
+    /// owns the password UI; choosing Always Allow updates the standard ACL and
+    /// caller partition together. A fresh noninteractive exact-item read is the
+    /// only success condition.
+    @discardableResult
+    func authorizeClaudeKeychainAccess(
+        reason: String = "to stop repeated password prompts",
+        allowDuringCredentialMutation: Bool = false
+    ) async -> Bool {
+        let result = await CredentialAccess.withWorkflowCounter { counter, ownsScope in
+            let result = await authorizeClaudeKeychainAccessImpl(
+                reason: reason,
+                allowDuringCredentialMutation: allowDuringCredentialMutation
             )
-            if let outcome = result.outcome {
-                confirmKeychainPartitionComplete()
-                switch outcome {
-                case .alreadyComplete:
-                    statusMessage = "Keychain access is already set up — no changes needed."
-                case .repaired:
-                    statusMessage = "Fixed repeated keychain prompts — switching accounts won't ask for your password anymore."
+            if ownsScope {
+                let workflowStatus: String
+                switch claudeKeychainAuthorizationState {
+                case .ready:
+                    workflowStatus = result ? "ready" : "aborted"
+                case .needsAuthorization(_, let disposition):
+                    workflowStatus = disposition == .userCancelled
+                        ? "cancelled"
+                        : "needs_authorization"
+                case .notFound:
+                    workflowStatus = "not_found"
+                case .failed:
+                    workflowStatus = "failed"
+                case .unknown, .authorizing:
+                    workflowStatus = "aborted"
                 }
+                logCredentialWorkflow(
+                    workflow: "authorize",
+                    provider: .claude,
+                    origin: "explicit_action",
+                    access: "mixed",
+                    status: workflowStatus,
+                    counts: counter.snapshot
+                )
+            }
+            return result
+        }
+        if result, !allowDuringCredentialMutation {
+            await CredentialAccess.independentWorkflow {
+                await resumePendingClaudeLoginCompletionIfPossible()
+            }
+        }
+        return result
+    }
+
+    private func authorizeClaudeKeychainAccessImpl(
+        reason: String,
+        allowDuringCredentialMutation: Bool
+    ) async -> Bool {
+        guard !claudeAuthorizationInProgress else {
+            return false
+        }
+        var standaloneMutationOwner: UUID?
+        if allowDuringCredentialMutation {
+            guard credentialMutationsInProgress[.claude] != nil else {
+                statusMessage = "Could not reuse the Claude credential operation. Retry the original action."
+                return false
+            }
+        } else {
+            guard let owner = beginCredentialMutation(for: .claude) else {
+                statusMessage = "Wait for the current Claude credential operation to finish, then authorize the resulting item."
+                return false
+            }
+            standaloneMutationOwner = owner
+        }
+        claudeAuthorizationInProgress = true
+        defer {
+            claudeAuthorizationInProgress = false
+            if let owner = standaloneMutationOwner {
+                finishCredentialMutation(for: .claude, owner: owner)
+            }
+        }
+
+        func deferPendingLoginResumeIfNeeded() {
+            if allowDuringCredentialMutation,
+               pendingClaudeLoginCompletion != nil {
+                // The enclosing switch/capture owns the gate. Resume only
+                // after it releases so the pending login remains single-flight.
+                deferredClaudeLoginResume = true
+            }
+        }
+
+        var resolvedLocation: ClaudeKeychainItemLocation?
+        do {
+            guard let resolved = try cliSwitcher.locateClaudeKeychainItem(accessMode: .nonInteractive) else {
+                claudeKeychainAuthorizationState = .notFound
+                statusMessage = "Claude Code is not logged in."
+                showError(
+                    message: "No Claude Code credential was found",
+                    details: "Log in with `claude` (/login), then authorize Keychain access."
+                )
+                return false
+            }
+            resolvedLocation = resolved
+            if try cliSwitcher.readClaudeKeychainItem(at: resolved, accessMode: .nonInteractive) != nil {
+                claudeKeychainAuthorizationState = .ready(resolved)
+                statusMessage = "Keychain access is already authorized."
+                deferPendingLoginResumeIfNeeded()
                 return true
             }
-            if result.wrongPassword, attempt < 2 {
-                guard let retry = promptForLoginKeychainPassword(
-                    message: "That login password was not correct. Enter your macOS login password to authorize the keychain change."
-                ) else {
-                    statusMessage = "Keychain repair cancelled."
-                    return false
-                }
-                password = retry
-                continue
+        } catch {
+            let disposition = credentialAccessDisposition(for: error)
+            if disposition != .interactionRequired {
+                recordClaudeKeychainFailure(error, item: resolvedLocation)
+                showClaudeAuthorizationFailure(error)
+                return false
             }
-            showError(
-                message: "Could not stop the keychain prompts",
-                details: result.message ?? "The keychain partition list could not be updated."
-            )
-            statusMessage = "Could not update keychain access."
+            // Keep the exact generation that produced the denial. A broad
+            // rediscovery here could silently redirect the one interactive
+            // read to a replacement item that never passed this preflight.
+            guard resolvedLocation != nil else {
+                recordClaudeKeychainFailure(error)
+                showClaudeAuthorizationFailure(error)
+                return false
+            }
+        }
+        guard let location = resolvedLocation else {
+            claudeKeychainAuthorizationState = .failed(message: "Could not resolve the Claude Code credential item.")
             return false
         }
-        return false
+
+        claudeKeychainAuthorizationState = .authorizing(location)
+        let explanation = NSAlert()
+        explanation.messageText = "Authorize Limit Lifeboat once"
+        if hasNondurableDevelopmentSignature {
+            explanation.informativeText = "macOS will ask for your login password \(reason). This development build is not signed with a stable Apple Development identity, so even Always Allow is valid only for this exact build and may be requested again after rebuilding."
+        } else {
+            explanation.informativeText = "macOS will ask for your login password \(reason). Enter it once, then choose Always Allow. Choosing only Allow will not stop future prompts."
+        }
+        explanation.addButton(withTitle: "Continue")
+        explanation.addButton(withTitle: "Cancel")
+        guard explanation.runModalActivating() == .alertFirstButtonReturn else {
+            claudeKeychainAuthorizationState = .needsAuthorization(
+                item: location,
+                disposition: .userCancelled
+            )
+            statusMessage = "Keychain authorization cancelled."
+            return false
+        }
+
+        do {
+            let authorizedData = try CredentialAccess.userInitiated(
+                reason: "authorize Limit Lifeboat for Claude Code credentials",
+                operation: {
+                    try cliSwitcher.readClaudeKeychainItem(at: location, accessMode: .userInitiated)
+                }
+            )
+            guard authorizedData != nil else {
+                throw ClaudeCodeCredentialsKeychainError.missingLiveItem
+            }
+
+            guard let freshLocation = try cliSwitcher.locateClaudeKeychainItem(accessMode: .nonInteractive),
+                  freshLocation.identity == location.identity,
+                  try cliSwitcher.readClaudeKeychainItem(
+                      at: freshLocation,
+                      accessMode: .nonInteractive
+                  ) != nil else {
+                claudeKeychainAuthorizationState = .needsAuthorization(
+                    item: location,
+                    disposition: .interactionRequired
+                )
+                statusMessage = "Access was allowed once but was not saved. Choose Always Allow when you retry."
+                return false
+            }
+            claudeKeychainAuthorizationState = .ready(freshLocation)
+            statusMessage = hasNondurableDevelopmentSignature
+                ? "Keychain access authorized for this development build only. Use an Apple Development signature for durable approval."
+                : "Keychain access authorized. Future background checks will not ask for your password."
+            deferPendingLoginResumeIfNeeded()
+            return true
+        } catch {
+            recordClaudeKeychainFailure(error, item: location)
+            if credentialAccessDisposition(for: error) != .userCancelled {
+                showClaudeAuthorizationFailure(error)
+            } else {
+                statusMessage = "Keychain authorization cancelled."
+            }
+            return false
+        }
     }
 
-    /// Modal secure-entry prompt for the login-keychain password. The value is
-    /// read straight into the repair call and is never stored on `self` or
-    /// logged.
-    private func promptForLoginKeychainPassword(message: String) -> String? {
-        let alert = NSAlert()
-        alert.messageText = "Stop repeated keychain prompts"
-        alert.informativeText = message
-        alert.addButton(withTitle: "Authorize")
-        alert.addButton(withTitle: "Cancel")
-
-        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
-        field.placeholderString = "macOS login password"
-        alert.accessoryView = field
-        alert.window.initialFirstResponder = field
-
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-        let value = field.stringValue
-        return value.isEmpty ? nil : value
-    }
-
-    func captureCLISnapshot(for profile: AccountProfile) {
-        if CredentialAccess.currentMode != .userInitiated {
-            CredentialAccess.userInitiated(
-                reason: "save CLI credentials for \(profile.label)"
-            ) {
-                captureCLISnapshot(for: profile)
+    private func recordSuccessfulClaudeKeychainRead(_ observation: LiveCredentialObservation) {
+        guard let location = observation.claudeKeychainItemLocation else {
+            if !observation.isLoggedIn {
+                claudeKeychainAuthorizationState = .notFound
             }
             return
         }
+        // ClaudeCredentialAdapter only attaches a location after the secret
+        // data read of that exact persistent item succeeds. No metadata-only
+        // follow-up is allowed to mark a replacement item ready.
+        claudeKeychainAuthorizationState = .ready(location)
+    }
 
+    private func resumePendingClaudeLoginCompletionIfPossible() async {
+        guard let pending = pendingClaudeLoginCompletion else {
+            deferredClaudeLoginResume = false
+            return
+        }
+        guard let mutationOwner = beginCredentialMutation(for: .claude) else {
+            deferredClaudeLoginResume = true
+            return
+        }
+        deferredClaudeLoginResume = false
+        var watcherOwnsMutation = false
+        defer {
+            if !watcherOwnsMutation {
+                finishCredentialMutation(for: .claude, owner: mutationOwner)
+            }
+        }
+        let result = await CredentialAccess.nonInteractive {
+            await refreshAfterCompletedLogin(
+                profileID: pending.profileID,
+                provider: .claude,
+                initialBaseline: pending.initialBaseline,
+                activateAfterLogin: pending.activateAfterLogin,
+                previousActiveID: pending.previousActiveID
+            )
+        }
+        switch result {
+        case .completed:
+            pendingClaudeLoginCompletion = nil
+        case .pending:
+            statusMessage = "Keychain access is authorized. Waiting for Claude Code to finish writing the login."
+            do {
+                let currentStamp = try loginCredentialMetadataStamp(provider: .claude)
+                watchForCompletedLogin(
+                    profileID: pending.profileID,
+                    provider: .claude,
+                    initialBaseline: pending.initialBaseline,
+                    initialMetadataStamp: currentStamp,
+                    activateAfterLogin: pending.activateAfterLogin,
+                    previousActiveID: pending.previousActiveID
+                )
+                watcherOwnsMutation = loginFollowUpTasks[.claude] != nil
+            } catch {
+                recordClaudeKeychainFailure(error)
+                statusMessage = "Could not resume the Claude login watcher: \(error.localizedDescription)"
+            }
+        case .authorizationRequired:
+            statusMessage = "The Claude credential changed again. Authorize the new item before linking it."
+        }
+    }
+
+    private func recordClaudeKeychainFailure(
+        _ error: Error,
+        item suppliedItem: ClaudeKeychainItemLocation? = nil,
+        resolveItemIfNeeded: Bool = true
+    ) {
+        let item = suppliedItem ?? (resolveItemIfNeeded
+            ? (try? cliSwitcher.locateClaudeKeychainItem(accessMode: .nonInteractive))
+            : nil)
+        guard let disposition = credentialAccessDisposition(for: error) else {
+            if case .needsAuthorization = claudeKeychainAuthorizationState {
+                return
+            }
+            claudeKeychainAuthorizationState = .failed(message: error.localizedDescription)
+            return
+        }
+        recordClaudeKeychainDisposition(
+            disposition,
+            item: item,
+            failureMessage: error.localizedDescription
+        )
+    }
+
+    private func recordClaudeKeychainDisposition(
+        _ disposition: CredentialAccessDisposition,
+        item: ClaudeKeychainItemLocation?,
+        failureMessage: String = "macOS Keychain access is unavailable for the Claude credential item."
+    ) {
+        switch disposition {
+        case .interactionRequired, .userCancelled:
+            claudeKeychainAuthorizationState = .needsAuthorization(
+                item: item,
+                disposition: disposition
+            )
+        case .codeSignatureInvalid:
+            claudeKeychainAuthorizationState = .failed(
+                message: "macOS could not verify this app's signature. Quit workspace builds and relaunch the installed app."
+            )
+        case .unavailable, .other:
+            // An inconclusive follow-up must not erase a known denial.
+            if case .needsAuthorization = claudeKeychainAuthorizationState {
+                return
+            }
+            claudeKeychainAuthorizationState = .failed(message: failureMessage)
+        }
+    }
+
+    private func credentialAccessDisposition(for error: Error) -> CredentialAccessDisposition? {
+        if let error = error as? ClaudeCodeCredentialsKeychainError {
+            return error.credentialAccessDisposition
+        }
+        if let error = error as? CredentialStoreError {
+            return error.credentialAccessDisposition
+        }
+        if let error = error as? CLISwitcherError {
+            return error.credentialAccessDisposition
+        }
+        return nil
+    }
+
+    /// True for interaction-required or signature failures, but not a user
+    /// cancellation; cancellation must never trigger another automatic prompt.
+    private func isKeychainAccessDenied(_ error: Error) -> Bool {
+        guard let disposition = credentialAccessDisposition(for: error) else {
+            return false
+        }
+        return disposition.isAccessDenied && disposition != .userCancelled
+    }
+
+    private func showClaudeAuthorizationFailure(_ error: Error) {
+        let details: String
+        switch credentialAccessDisposition(for: error) {
+        case .interactionRequired:
+            details = "Access did not persist. Retry once and select Always Allow. If it still fails, quit workspace builds and relaunch /Applications/Limit Lifeboat.app."
+        case .codeSignatureInvalid:
+            details = "Quit any workspace copies and relaunch the stable installed app before retrying."
+        default:
+            details = error.localizedDescription
+        }
+        showError(message: "Could not authorize Keychain access", details: details)
+    }
+
+    func captureCLISnapshot(for profile: AccountProfile) {
+        guard let mutationOwner = beginCredentialMutation(for: profile.provider) else {
+            statusMessage = "A \(profile.provider.displayName) credential operation is already in progress."
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            let counter = CredentialKeychainIOCounter()
+            var workflowStatus = "aborted"
+            defer {
+                self.finishCredentialMutation(
+                    for: profile.provider,
+                    owner: mutationOwner
+                )
+            }
+            await CredentialAccess.counting(counter) {
+                defer {
+                    self.logCredentialWorkflow(
+                        workflow: "snapshot_capture",
+                        provider: profile.provider,
+                        origin: "explicit_action",
+                        access: profile.provider == .claude ? "mixed" : "noninteractive",
+                        status: workflowStatus,
+                        counts: counter.snapshot
+                    )
+                }
+                if profile.provider == .claude,
+                   !(await self.authorizeClaudeKeychainAccess(
+                        reason: "before saving \(profile.label)",
+                        allowDuringCredentialMutation: true
+                   )) {
+                    workflowStatus = "authorization_required"
+                    return
+                }
+                let captured = await CredentialAccess.nonInteractive {
+                    self.captureCLISnapshotPrepared(for: profile)
+                }
+                workflowStatus = captured ? "completed" : "failed"
+            }
+        }
+    }
+
+    private func captureCLISnapshotPrepared(for profile: AccountProfile) -> Bool {
         guard profile.isActiveCLI else {
             showError(
                 message: "Capture cancelled",
                 details: "Only the active terminal account can be captured. Refresh to reconcile the current login first."
             )
-            return
+            return false
         }
         do {
             let observation = try cliSwitcher.stableLiveObservation(provider: profile.provider)
@@ -1752,9 +2832,11 @@ final class AppState: ObservableObject {
             _ = try reconcileLiveCredentials(provider: profile.provider, origin: .manualCapture, observation: observation)
             statusMessage = "Captured \(profile.provider.displayName) CLI credentials for \(profile.label)."
             storedSnapshotStatuses[profile.id] = .present
+            return true
         } catch {
             statusMessage = "Capture failed for \(profile.label): \(error.localizedDescription)"
             showError(message: "Capture failed", details: error.localizedDescription)
+            return false
         }
     }
 
@@ -1779,36 +2861,81 @@ final class AppState: ObservableObject {
     private func refreshStoredSnapshotStatuses() {
         var statuses: [UUID: StoredSnapshotStatus] = [:]
         var expirations: [UUID: Date] = [:]
-        for profile in profiles {
-            statuses[profile.id] = readStoredSnapshotStatus(for: profile)
-            if profile.provider == .claude,
-               let credentials = try? cliSwitcher.storedClaudeOAuthCredentials(for: profile.id),
-               let expiresAt = credentials.refreshTokenExpiresAt {
-                expirations[profile.id] = expiresAt
+        for provider in Provider.allCases {
+            let counter = CredentialKeychainIOCounter()
+            var providerLocked = false
+            CredentialAccess.counting(counter) {
+                for profile in profiles where profile.provider == provider {
+                    do {
+                        if let record = try cliSwitcher.storedCredentialRecord(for: profile) {
+                            statuses[profile.id] = record.summary.isRestorable ? .present : .absent
+                            if let expiresAt = record.summary.claudeRefreshTokenExpiresAt {
+                                expirations[profile.id] = expiresAt
+                            }
+                        } else {
+                            statuses[profile.id] = .absent
+                        }
+                    } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
+                        statuses[profile.id] = .locked
+                        providerLocked = true
+                    } catch {
+                        statuses[profile.id] = .absent
+                    }
+                }
             }
+            logCredentialWorkflow(
+                workflow: "snapshot_inventory",
+                provider: provider,
+                origin: "launch",
+                access: "noninteractive",
+                status: providerLocked ? "partial" : "completed",
+                counts: counter.snapshot
+            )
         }
         storedSnapshotStatuses = statuses
         claudeLoginExpirations = expirations
     }
 
-    private func refreshClaudeLoginExpiration(for profile: AccountProfile) {
-        guard profile.provider == .claude else {
-            claudeLoginExpirations[profile.id] = nil
-            return
+    private func cacheStoredSnapshotSummary(_ snapshot: CredentialSnapshot, for profile: AccountProfile) {
+        storedSnapshotStatuses[profile.id] = .present
+        guard profile.provider == .claude else { return }
+        let item = snapshot.items.first(where: { $0.kind == .keychainJSONFields })
+        claudeLoginExpirations[profile.id] = item.flatMap {
+            ClaudeOAuthCredentials(claudeAiOauthJSON: $0.contents)?.refreshTokenExpiresAt
         }
-        do {
-            claudeLoginExpirations[profile.id] = try cliSwitcher
-                .storedClaudeOAuthCredentials(for: profile.id)?
-                .refreshTokenExpiresAt
-        } catch {
-            // Keep an existing cached warning through a transient Keychain
-            // denial; the credential status reports that problem separately.
+    }
+
+    private func cacheStoredCredentialSummary(
+        _ record: StoredCredentialRecord?,
+        for profile: AccountProfile
+    ) {
+        storedSnapshotStatuses[profile.id] = record?.summary.isRestorable == true
+            ? .present
+            : .absent
+        if profile.provider == .claude {
+            claudeLoginExpirations[profile.id] = record?.summary.claudeRefreshTokenExpiresAt
         }
+    }
+
+    private func updatedClaudeStoredRecord(
+        _ record: StoredCredentialRecord,
+        replacing credentials: ClaudeOAuthCredentials
+    ) -> StoredCredentialRecord {
+        var snapshot = record.snapshot
+        guard let index = snapshot.items.firstIndex(where: {
+            $0.kind == .keychainJSONFields
+        }) else {
+            return record
+        }
+        snapshot.items[index].contents = credentials.rawClaudeAiOauth
+        return cliSwitcher.makeStoredCredentialRecord(from: snapshot)
     }
 
     private func readStoredSnapshotStatus(for profile: AccountProfile) -> StoredSnapshotStatus {
         do {
-            return try cliSwitcher.hasRestorableSnapshot(for: profile) ? .present : .absent
+            return try cliSwitcher.storedCredentialRecord(for: profile)?.summary.isRestorable == true
+                ? .present
+                : .absent
         } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
             return .locked
         } catch {
@@ -1823,13 +2950,88 @@ final class AppState: ObservableObject {
     /// Row-level "try again" for an account whose last refresh failed.
     func retryRefresh(for profile: AccountProfile) {
         Task {
-            await CredentialAccess.userInitiated(
-                reason: "access saved credentials for \(profile.label)"
-            ) {
-                await retryRefreshInteractively(for: profile)
+            let counter = CredentialKeychainIOCounter()
+            var workflowStatus = "aborted"
+            await CredentialAccess.counting(counter) {
+                defer {
+                    logCredentialWorkflow(
+                        workflow: "usage_retry",
+                        provider: profile.provider,
+                        origin: "explicit_action",
+                        access: "noninteractive",
+                        status: workflowStatus,
+                        counts: counter.snapshot
+                    )
+                }
+                guard let mutationOwner = beginCredentialMutation(for: profile.provider) else {
+                    workflowStatus = "deferred"
+                    statusMessage = "A \(profile.provider.displayName) credential operation is already in progress."
+                    return
+                }
+                if profile.provider == .claude, profile.isActiveCLI {
+                    switch automaticClaudeLiveAccess() {
+                    case .read(let pinnedItem):
+                        if let pinnedItem {
+                            var attemptedItem: ClaudeKeychainItemLocation? = pinnedItem
+                            do {
+                                _ = try readAutomaticClaudeOAuthCredentials(
+                                    pinnedItem: pinnedItem,
+                                    attemptedItem: &attemptedItem
+                                )
+                            } catch {
+                                recordClaudeKeychainFailure(
+                                    error,
+                                    item: attemptedItem,
+                                    resolveItemIfNeeded: false
+                                )
+                                refreshStates[profile.id] = isKeychainAccessDenied(error)
+                                    ? .keychainLocked
+                                    : .readFailed(reason: error.localizedDescription)
+                                statusMessage = "Retry stopped because the changed Claude credential could not be verified."
+                                workflowStatus = isKeychainAccessDenied(error)
+                                    ? "authorization_required"
+                                    : "credential_unavailable"
+                                finishCredentialMutation(
+                                    for: profile.provider,
+                                    owner: mutationOwner
+                                )
+                                return
+                            }
+                        }
+                    case .knownDenied, .unavailable:
+                        refreshStates[profile.id] = .keychainLocked
+                        statusMessage = "Retry stopped. Authorize Claude Keychain access from the More menu first."
+                        workflowStatus = "authorization_required"
+                        finishCredentialMutation(
+                            for: profile.provider,
+                            owner: mutationOwner
+                        )
+                        return
+                    }
+                }
+                await CredentialAccess.nonInteractive {
+                    await retryRefreshInteractively(for: profile)
+                }
+                let loginReason: String?
+                if case .needsLogin(let reason) = refreshStates[profile.id] {
+                    loginReason = reason
+                } else {
+                    loginReason = nil
+                }
+                finishCredentialMutation(for: profile.provider, owner: mutationOwner)
+                if let loginReason {
+                    workflowStatus = "needs_login"
+                    handleLoginRequired(for: profile, reason: loginReason, interactive: true)
+                } else if case .ok = refreshStates[profile.id] {
+                    workflowStatus = "completed"
+                } else if case .keychainLocked = refreshStates[profile.id] {
+                    workflowStatus = "authorization_required"
+                } else {
+                    workflowStatus = "failed"
+                }
+                updateSwitchAdvice()
+                updateMenuBarSummary()
             }
-            updateSwitchAdvice()
-            updateMenuBarSummary()
         }
     }
 
@@ -1837,6 +3039,41 @@ final class AppState: ObservableObject {
         guard !isRefreshing else { return }
         isRefreshing = true
         defer { isRefreshing = false }
+
+        var retryLiveRecord: LiveClaudeOAuthCredentialRecord?
+        if profile.provider == .claude, profile.isActiveCLI {
+            do {
+                let observation = try cliSwitcher.stableLiveObservation(
+                    provider: .claude,
+                    accessMode: .nonInteractive
+                )
+                retryLiveRecord = try cliSwitcher.claudeOAuthCredentialRecord(
+                    from: observation
+                )
+                let resolved = try reconcileLiveCredentials(
+                    provider: .claude,
+                    origin: .manualCapture,
+                    observation: observation
+                )
+                guard resolved?.id == profile.id,
+                      activeProfile(for: .claude)?.id == profile.id else {
+                    refreshStates[profile.id] = .readFailed(
+                        reason: "The active Claude account changed before Retry. Its credentials were left untouched; retry from the account that is active now."
+                    )
+                    statusMessage = "Retry stopped because Claude switched to a different account."
+                    return
+                }
+            } catch {
+                if error is ClaudeCodeCredentialsKeychainError {
+                    recordClaudeKeychainFailure(error)
+                }
+                refreshStates[profile.id] = isKeychainAccessDenied(error)
+                    ? .keychainLocked
+                    : .readFailed(reason: error.localizedDescription)
+                statusMessage = "Retry stopped before changing Claude credentials: \(error.localizedDescription)"
+                return
+            }
+        }
 
         let storedStatus = readStoredSnapshotStatus(for: profile)
         storedSnapshotStatuses[profile.id] = storedStatus
@@ -1849,19 +3086,42 @@ final class AppState: ObservableObject {
         case .claude:
             lastClaudeRefreshAttempt = Date()
             refreshStates[profile.id] = .refreshing
+            var resolvedUsageCredentials: ClaudeOAuthCredentials?
             do {
                 let snapshot = try await claudeUsageService.fetchSnapshot(
                     for: profile,
-                    isActiveCLI: profile.isActiveCLI
+                    isActiveCLI: profile.isActiveCLI,
+                    userExplicitlyRequestedRefresh: true,
+                    liveCredentialReadPolicy: profile.isActiveCLI
+                        ? .preloaded(retryLiveRecord)
+                        : .read,
+                    credentialDidResolve: { resolvedUsageCredentials = $0 }
                 )
-                refreshClaudeLoginExpiration(for: profile)
                 applySnapshot(snapshot, for: profile)
-                await enrichAccountInfoIfMissing(for: profile)
+                await enrichAccountInfoIfMissing(
+                    for: profile,
+                    liveCredentialReadPolicy: profile.isActiveCLI
+                        ? .preloaded(retryLiveRecord)
+                        : nil,
+                    resolvedCredentials: resolvedUsageCredentials
+                )
             } catch {
                 let fetchError = (error as? ClaudeAccountUsageFetchError) ?? .transport(error)
+                if case .liveCredentialAccessDenied(let underlying, let item) = fetchError {
+                    recordClaudeKeychainFailure(
+                        underlying,
+                        item: item,
+                        resolveItemIfNeeded: false
+                    )
+                }
                 let outcome = RefreshOutcomePolicy.outcome(for: fetchError, isActiveCLI: profile.isActiveCLI)
                 if outcome.attemptTUIFallback {
-                    await refreshActiveClaudeCodeUsage(onFailure: outcome.state, for: profile)
+                    await refreshActiveClaudeCodeUsage(
+                        onFailure: outcome.state,
+                        for: profile,
+                        resolvedUsageCredentials: resolvedUsageCredentials,
+                        usageCredentialWasResolved: resolvedUsageCredentials != nil
+                    )
                 } else {
                     refreshStates[profile.id] = outcome.state
                 }
@@ -1878,9 +3138,6 @@ final class AppState: ObservableObject {
             }
         }
 
-        if case .needsLogin(let reason) = refreshStates[profile.id] {
-            handleLoginRequired(for: profile, reason: reason, interactive: true)
-        }
     }
 
     func validateActiveLogin(provider: Provider) -> Bool {
@@ -1895,23 +3152,100 @@ final class AppState: ObservableObject {
     }
 
     func beginCLILogin(for profile: AccountProfile, activateAfterLogin: Bool = true) {
-        if CredentialAccess.currentMode != .userInitiated {
-            CredentialAccess.userInitiated(
-                reason: "prepare \(profile.label) for CLI login"
-            ) {
-                beginCLILogin(for: profile, activateAfterLogin: activateAfterLogin)
-            }
+        guard let mutationOwner = beginCredentialMutation(for: profile.provider) else {
+            statusMessage = "A \(profile.provider.displayName) credential operation is already in progress."
             return
         }
+        if profile.provider == .claude {
+            pendingClaudeLoginCompletion = nil
+            deferredClaudeLoginResume = false
+        }
 
-        let initialObservation = try? cliSwitcher.stableLiveObservation(provider: profile.provider)
+        Task { [weak self] in
+            guard let self else { return }
+            let counter = CredentialKeychainIOCounter()
+            let started = await CredentialAccess.counting(counter) {
+                await CredentialAccess.nonInteractive {
+                    self.beginCLILoginPrepared(
+                        for: profile,
+                        activateAfterLogin: activateAfterLogin
+                    )
+                }
+            }
+            self.logCredentialWorkflow(
+                workflow: "login_launch",
+                provider: profile.provider,
+                origin: "explicit_action",
+                access: "noninteractive",
+                status: started ? "launched" : "launch_failed",
+                counts: counter.snapshot
+            )
+            if !started {
+                self.finishCredentialMutation(
+                    for: profile.provider,
+                    owner: mutationOwner
+                )
+            }
+        }
+    }
 
+    /// Performs prompt-free preparation. Claude authorization is deliberately
+    /// deferred until after login changes or replaces the item, so a single
+    /// login cannot ask once for the old item and again for the new one.
+    /// Returns whether a completion watcher now owns the provider mutation
+    /// slot.
+    private func beginCLILoginPrepared(
+        for profile: AccountProfile,
+        activateAfterLogin: Bool
+    ) -> Bool {
         // Not switching is only meaningful when there is a *different* active
         // account to preserve. With no active account (first login) or when
         // re-authenticating the account that is already active, fall back to
         // the normal activating login.
         let previousActiveID = activeProfile(for: profile.provider)?.id
         let activate = activateAfterLogin || previousActiveID == nil || previousActiveID == profile.id
+
+        let initialObservation: LiveCredentialObservation?
+        do {
+            initialObservation = try cliSwitcher.stableLiveObservation(
+                provider: profile.provider,
+                accessMode: .nonInteractive
+            )
+        } catch {
+            if profile.provider == .claude {
+                recordClaudeKeychainFailure(error)
+                if isKeychainAccessDenied(error), activate {
+                    // An activating login may safely replace an unreadable old
+                    // item. The watcher authorizes only the resulting item.
+                    initialObservation = nil
+                } else {
+                    showClaudeAuthorizationFailure(error)
+                    return false
+                }
+            } else {
+                statusMessage = "Could not inspect the current \(profile.provider.displayName) login: \(error.localizedDescription)"
+                return false
+            }
+        }
+        let initialBaseline = initialObservation.map {
+            LoginObservationBaseline(
+                identity: $0.identity,
+                credentialFingerprint: $0.credentialFingerprint,
+                claudeKeychainPayloadFingerprint: $0.claudeKeychainPayloadFingerprint
+            )
+        }
+        let initialMetadataStamp: LoginCredentialMetadataStamp?
+        do {
+            initialMetadataStamp = try loginCredentialMetadataStamp(provider: profile.provider)
+        } catch {
+            if profile.provider == .claude {
+                recordClaudeKeychainFailure(error)
+                showClaudeAuthorizationFailure(error)
+            } else {
+                statusMessage = "Could not inspect the current \(profile.provider.displayName) login: \(error.localizedDescription)"
+            }
+            return false
+        }
 
         // Codex accounts share the single `~/.codex/auth.json`, so a bare
         // `codex login` launched while another account is signed in runs
@@ -1935,7 +3269,7 @@ final class AppState: ObservableObject {
                     message: "Could not safely start \(profile.provider.displayName) login",
                     details: "The current account was not touched because its credentials could not be captured. \(error.localizedDescription)"
                 )
-                return
+                return false
             }
         }
         let command = terminalLoginCommand(
@@ -1957,8 +3291,8 @@ final class AppState: ObservableObject {
         let appleScriptError = terminalLauncher.runViaAutomation(launchedCommand)
         if appleScriptError == nil {
             statusMessage = "Started login for \(profile.label). \(linkNote)"
-            watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialObservation: initialObservation, activateAfterLogin: activate, previousActiveID: previousActiveID)
-            return
+            watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialBaseline: initialBaseline, initialMetadataStamp: initialMetadataStamp, activateAfterLogin: activate, previousActiveID: previousActiveID)
+            return true
         }
 
         // AppleScript failed — most commonly because Terminal Automation
@@ -1968,8 +3302,8 @@ final class AppState: ObservableObject {
         // Apple Events permission.
         if terminalLauncher.runViaCommandFile(launchedCommand) {
             statusMessage = "Opened Terminal to log in \(profile.label). \(linkNote)"
-            watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialObservation: initialObservation, activateAfterLogin: activate, previousActiveID: previousActiveID)
-            return
+            watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialBaseline: initialBaseline, initialMetadataStamp: initialMetadataStamp, activateAfterLogin: activate, previousActiveID: previousActiveID)
+            return true
         }
 
         // Last resort: copy the command and open a bare Terminal for the user
@@ -1979,7 +3313,8 @@ final class AppState: ObservableObject {
         statusMessage = appleScriptError
             ?? "Copied the login command. Paste it into Terminal; \(linkNote.prefix(1).lowercased() + linkNote.dropFirst())"
         terminalLauncher.open()
-        watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialObservation: initialObservation, activateAfterLogin: activate, previousActiveID: previousActiveID)
+        watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialBaseline: initialBaseline, initialMetadataStamp: initialMetadataStamp, activateAfterLogin: activate, previousActiveID: previousActiveID)
+        return true
     }
 
     /// Builds the CLI login command, prefixed with a PATH export so the
@@ -2006,65 +3341,385 @@ final class AppState: ObservableObject {
         return "\(pathExport); \(base)"
     }
 
+    private struct LoginFileMetadataStamp: Equatable {
+        var exists: Bool
+        var modificationDate: Date?
+        var size: UInt64?
+        var fileNumber: UInt64?
+    }
+
+    private struct LoginCredentialMetadataStamp: Equatable {
+        var claudeItemLocation: ClaudeKeychainItemLocation?
+        var files: [LoginFileMetadataStamp]
+
+        var claudeItem: ClaudeKeychainItemModificationStamp? {
+            claudeItemLocation?.modificationStamp
+        }
+    }
+
+    private struct LoginObservationBaseline {
+        var identity: AccountIdentity?
+        var credentialFingerprint: String?
+        var claudeKeychainPayloadFingerprint: String?
+    }
+
+    private struct PendingClaudeLoginCompletion {
+        var profileID: UUID
+        var initialBaseline: LoginObservationBaseline?
+        var activateAfterLogin: Bool
+        var previousActiveID: UUID?
+    }
+
+    /// Metadata-only signal used by the login watcher. Secret data is read
+    /// only after one of these values changes.
+    private func loginCredentialMetadataStamp(provider: Provider) throws -> LoginCredentialMetadataStamp {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let fileURLs: [URL]
+        let claudeItemLocation: ClaudeKeychainItemLocation?
+        switch provider {
+        case .claude:
+            claudeItemLocation = try cliSwitcher
+                .locateClaudeKeychainItem(accessMode: .nonInteractive)
+            fileURLs = [
+                home.appendingPathComponent(".claude.json"),
+                home.appendingPathComponent("Library/Application Support/Claude/config.json")
+            ]
+        case .codex:
+            claudeItemLocation = nil
+            fileURLs = [home.appendingPathComponent(".codex/auth.json")]
+        }
+        return LoginCredentialMetadataStamp(
+            claudeItemLocation: claudeItemLocation,
+            files: fileURLs.map(loginFileMetadataStamp)
+        )
+    }
+
+    private func loginFileMetadataStamp(_ url: URL) -> LoginFileMetadataStamp {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else {
+            return LoginFileMetadataStamp(
+                exists: false,
+                modificationDate: nil,
+                size: nil,
+                fileNumber: nil
+            )
+        }
+        return LoginFileMetadataStamp(
+            exists: true,
+            modificationDate: attributes[.modificationDate] as? Date,
+            size: (attributes[.size] as? NSNumber)?.uint64Value,
+            fileNumber: (attributes[.systemFileNumber] as? NSNumber)?.uint64Value
+        )
+    }
+
+    private enum LoginCompletionPollResult {
+        case pending
+        case completed
+        case authorizationRequired
+    }
+
     private func watchForCompletedLogin(
         profileID: UUID,
         provider: Provider,
-        initialObservation: LiveCredentialObservation?,
+        initialBaseline: LoginObservationBaseline?,
+        initialMetadataStamp: LoginCredentialMetadataStamp?,
         activateAfterLogin: Bool,
         previousActiveID: UUID?
     ) {
+        guard let mutationOwner = credentialMutationsInProgress[provider] else {
+            return
+        }
         loginFollowUpTasks[provider]?.cancel()
-        loginFollowUpTasks[provider] = Task { [weak self] in
-            for _ in 0..<60 {
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
-                guard !Task.isCancelled else {
-                    return
-                }
+        loginFollowUpTasks[provider] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let counter = CredentialKeychainIOCounter()
+            var workflowStatus = "timeout"
+            defer {
+                self.finishCredentialMutation(for: provider, owner: mutationOwner)
+                self.loginFollowUpTasks[provider] = nil
+            }
+            await CredentialAccess.counting(counter) {
+                await CredentialAccess.nonInteractive {
+                    var lastAttemptedStamp = initialMetadataStamp
+                    var claudeMetadataGate = CredentialMetadataStabilityGate<
+                        ClaudeKeychainItemModificationStamp?,
+                        [LoginFileMetadataStamp]
+                    >(
+                        lastAttemptedItem: initialMetadataStamp?.claudeItem,
+                        initialSettle: initialMetadataStamp?.files,
+                        // A settled filesystem change may cover a same-second
+                        // Keychain overwrite only when the readable baseline
+                        // lets the payload fingerprint below reject stale data.
+                        // A denied baseline still requires an item-stamp change.
+                        allowSettledFallbackRead: initialBaseline?
+                            .claudeKeychainPayloadFingerprint != nil
+                    )
+                    var cachedClaudeObservation: LiveCredentialObservation?
+                    for _ in 0..<60 {
+                        try? await Task.sleep(nanoseconds: 3_000_000_000)
+                        guard !Task.isCancelled else {
+                            workflowStatus = "cancelled"
+                            return
+                        }
 
-                let linked = await self?.refreshAfterCompletedLogin(
-                    profileID: profileID,
-                    provider: provider,
-                    initialObservation: initialObservation,
-                    activateAfterLogin: activateAfterLogin,
-                    previousActiveID: previousActiveID
-                ) ?? true
-                if linked {
-                    return
+                    let currentStamp: LoginCredentialMetadataStamp
+                    do {
+                        currentStamp = try self.loginCredentialMetadataStamp(provider: provider)
+                    } catch {
+                        if provider == .claude {
+                            self.recordClaudeKeychainFailure(error)
+                        }
+                        workflowStatus = provider == .claude
+                            && self.isKeychainAccessDenied(error)
+                            ? "authorization_required"
+                            : "metadata_failed"
+                        return
+                    }
+                    let observation: LiveCredentialObservation?
+                    if provider == .claude {
+                        let decision = claudeMetadataGate.decision(
+                            item: currentStamp.claudeItem,
+                            settle: currentStamp.files
+                        )
+                        switch decision {
+                        case .wait:
+                            continue
+                        case .read, .fallbackRead:
+                            // A settled disappearance is an intermediate
+                            // logout/replacement state, not a terminal error.
+                            // A later item generation must settle separately.
+                            guard let settledLocation = currentStamp.claudeItemLocation else {
+                                cachedClaudeObservation = nil
+                                continue
+                            }
+                            do {
+                                let current = try self.cliSwitcher.liveClaudeObservation(
+                                    at: settledLocation,
+                                    accessMode: .nonInteractive
+                                )
+                                // Close the in-place update race as well: if
+                                // the modification stamp advanced during the
+                                // exact read, discard these bytes and require
+                                // the newer generation to settle normally.
+                                let verifiedStamp = try self.loginCredentialMetadataStamp(
+                                    provider: .claude
+                                )
+                                guard verifiedStamp.claudeItem
+                                        == settledLocation.modificationStamp else {
+                                    cachedClaudeObservation = nil
+                                    continue
+                                }
+                                cachedClaudeObservation = current
+                                guard verifiedStamp.files == currentStamp.files else {
+                                    // Keep the one exact-item read. Once this
+                                    // newer filesystem generation settles, the
+                                    // gate will refresh only its nonsecret
+                                    // metadata around the cached observation.
+                                    continue
+                                }
+                                if decision == .fallbackRead,
+                                   current.claudeKeychainPayloadFingerprint
+                                    == initialBaseline?.claudeKeychainPayloadFingerprint {
+                                    // Claude wrote its identity/config first;
+                                    // this is still the old provider payload.
+                                    // Never combine and store those two
+                                    // accounts. Wait for an exact item change.
+                                    claudeMetadataGate.discardFallbackRead()
+                                    cachedClaudeObservation = nil
+                                    continue
+                                }
+                                observation = current
+                            } catch ClaudeCodeCredentialsKeychainError.missingLiveItem {
+                                // The pinned generation was removed between
+                                // metadata discovery and the exact read. Poll
+                                // metadata again; never broaden this read to a
+                                // replacement that has not settled.
+                                cachedClaudeObservation = nil
+                                continue
+                            } catch {
+                                self.recordClaudeKeychainFailure(
+                                    error,
+                                    item: settledLocation
+                                )
+                                if self.isKeychainAccessDenied(error) {
+                                    workflowStatus = "authorization_required"
+                                    self.pendingClaudeLoginCompletion = PendingClaudeLoginCompletion(
+                                        profileID: profileID,
+                                        initialBaseline: initialBaseline,
+                                        activateAfterLogin: activateAfterLogin,
+                                        previousActiveID: previousActiveID
+                                    )
+                                    self.statusMessage = "Login finished. Authorize Keychain access once from the More menu to link it."
+                                } else {
+                                    workflowStatus = "read_failed"
+                                    self.statusMessage = "Login finished, but its exact Keychain item could not be read safely: \(error.localizedDescription)"
+                                }
+                                return
+                            }
+                        case .reevaluateCachedRead:
+                            guard let cached = cachedClaudeObservation else { continue }
+                            let current: LiveCredentialObservation
+                            do {
+                                current = try self.cliSwitcher
+                                    .refreshClaudeFilesystemMetadata(in: cached)
+                            } catch {
+                                // A partially-written identity file is not a
+                                // reason to read the shared item again. Wait
+                                // for its exact metadata to change and settle.
+                                continue
+                            }
+                            let verifiedStamp: LoginCredentialMetadataStamp
+                            do {
+                                verifiedStamp = try self.loginCredentialMetadataStamp(
+                                    provider: .claude
+                                )
+                            } catch {
+                                // Discovery failures are not filesystem
+                                // settling noise. Stop immediately so a denial
+                                // or ambiguous item cannot become a 60-poll
+                                // failure storm.
+                                self.recordClaudeKeychainFailure(error)
+                                if self.isKeychainAccessDenied(error) {
+                                    workflowStatus = "authorization_required"
+                                    self.pendingClaudeLoginCompletion = PendingClaudeLoginCompletion(
+                                        profileID: profileID,
+                                        initialBaseline: initialBaseline,
+                                        activateAfterLogin: activateAfterLogin,
+                                        previousActiveID: previousActiveID
+                                    )
+                                    self.statusMessage = "Login finished. Authorize Keychain access once from the More menu to link it."
+                                } else {
+                                    workflowStatus = "metadata_failed"
+                                    self.statusMessage = "Login finished, but its exact Keychain item could not be verified safely: \(error.localizedDescription)"
+                                }
+                                return
+                            }
+                            guard let pinnedStamp = cached.claudeKeychainItemLocation?
+                                .modificationStamp,
+                                  verifiedStamp.claudeItem == pinnedStamp else {
+                                cachedClaudeObservation = nil
+                                continue
+                            }
+                            cachedClaudeObservation = current
+                            guard verifiedStamp.files == currentStamp.files else {
+                                // Files advanced during the metadata-only
+                                // refresh. Keep the exact secret cached and
+                                // wait for this generation to settle; do not
+                                // spend another Keychain data read.
+                                continue
+                            }
+                            observation = current
+                        }
+                        lastAttemptedStamp = currentStamp
+                    } else {
+                        guard currentStamp != lastAttemptedStamp else { continue }
+                        lastAttemptedStamp = currentStamp
+                        observation = nil
+                    }
+
+                    let result = await self.refreshAfterCompletedLogin(
+                        profileID: profileID,
+                        provider: provider,
+                        initialBaseline: initialBaseline,
+                        activateAfterLogin: activateAfterLogin,
+                        previousActiveID: previousActiveID,
+                        observation: observation
+                    )
+                    switch result {
+                    case .pending:
+                        continue
+                    case .completed:
+                        workflowStatus = "completed"
+                        if provider == .claude {
+                            self.pendingClaudeLoginCompletion = nil
+                        }
+                        return
+                    case .authorizationRequired:
+                        workflowStatus = "authorization_required"
+                        if provider == .claude {
+                            self.pendingClaudeLoginCompletion = PendingClaudeLoginCompletion(
+                                profileID: profileID,
+                                initialBaseline: initialBaseline,
+                                activateAfterLogin: activateAfterLogin,
+                                previousActiveID: previousActiveID
+                            )
+                        }
+                        self.statusMessage = "Login finished. Authorize Keychain access once from the More menu to link it."
+                        return
+                    }
                 }
             }
+            self.logCredentialWorkflow(
+                workflow: "login_watcher",
+                provider: provider,
+                origin: "login_completion",
+                access: "noninteractive",
+                status: workflowStatus,
+                counts: counter.snapshot
+            )
         }
+    }
     }
 
     private func refreshAfterCompletedLogin(
         profileID: UUID,
         provider: Provider,
-        initialObservation: LiveCredentialObservation?,
+        initialBaseline: LoginObservationBaseline?,
         activateAfterLogin: Bool,
-        previousActiveID: UUID?
-    ) async -> Bool {
-        guard let current = try? cliSwitcher.liveObservation(provider: provider),
-              current.isLoggedIn else {
-            return false
+        previousActiveID: UUID?,
+        observation suppliedObservation: LiveCredentialObservation? = nil
+    ) async -> LoginCompletionPollResult {
+        let current: LiveCredentialObservation
+        if let suppliedObservation {
+            current = suppliedObservation
+        } else {
+            do {
+                current = try cliSwitcher.liveObservation(
+                    provider: provider,
+                    accessMode: .nonInteractive
+                )
+            } catch {
+                if provider == .claude,
+                   error is ClaudeCodeCredentialsKeychainError,
+                   isKeychainAccessDenied(error) {
+                    recordClaudeKeychainFailure(error)
+                    return .authorizationRequired
+                }
+                return .pending
+            }
+        }
+        guard current.isLoggedIn else {
+            return .pending
+        }
+        if provider == .claude,
+           (current.claudeKeychainItemLocation == nil
+                || current.claudeKeychainPayloadFingerprint == nil) {
+            // Authorization readiness and login completion both require data
+            // from the exact item generation discovered by the watcher.
+            return .pending
         }
         let identityChanged: Bool
-        if let initial = initialObservation?.identity, let currentIdentity = current.identity {
+        if let initial = initialBaseline?.identity, let currentIdentity = current.identity {
             identityChanged = !currentIdentity.matches(initial)
         } else {
-            identityChanged = current.identity != nil && initialObservation?.identity == nil
+            identityChanged = current.identity != nil && initialBaseline?.identity == nil
         }
-        let credentialsChanged = current.credentialFingerprint != initialObservation?.credentialFingerprint
-        guard identityChanged || credentialsChanged else {
-            return false
+        let credentialsChanged = current.credentialFingerprint != initialBaseline?.credentialFingerprint
+        let providerPayloadChanged = current.claudeKeychainPayloadFingerprint
+            != initialBaseline?.claudeKeychainPayloadFingerprint
+        guard provider == .claude
+            ? providerPayloadChanged
+            : (identityChanged || credentialsChanged) else {
+            return .pending
         }
         if provider == .claude {
-            await refreshKeychainRepairSuggestion()
+            recordSuccessfulClaudeKeychainRead(current)
         }
         guard activateAfterLogin else {
             return await handleNonActivatingLoginCompletion(
                 current: current,
                 profileID: profileID,
                 previousActiveID: previousActiveID
-            )
+            ) ? .completed : .pending
         }
         do {
             _ = try reconcileLiveCredentials(
@@ -2076,9 +3731,17 @@ final class AppState: ObservableObject {
             refreshStates[profileID] = .ok
             await CredentialAccess.nonInteractive { await refreshAll() }
             return profiles.first(where: { $0.id == profileID })?.isActiveCLI == true
+                ? .completed
+                : .pending
         } catch {
+            if provider == .claude,
+               error is ClaudeCodeCredentialsKeychainError,
+               isKeychainAccessDenied(error) {
+                recordClaudeKeychainFailure(error)
+                return .authorizationRequired
+            }
             statusMessage = "Login finished, but the account could not be saved: \(error.localizedDescription)"
-            return false
+            return .pending
         }
     }
 
@@ -2091,12 +3754,22 @@ final class AppState: ObservableObject {
         previousActiveID: UUID?
     ) async -> Bool {
         let provider = current.provider
+        let storedCredentialWorkflow: SwitchStoredCredentialWorkflow
+        do {
+            storedCredentialWorkflow = try loadSwitchStoredCredentialWorkflow(
+                for: provider
+            )
+        } catch {
+            statusMessage = "Login finished, but saved account credentials could not be inspected safely: \(error.localizedDescription)"
+            return false
+        }
         let resolved: AccountProfile?
         do {
             resolved = try captureLoginIntoProfile(
                 observation: current,
                 provider: provider,
-                targetProfileID: profileID
+                targetProfileID: profileID,
+                storedCredentialWorkflow: storedCredentialWorkflow
             )
         } catch {
             statusMessage = "Login finished, but the account could not be saved: \(error.localizedDescription)"
@@ -2112,9 +3785,16 @@ final class AppState: ObservableObject {
         // freshly logged-in account simply becomes active.
         guard let previousActiveID,
               let previous = profiles.first(where: { $0.id == previousActiveID }),
-              hasStoredSnapshot(for: previous) else {
+              let previousStoredRecord = storedCredentialWorkflow.record(for: previous.id),
+              previousStoredRecord.summary.isRestorable else {
             do {
-                _ = try reconcileLiveCredentials(provider: provider, origin: .login, observation: current, preferredLoginProfileID: profileID)
+                _ = try reconcileLiveCredentials(
+                    provider: provider,
+                    origin: .login,
+                    observation: current,
+                    preferredLoginProfileID: profileID,
+                    storedCredentialWorkflow: storedCredentialWorkflow
+                )
             } catch {
                 AppLog.credentials.error("Post-login reconcile failed for \(provider.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
@@ -2126,13 +3806,15 @@ final class AppState: ObservableObject {
         do {
             let result = try cliSwitcher.restoreSnapshot(
                 for: previous,
+                storedRecord: previousStoredRecord,
                 expectedLiveFingerprint: current.credentialFingerprint,
                 enforceExpectedLiveState: true
             )
             _ = try reconcileLiveCredentials(
                 provider: provider,
                 origin: .login,
-                observation: result.verifiedObservation
+                observation: result.verifiedObservation,
+                storedCredentialWorkflow: storedCredentialWorkflow
             )
             var message = "Logged into \(resolved.label). Kept \(previous.label) as the active \(provider.displayName) account."
             if resolved.id != profileID {
@@ -2147,7 +3829,13 @@ final class AppState: ObservableObject {
             // active account that isn't live, then tell the user plainly.
             AppLog.switching.error("Restore-back to account \(previous.id, privacy: .public) after a non-activating login failed: \(error.localizedDescription, privacy: .public)")
             do {
-                _ = try reconcileLiveCredentials(provider: provider, origin: .login, observation: current, preferredLoginProfileID: profileID)
+                _ = try reconcileLiveCredentials(
+                    provider: provider,
+                    origin: .login,
+                    observation: current,
+                    preferredLoginProfileID: profileID,
+                    storedCredentialWorkflow: storedCredentialWorkflow
+                )
             } catch {
                 AppLog.credentials.error("Post-login reconcile failed for \(provider.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
@@ -2167,20 +3855,22 @@ final class AppState: ObservableObject {
     private func captureLoginIntoProfile(
         observation: LiveCredentialObservation,
         provider: Provider,
-        targetProfileID: UUID
+        targetProfileID: UUID,
+        storedCredentialWorkflow: SwitchStoredCredentialWorkflow
     ) throws -> AccountProfile? {
         guard observation.isLoggedIn,
               observation.snapshot != nil,
               let identity = observation.identity else {
             return nil
         }
-        let action = try planLiveOwnership(
+        let ownershipPlan = try planLiveOwnership(
             provider: provider,
             observation: observation,
-            preferredLoginProfileID: targetProfileID
+            preferredLoginProfileID: targetProfileID,
+            storedCredentialWorkflow: storedCredentialWorkflow
         )
         let resolvedID: UUID
-        switch action {
+        switch ownershipPlan.action {
         case .activate(let id), .adopt(let id):
             resolvedID = id
         case .create:
@@ -2204,9 +3894,16 @@ final class AppState: ObservableObject {
             return nil
         }
         do {
-            _ = try cliSwitcher.storeObservation(observation, for: resolved)
-            storedSnapshotStatuses[resolvedID] = .present
-            refreshClaudeLoginExpiration(for: resolved)
+            let snapshot = try cliSwitcher.storeObservation(
+                observation,
+                for: resolved,
+                storedRecord: ownershipPlan.storedRecords[resolvedID]
+            )
+            storedCredentialWorkflow.markLoaded(
+                cliSwitcher.makeStoredCredentialRecord(from: snapshot),
+                for: resolvedID
+            )
+            cacheStoredSnapshotSummary(snapshot, for: resolved)
         } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
             storedSnapshotStatuses[resolvedID] = .locked
             throw error

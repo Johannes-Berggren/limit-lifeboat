@@ -18,6 +18,27 @@ final class RefreshOutcomePolicyTests: XCTestCase {
         }
     }
 
+    func testTypedLiveWriteDenialSurfacesAndNeverFallsBack() {
+        let item = ClaudeKeychainItemLocation(
+            serviceName: ClaudeCodeCredentialsKeychain.serviceName,
+            accountName: "test",
+            keychainPath: "/tmp/disposable.keychain-db",
+            persistentReference: Data("item".utf8),
+            creationDate: Date(timeIntervalSince1970: 1),
+            modificationDate: Date(timeIntervalSince1970: 1)
+        )
+        let error = ClaudeAccountUsageFetchError.liveCredentialAccessDenied(
+            error: .keychainError(errSecInteractionNotAllowed),
+            item: item
+        )
+
+        for active in [true, false] {
+            let outcome = RefreshOutcomePolicy.outcome(for: error, isActiveCLI: active)
+            XCTAssertEqual(outcome.state, .keychainLocked)
+            XCTAssertFalse(outcome.attemptTUIFallback)
+        }
+    }
+
     func testRepeatedUnauthorizedAlwaysNeedsLoginWithoutFallback() {
         for active in [true, false] {
             let outcome = RefreshOutcomePolicy.outcome(for: .unauthorized, isActiveCLI: active)
@@ -51,6 +72,19 @@ final class RefreshOutcomePolicyTests: XCTestCase {
             return XCTFail("Expected readFailed, got \(inactive.state)")
         }
         XCTAssertFalse(inactive.attemptTUIFallback)
+    }
+
+    func testUnsafeCredentialStateNeverFallsBackToCLI() {
+        let outcome = RefreshOutcomePolicy.outcome(
+            for: .credentialUnavailable(
+                ClaudeCodeCredentialsKeychainError.malformedCredentialJSON("test")
+            ),
+            isActiveCLI: true
+        )
+        guard case .readFailed = outcome.state else {
+            return XCTFail("Expected readFailed, got \(outcome.state)")
+        }
+        XCTAssertFalse(outcome.attemptTUIFallback)
     }
 
     func testRefreshFailedCarriesReason() {

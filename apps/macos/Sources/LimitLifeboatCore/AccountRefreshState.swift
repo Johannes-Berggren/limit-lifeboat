@@ -64,13 +64,18 @@ public enum RefreshOutcomePolicy {
                 state: .needsLogin(reason: "No captured OAuth credentials are available for this account."),
                 attemptTUIFallback: false
             )
-        case .keychainLocked:
+        case .keychainLocked, .liveCredentialAccessDenied:
             return RefreshOutcome(state: .keychainLocked, attemptTUIFallback: false)
         case .interactiveRefreshRequired:
             return RefreshOutcome(
                 state: .readFailed(
                     reason: "The active Claude login needs an explicit Retry before Limit Lifeboat can rotate it safely."
                 ),
+                attemptTUIFallback: false
+            )
+        case .credentialUnavailable(let underlying):
+            return RefreshOutcome(
+                state: .readFailed(reason: reason(underlying)),
                 attemptTUIFallback: false
             )
         case .unauthorized:

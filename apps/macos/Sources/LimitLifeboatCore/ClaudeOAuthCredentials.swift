@@ -66,6 +66,34 @@ public struct ClaudeOAuthCredentials: Equatable, Sendable {
         return ClaudeOAuthCredentials(claudeAiOauthJSON: json)
     }
 
+    /// Distinguishes a legitimate logged-out/MCP-only item from malformed
+    /// provider credential data. Background callers must fail closed for the
+    /// latter instead of silently falling back to a different account copy.
+    static func validatedExtract(
+        fromKeychainItemJSON data: Data
+    ) throws -> ClaudeOAuthCredentials? {
+        guard let object = try? JSONSerialization.jsonObject(with: data)
+            as? [String: Any] else {
+            throw ClaudeCodeCredentialsKeychainError.malformedCredentialJSON(
+                "the top-level item is not a JSON object"
+            )
+        }
+        guard let oauthValue = object["claudeAiOauth"] else {
+            return nil
+        }
+        guard let oauth = oauthValue as? [String: Any],
+              let json = try? JSONSerialization.data(
+                withJSONObject: oauth,
+                options: [.sortedKeys]
+              ),
+              let credentials = ClaudeOAuthCredentials(claudeAiOauthJSON: json) else {
+            throw ClaudeCodeCredentialsKeychainError.malformedCredentialJSON(
+                "claudeAiOauth is missing a valid access token"
+            )
+        }
+        return credentials
+    }
+
     /// True when the access token has expired or is about to. Items without
     /// an expiry never count as expired; the API rejects them if they are.
     public func isExpired(asOf now: Date = Date(), leeway: TimeInterval = 300) -> Bool {

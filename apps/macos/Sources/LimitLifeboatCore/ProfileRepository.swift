@@ -19,6 +19,7 @@ public final class ProfileRepository {
 
     public init(
         applicationSupportDirectory: URL? = nil,
+        applicationSupportDirectoryName: String = "LimitLifeboat",
         fileManager: FileManager = .default
     ) throws {
         self.fileManager = fileManager
@@ -26,7 +27,7 @@ public final class ProfileRepository {
         if let applicationSupportDirectory {
             directory = applicationSupportDirectory
         } else if let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
-            directory = base.appendingPathComponent("LimitLifeboat", isDirectory: true)
+            directory = base.appendingPathComponent(applicationSupportDirectoryName, isDirectory: true)
         } else {
             throw ProfileRepositoryError.missingApplicationSupportDirectory
         }
