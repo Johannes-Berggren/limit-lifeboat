@@ -11,6 +11,12 @@ public enum AccountRefreshState: Equatable, Sendable {
     case ok
     /// A transient read failure (network, server, malformed) — retryable.
     case readFailed(reason: String)
+    /// A valid login whose active access token expired while the CLI was idle,
+    /// so a background cycle declined to rotate it (rotating the active login
+    /// out from under Claude Code is what causes real logouts). Nothing is
+    /// wrong with the login — an explicit Retry refreshes it. Distinct from
+    /// `readFailed` so the row can stay calm instead of looking like an error.
+    case usagePaused
     /// The account has no usable captured credentials, or its saved refresh
     /// token can no longer recover the session. The reason is safe to surface
     /// to the user and must never contain credential material.
@@ -25,7 +31,7 @@ public enum AccountRefreshState: Equatable, Sendable {
         switch self {
         case .idle, .refreshing, .ok:
             return false
-        case .readFailed, .needsLogin, .keychainLocked:
+        case .readFailed, .usagePaused, .needsLogin, .keychainLocked:
             return true
         }
     }
@@ -67,12 +73,26 @@ public enum RefreshOutcomePolicy {
         case .keychainLocked:
             return RefreshOutcome(state: .keychainLocked, attemptTUIFallback: false)
         case .interactiveRefreshRequired:
+            // The login is fine; a background cycle just declined to rotate it.
+            // A calm "paused" affordance, not an error — an explicit Retry
+            // refreshes it.
+            return RefreshOutcome(state: .usagePaused, attemptTUIFallback: false)
+        case .accountActiveElsewhere:
+            // Another profile is the live CLI login for this same Claude
+            // account. Rotating this copy would strand that login, so it stays
+            // on its last reading until the user switches the CLI to it.
             return RefreshOutcome(
                 state: .readFailed(
-                    reason: "The active Claude login needs an explicit Retry before Limit Lifeboat can rotate it safely."
+                    reason: "This account shares its Claude login with the active account. Switch the CLI to it to refresh its usage."
                 ),
                 attemptTUIFallback: false
             )
+        case .rotationDeferred:
+            // An inactive account whose background rotation was skipped keeps
+            // its last snapshot with no visible problem. The caller intercepts
+            // this before mapping, so this is only a safe fallback: `.idle`
+            // shows the row normally (a stale-timestamp footer, no error).
+            return RefreshOutcome(state: .idle, attemptTUIFallback: false)
         case .unauthorized:
             // The API already tried one forced token refresh. A second
             // rejection confirms that this saved login needs user recovery;

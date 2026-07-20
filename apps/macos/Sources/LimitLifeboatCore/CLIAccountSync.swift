@@ -34,11 +34,25 @@ public struct CLIAccountSyncPlanner: Sendable {
 
         let providerProfiles = profiles.filter { $0.provider == provider }
 
-        if let liveCredentialFingerprint,
-           let match = providerProfiles.first(where: {
-               storedCredentialFingerprints[$0.id] == liveCredentialFingerprint
-           }) {
-            return .activate(match.id)
+        if let liveCredentialFingerprint {
+            // Two profiles can share one Anthropic account (same accountID under
+            // different organizations) and therefore hold byte-identical stored
+            // chains. A blind `.first` fingerprint match could activate the
+            // wrong sibling and cross-write its chain. Prefer the sibling whose
+            // identity matches the live login (org-aware), then the one already
+            // marked active, before falling back to declaration order.
+            let fingerprintMatches = providerProfiles.filter {
+                storedCredentialFingerprints[$0.id] == liveCredentialFingerprint
+            }
+            let identityMatch = fingerprintMatches.first { candidate in
+                guard let currentIdentity else { return false }
+                return candidate.identity?.matches(currentIdentity) == true
+            }
+            if let chosen = identityMatch
+                ?? fingerprintMatches.first(where: { $0.isActiveCLI })
+                ?? fingerprintMatches.first {
+                return .activate(chosen.id)
+            }
         }
 
         if let currentIdentity,

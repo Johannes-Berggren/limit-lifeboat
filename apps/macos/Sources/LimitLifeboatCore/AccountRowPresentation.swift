@@ -210,6 +210,14 @@ public struct AccountRowPresentation: Equatable, Sendable {
                 help: reason,
                 action: .retry
             )
+        case .usagePaused:
+            return AccountRowMessage(
+                text: "Usage paused — click to refresh",
+                icon: "pause.circle",
+                tone: .secondary,
+                help: "Limit Lifeboat paused auto-refresh so it won't disturb your active Claude login. Click Retry to update usage now.",
+                action: .retry
+            )
         case .needsLogin(let reason):
             let wasPreviouslyLinked = hasSnapshot || profile.identity != nil
             return AccountRowMessage(

@@ -103,22 +103,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         providerRaw: String?,
         targetRaw: String?
     ) async {
-        let isSwitchAction = actionIdentifier == NotificationSwitchAction.actionID
-        guard isSwitchAction,
-              action == NotificationSwitchAction.actionValue,
-              let providerRaw,
-              let provider = Provider(rawValue: providerRaw) else {
-            // Tapping the notification body (or an unrecognized payload) just
-            // brings up the popover as the place to act.
-            if actionIdentifier == UNNotificationDefaultActionIdentifier {
-                menuBarController?.showPopover()
-            }
+        let provider = providerRaw.flatMap(Provider.init(rawValue:))
+
+        if actionIdentifier == NotificationSwitchAction.refreshActionID,
+           action == NotificationSwitchAction.refreshActionValue,
+           let provider {
+            await state?.performNotificationRefresh(
+                provider: provider,
+                profileID: targetRaw.flatMap(UUID.init)
+            )
             return
         }
-        await state?.performNotificationSwitch(
-            provider: provider,
-            embeddedTargetID: targetRaw.flatMap(UUID.init)
-        )
+
+        if actionIdentifier == NotificationSwitchAction.actionID,
+           action == NotificationSwitchAction.actionValue,
+           let provider {
+            await state?.performNotificationSwitch(
+                provider: provider,
+                embeddedTargetID: targetRaw.flatMap(UUID.init)
+            )
+            return
+        }
+
+        // Tapping the notification body (or an unrecognized payload) just
+        // brings up the popover as the place to act.
+        if actionIdentifier == UNNotificationDefaultActionIdentifier {
+            menuBarController?.showPopover()
+        }
     }
 
     private func handleRunningExecutableInvalidation() {
