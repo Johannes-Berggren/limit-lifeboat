@@ -1700,6 +1700,16 @@ final class AppState: ObservableObject {
                     usageResult: initialResult,
                     executableURL: executableURL
                 )
+                // A redemption leaves codexResetStates at .redeeming; its
+                // terminal state must be applied on every exit from this
+                // iteration — including the compare-and-swap retry (continue)
+                // and any throw — and only after applySnapshot, which leaves a
+                // busy state untouched. A defer satisfies both constraints.
+                defer {
+                    if let resetState = automaticReset.stateAfterApply {
+                        codexResetStates[profile.id] = resetState
+                    }
+                }
                 let result = automaticReset.usageResult
 
                 if result.updatedAuthJSON != authJSON {
@@ -1735,9 +1745,6 @@ final class AppState: ObservableObject {
 
                 applyCodexAccountInfo(result.accountInfo, for: profile)
                 applySnapshot(result.snapshot, for: profile)
-                if let resetState = automaticReset.stateAfterApply {
-                    codexResetStates[profile.id] = resetState
-                }
                 return
             } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
                 refreshStates[profile.id] = .keychainLocked
@@ -1827,12 +1834,20 @@ final class AppState: ObservableObject {
                 )
             }
 
+            // No refreshed snapshot came back, but redeemReset still rotated
+            // the refresh token during its verify-read and consume. Persist
+            // that newest generation instead of the pre-redemption credentials
+            // so a rotated-away token cannot force a re-login after a used
+            // reset, matching the manual path and the failure handling below.
+            var retainedUsage = usageResult
+            retainedUsage.updatedAuthJSON = redemption.updatedAuthJSON
+
             if redemption.outcome.consumedReset {
                 let reason = redemption.refreshFailureReason
                     ?? "Refresh usage before another reset can be used."
                 statusMessage = "Used an earned reset for \(currentProfile.label). Refresh is required to confirm its new limits."
                 return AutomaticCodexResetResolution(
-                    usageResult: usageResult,
+                    usageResult: retainedUsage,
                     stateAfterApply: .refreshRequired(reason: reason)
                 )
             }
@@ -1841,7 +1856,7 @@ final class AppState: ObservableObject {
                 ?? "Codex did not return refreshed reset availability."
             statusMessage = reason
             return AutomaticCodexResetResolution(
-                usageResult: usageResult,
+                usageResult: retainedUsage,
                 stateAfterApply: .failed(reason: reason)
             )
         } catch let error as CodexResetRedemptionError {
