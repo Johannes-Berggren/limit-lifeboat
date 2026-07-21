@@ -126,6 +126,9 @@ public struct AccountProfile: Codable, Identifiable, Hashable, Sendable {
     public var webDataStoreID: UUID
     public var identity: AccountIdentity?
     public var isActiveCLI: Bool
+    /// Per-account, explicit permission to spend an earned Codex rate-limit
+    /// reset when this account is active and reaches a hard Codex limit.
+    public var autoUseCodexRateLimitResets: Bool
     public var createdAt: Date
     public var updatedAt: Date
 
@@ -138,6 +141,7 @@ public struct AccountProfile: Codable, Identifiable, Hashable, Sendable {
         webDataStoreID: UUID = UUID(),
         identity: AccountIdentity? = nil,
         isActiveCLI: Bool = false,
+        autoUseCodexRateLimitResets: Bool = false,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -149,6 +153,7 @@ public struct AccountProfile: Codable, Identifiable, Hashable, Sendable {
         self.webDataStoreID = webDataStoreID
         self.identity = identity
         self.isActiveCLI = isActiveCLI
+        self.autoUseCodexRateLimitResets = autoUseCodexRateLimitResets
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -162,6 +167,7 @@ public struct AccountProfile: Codable, Identifiable, Hashable, Sendable {
         case webDataStoreID
         case identity
         case isActiveCLI
+        case autoUseCodexRateLimitResets
         case createdAt
         case updatedAt
     }
@@ -180,6 +186,10 @@ public struct AccountProfile: Codable, Identifiable, Hashable, Sendable {
         self.webDataStoreID = try container.decode(UUID.self, forKey: .webDataStoreID)
         self.identity = try container.decodeIfPresent(AccountIdentity.self, forKey: .identity)
         self.isActiveCLI = try container.decode(Bool.self, forKey: .isActiveCLI)
+        self.autoUseCodexRateLimitResets = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .autoUseCodexRateLimitResets
+        ) ?? false
         self.createdAt = try container.decode(Date.self, forKey: .createdAt)
         self.updatedAt = try container.decode(Date.self, forKey: .updatedAt)
     }
@@ -194,6 +204,7 @@ public struct AccountProfile: Codable, Identifiable, Hashable, Sendable {
         try container.encode(webDataStoreID, forKey: .webDataStoreID)
         try container.encodeIfPresent(identity, forKey: .identity)
         try container.encode(isActiveCLI, forKey: .isActiveCLI)
+        try container.encode(autoUseCodexRateLimitResets, forKey: .autoUseCodexRateLimitResets)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
     }
