@@ -354,13 +354,42 @@ final class ClaudeOAuthRefreshCoordinatorTests: XCTestCase {
         let oauthBefore = try XCTUnwrap(try fileSystem.metadata(at: coordinator.oauthRefreshLockURL)?.modifiedAt)
         let claudeBefore = try XCTUnwrap(try fileSystem.metadata(at: coordinator.claudeLockURL)?.modifiedAt)
 
-        try await Task.sleep(nanoseconds: 80_000_000)
+        // The heartbeat fires on a background timer and stamps the mtime with
+        // the wall clock. Poll for the advance rather than assuming one fixed
+        // sleep both schedules the timer and clears the filesystem's mtime
+        // granularity — under load the timer can slip past a short window,
+        // which made a fixed sleep flaky.
+        try await waitUntil(timeout: 5) {
+            guard
+                let oauthNow = try fileSystem.metadata(at: coordinator.oauthRefreshLockURL)?.modifiedAt,
+                let claudeNow = try fileSystem.metadata(at: coordinator.claudeLockURL)?.modifiedAt
+            else { return false }
+            return oauthNow > oauthBefore && claudeNow > claudeBefore
+        }
 
         let oauthAfter = try XCTUnwrap(try fileSystem.metadata(at: coordinator.oauthRefreshLockURL)?.modifiedAt)
         let claudeAfter = try XCTUnwrap(try fileSystem.metadata(at: coordinator.claudeLockURL)?.modifiedAt)
         XCTAssertGreaterThan(oauthAfter, oauthBefore)
         XCTAssertGreaterThan(claudeAfter, claudeBefore)
         try lease.release()
+    }
+
+    /// Polls `condition` until it returns true or `timeout` elapses, so a
+    /// background timer's exact scheduling can't make an assertion flaky.
+    private func waitUntil(
+        timeout: TimeInterval,
+        pollInterval: TimeInterval = 0.02,
+        _ condition: () throws -> Bool,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if try condition() { return }
+            try await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
+        }
+        if try condition() { return }
+        XCTFail("Timed out after \(timeout)s waiting for condition", file: file, line: line)
     }
 
     func testRejectsNondefaultClaudeConfigDirectory() async throws {
