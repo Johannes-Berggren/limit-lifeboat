@@ -4020,6 +4020,15 @@ final class AppState: ObservableObject {
         return disposition.isAccessDenied && disposition != .userCancelled
     }
 
+    /// A post-login recovery-journal cleanup error that does not mean the saved
+    /// login itself needs repair: shared-lock contention (another process is
+    /// mid-refresh) or a transient Keychain denial. The login already
+    /// succeeded and the cleanup retries on the next refresh, so these must not
+    /// downgrade a healthy row to "needs repair".
+    private func loginRecoveryCleanupIsTransient(_ error: Error) -> Bool {
+        error is ClaudeOAuthRefreshCoordinatorError || isKeychainAccessDenied(error)
+    }
+
     private func showClaudeAuthorizationFailure(_ error: Error) {
         let details: String
         switch credentialAccessDisposition(for: error) {
@@ -4846,7 +4855,6 @@ final class AppState: ObservableObject {
             lastClaudeRefreshAttempt = Date()
             let liveElsewhere = claudeAccountIsLiveElsewhere(profile, context: claudeRotationContext())
             refreshStates[profile.id] = .refreshing
-            var initialResolvedUsageCredentials: ClaudeOAuthCredentials?
             var resolvedUsageCredentials: ClaudeOAuthCredentials?
             do {
                 let retryStoredRecord = try cliSwitcher.storedCredentialRecord(
@@ -4876,16 +4884,16 @@ final class AppState: ObservableObject {
                         ? .preloaded(retryLiveRecord)
                         : .read,
                     credentialDidResolve: {
-                        if initialResolvedUsageCredentials == nil {
-                            initialResolvedUsageCredentials = $0
-                        }
                         resolvedUsageCredentials = $0
                     }
                 )
-                if let initialResolvedUsageCredentials,
-                   let resolvedUsageCredentials,
+                // Compare against the pre-rotation credential predicted before
+                // the fetch. The resolve callback only ever reports the
+                // post-rotation value, so comparing its first and last reports
+                // would miss the primary rotation. Mirrors the switch path.
+                if let resolvedUsageCredentials,
                    claudeOAuthGenerationAdvanced(
-                    from: initialResolvedUsageCredentials,
+                    from: predictedCredential,
                     to: resolvedUsageCredentials
                    ) {
                     try reconcileClaudeChainOwners(
@@ -4895,7 +4903,7 @@ final class AppState: ObservableObject {
                         storedCredentialWorkflow: nil
                     )
                 }
-                if let refreshedRecord = try cliSwitcher.storedCredentialRecord(
+                if let refreshedRecord = try? cliSwitcher.storedCredentialRecord(
                     for: profile,
                     accessMode: .nonInteractive
                 ) {
@@ -5825,6 +5833,10 @@ final class AppState: ObservableObject {
                 try reconcileClaudeRecoveryAfterLoginHoldingLease(
                     profileID: resolved.id
                 )
+            } catch let error where loginRecoveryCleanupIsTransient(error) {
+                AppLog.credentials.error(
+                    "Post-login recovery cleanup deferred for \(resolved.id.uuidString, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
             } catch {
                 refreshStates[resolved.id] = .credentialRepairRequired(
                     reason: error.localizedDescription
@@ -5988,6 +6000,13 @@ final class AppState: ObservableObject {
                     )
                 }
             }
+        } catch let error where loginRecoveryCleanupIsTransient(error) {
+            // The login already succeeded; a busy shared lock or a transient
+            // Keychain denial during best-effort journal cleanup must not read
+            // as "needs repair". The deferred refresh reconciles it.
+            AppLog.credentials.error(
+                "Post-login recovery cleanup deferred for \(profileID.uuidString, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
         } catch {
             refreshStates[profileID] = .credentialRepairRequired(
                 reason: "Claude login recovery cleanup is pending: \(error.localizedDescription)"

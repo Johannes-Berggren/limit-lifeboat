@@ -90,6 +90,38 @@ final class AccountSessionPolicyTests: XCTestCase {
         XCTAssertFalse(evaluation.automaticSwitchEligibility.isEligible)
     }
 
+    func testActiveAccountWithoutRestorableSnapshotIsNotTreatedAsExpired() {
+        // The active account's live CLI credential is authoritative; a missing
+        // *restorable snapshot* must not surface a false "Login expired" row or
+        // block switching for a healthy, currently-active login.
+        let evaluation = evaluate(
+            storedCredentials: .missing,
+            refreshState: .ok,
+            expiresAt: nil,
+            isActiveCLI: true,
+            wasPreviouslyLinked: true
+        )
+
+        XCTAssertTrue(evaluation.rowMessages.isEmpty)
+        XCTAssertTrue(evaluation.manualSwitchEligibility.isEligible)
+        XCTAssertTrue(evaluation.automaticSwitchEligibility.isEligible)
+    }
+
+    func testActiveAccountMissingSnapshotStillHonorsGenuineExpiry() {
+        // Exempting the active account from the missing-snapshot block must not
+        // suppress a genuinely expired login, which is decided earlier.
+        let evaluation = evaluate(
+            storedCredentials: .missing,
+            refreshState: .ok,
+            expiresAt: now,
+            isActiveCLI: true,
+            wasPreviouslyLinked: true
+        )
+
+        XCTAssertEqual(evaluation.rowMessages.first?.action, .login)
+        XCTAssertFalse(evaluation.manualSwitchEligibility.isEligible)
+    }
+
     func testSharedExpiringLoginUsesSwitchInsteadOfRenewAndNeverAutoSwitches() {
         let evaluation = evaluate(
             refreshState: .switchRequired(reason: "Shared with the live CLI login."),

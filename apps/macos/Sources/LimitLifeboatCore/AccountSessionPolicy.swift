@@ -118,7 +118,10 @@ public enum AccountSessionPolicy {
             )
         }
 
-        if case .missing = storedCredentials {
+        // A missing *stored snapshot* only blocks an inactive account. The
+        // active account's live CLI credential is authoritative, so the absence
+        // of a restorable copy must not read as an expired login.
+        if case .missing = storedCredentials, !isActiveCLI {
             let blocker = "Log in to this account before switching the CLI to it."
             return AccountSessionEvaluation(
                 manualSwitchEligibility: .blocked(reason: blocker),

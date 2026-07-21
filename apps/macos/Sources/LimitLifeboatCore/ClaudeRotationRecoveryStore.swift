@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import os
 import Security
 
 /// One owner that must receive a remotely rotated Claude OAuth generation.
@@ -249,21 +250,33 @@ public final class KeychainClaudeRotationRecoveryStore: ClaudeRotationRecoverySt
             throw CredentialStoreError.decodeFailed(underlying: nil)
         }
 
-        return try rows.map { row in
+        // A single undecodable row must not sink the whole journal: the store's
+        // purpose is best-effort recovery of independent pending rotations, and
+        // every caller escalates a load failure to a terminal, account-wide
+        // repair state with no way to remove the offending record (deletion
+        // needs its decoded id). Skip poison rows so healthy ones still load.
+        return rows.compactMap { row -> ClaudeRotationRecoveryRecord? in
+            let account = row[kSecAttrAccount as String] as? String
             guard let data = row[kSecValueData as String] as? Data else {
-                throw CredentialStoreError.decodeFailed(underlying: nil)
+                AppLog.credentials.error(
+                    "Skipping rotation-recovery row with no value data (account \(account ?? "unknown", privacy: .public))."
+                )
+                return nil
             }
             do {
                 let record = try decoder.decode(ClaudeRotationRecoveryRecord.self, from: data)
-                if let account = row[kSecAttrAccount as String] as? String,
-                   account != record.id.uuidString {
-                    throw CredentialStoreError.decodeFailed(underlying: nil)
+                if let account, account != record.id.uuidString {
+                    AppLog.credentials.error(
+                        "Skipping rotation-recovery row whose keychain account \(account, privacy: .public) does not match its record id."
+                    )
+                    return nil
                 }
                 return record
-            } catch let error as CredentialStoreError {
-                throw error
             } catch {
-                throw CredentialStoreError.decodeFailed(underlying: error)
+                AppLog.credentials.error(
+                    "Skipping undecodable rotation-recovery row (account \(account ?? "unknown", privacy: .public)): \(error.localizedDescription, privacy: .public)"
+                )
+                return nil
             }
         }
         .sorted { $0.createdAt < $1.createdAt }

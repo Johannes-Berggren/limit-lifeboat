@@ -134,35 +134,37 @@ public struct ClaudeOAuthTokenRefresher: Sendable {
         // The endpoint may rotate the refresh token; keep the old one when it
         // does not.
         let rotatedRefreshToken: String
-        if object.keys.contains("refresh_token") {
-            guard let value = Self.nonemptyString(object["refresh_token"]) else {
+        if let rawRefreshToken = Self.presentValue(object["refresh_token"]) {
+            guard let value = Self.nonemptyString(rawRefreshToken) else {
                 throw ClaudeOAuthError.malformedResponse
             }
             rotatedRefreshToken = value
         } else {
+            // An omitted key or an explicit null both mean "not rotating";
+            // keep the existing token instead of discarding the exchange.
             rotatedRefreshToken = refreshToken
         }
 
         let expiresAt: Date?
-        if object.keys.contains("expires_in") {
+        if let rawExpiresIn = Self.presentValue(object["expires_in"]) {
             guard let expires = Self.expirationDate(
-                after: object["expires_in"],
+                after: rawExpiresIn,
                 now: now
             ) else {
                 throw ClaudeOAuthError.malformedResponse
             }
             expiresAt = expires
         } else {
-            // A missing lifetime means "unknown", not "reuse the already
-            // expired timestamp". Removing it also prevents an immediate
-            // second refresh of this newly-issued access token.
+            // A missing or explicitly null lifetime means "unknown", not
+            // "reuse the already expired timestamp". Removing it also prevents
+            // an immediate second refresh of this newly-issued access token.
             expiresAt = nil
         }
 
         let refreshTokenExpiresAt: Date?
-        if object.keys.contains("refresh_token_expires_in") {
+        if let rawRefreshExpiresIn = Self.presentValue(object["refresh_token_expires_in"]) {
             guard let expires = Self.expirationDate(
-                after: object["refresh_token_expires_in"],
+                after: rawRefreshExpiresIn,
                 now: now
             ) else {
                 throw ClaudeOAuthError.malformedResponse
@@ -170,7 +172,7 @@ public struct ClaudeOAuthTokenRefresher: Sendable {
             refreshTokenExpiresAt = expires
         } else {
             // Claude's fixed login expiry survives responses which do not
-            // repeat refresh_token_expires_in.
+            // repeat refresh_token_expires_in (an omitted key or explicit null).
             refreshTokenExpiresAt = credentials.refreshTokenExpiresAt
         }
 
@@ -185,6 +187,15 @@ public struct ClaudeOAuthTokenRefresher: Sendable {
             throw ClaudeOAuthError.malformedResponse
         }
         return updated
+    }
+
+    /// A JSON value that is present and not explicit `null`. An omitted key and
+    /// a `null` value both mean "no value" — a non-rotating refresh token or an
+    /// unknown lifetime — and must be distinguished from a present-but-invalid
+    /// value, which stays malformed.
+    private static func presentValue(_ value: Any?) -> Any? {
+        guard let value, !(value is NSNull) else { return nil }
+        return value
     }
 
     private static func nonemptyString(_ value: Any?) -> String? {

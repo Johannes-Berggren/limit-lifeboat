@@ -106,6 +106,66 @@ final class ClaudeOAuthTokenRefresherTests: XCTestCase {
         )
     }
 
+    func testKeepsOldRefreshTokenWhenRotationIsExplicitNull() async throws {
+        let httpClient = MockHTTPClient()
+        httpClient.stub(
+            status: 200,
+            bodyText: #"{"access_token":"new-access","refresh_token":null,"expires_in":3600}"#
+        )
+        let refresher = ClaudeOAuthTokenRefresher(httpClient: httpClient)
+
+        let refreshed = try await refresher.refresh(try makeCredentials(), now: now)
+
+        // An explicit null refresh_token means "not rotating", exactly like an
+        // omitted key: keep the fresh access token instead of discarding the
+        // exchange as malformed (which would loop forever, never updating it).
+        XCTAssertEqual(refreshed.accessToken, "new-access")
+        XCTAssertEqual(refreshed.refreshToken, "old-refresh")
+        XCTAssertEqual(refreshed.expiresAt, now.addingTimeInterval(3600))
+    }
+
+    func testExplicitNullAccessLifetimeIsUnknownNotMalformed() async throws {
+        let fixedExpiry = now.addingTimeInterval(604_800)
+        let httpClient = MockHTTPClient()
+        httpClient.stub(
+            status: 200,
+            bodyText: #"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":null}"#
+        )
+        let refresher = ClaudeOAuthTokenRefresher(httpClient: httpClient)
+        let credentials = try makeCredentials(extraFields: [
+            "refreshTokenExpiresAt": Int64((fixedExpiry.timeIntervalSince1970 * 1000).rounded())
+        ])
+
+        let refreshed = try await refresher.refresh(credentials, now: now)
+
+        XCTAssertEqual(refreshed.accessToken, "new-access")
+        XCTAssertEqual(refreshed.refreshToken, "new-refresh")
+        XCTAssertNil(refreshed.expiresAt)
+        XCTAssertEqual(refreshed.refreshTokenExpiresAt, fixedExpiry)
+    }
+
+    func testExplicitNullRefreshTokenExpiryPreservesFixedLoginExpiry() async throws {
+        let fixedExpiry = now.addingTimeInterval(604_800)
+        let httpClient = MockHTTPClient()
+        httpClient.stub(
+            status: 200,
+            bodyText: #"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600,"refresh_token_expires_in":null}"#
+        )
+        let refresher = ClaudeOAuthTokenRefresher(httpClient: httpClient)
+        let credentials = try makeCredentials(extraFields: [
+            "refreshTokenExpiresAt": Int64((fixedExpiry.timeIntervalSince1970 * 1000).rounded())
+        ])
+
+        let refreshed = try await refresher.refresh(credentials, now: now)
+
+        XCTAssertEqual(refreshed.refreshToken, "new-refresh")
+        XCTAssertEqual(refreshed.expiresAt, now.addingTimeInterval(3600))
+        // An explicit null behaves like an omitted key: keep the fixed login
+        // expiry rather than throwing a rotated exchange away and forcing an
+        // avoidable re-login.
+        XCTAssertEqual(refreshed.refreshTokenExpiresAt, fixedExpiry)
+    }
+
     func testRejectsExplicitlyEmptyRotatedRefreshToken() async throws {
         let httpClient = MockHTTPClient()
         httpClient.stub(
