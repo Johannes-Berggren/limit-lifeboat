@@ -6,6 +6,7 @@ struct MenuRootView: View {
     @ObservedObject var settings: SettingsStore
     @ObservedObject var updater: AppUpdater
     @State private var expandedAccounts: [Provider: UUID] = [:]
+    @State private var sessionPolicyNow = Date()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -29,6 +30,10 @@ struct MenuRootView: View {
         }
         .frame(width: DS.Popover.width, height: DS.Popover.height)
         .tint(DS.accent)
+        .onAppear { sessionPolicyNow = Date() }
+        .onReceive(
+            Timer.publish(every: 60, on: .main, in: .common).autoconnect()
+        ) { sessionPolicyNow = $0 }
     }
 
     private var header: some View {
@@ -200,7 +205,15 @@ struct MenuRootView: View {
         let providerProfiles = state.profiles.filter { $0.provider == provider }
         let activeSnapshot = providerProfiles.first(where: \.isActiveCLI).flatMap { state.snapshots[$0.id] }
         let activeAtRisk = activeSnapshot.map { $0.riskLevel == .warning || $0.riskLevel == .depleted } ?? false
-        let advisedID = activeAtRisk ? state.switchAdvice[provider]?.bestCandidateID : nil
+        let cachedAdvisedID = activeAtRisk ? state.switchAdvice[provider]?.bestCandidateID : nil
+        let advisedID = cachedAdvisedID.flatMap { candidateID in
+            providerProfiles.first(where: { $0.id == candidateID }).flatMap { candidate in
+                state.accountSessionEvaluation(
+                    for: candidate,
+                    now: sessionPolicyNow
+                ).manualSwitchEligibility.isEligible ? candidateID : nil
+            }
+        }
         let profiles = AccountProfileOrdering.activeThenRecommended(
             providerProfiles,
             recommendedID: advisedID
@@ -235,14 +248,20 @@ struct MenuRootView: View {
             } else {
                 ForEach(Array(profiles.enumerated()), id: \.element.id) { index, profile in
                     let storedStatus = state.storedSnapshotStatus(for: profile)
+                    let handoffEligibility = state.accountSessionEvaluation(
+                        for: profile,
+                        now: sessionPolicyNow
+                    ).manualSwitchEligibility
 
                     if index == 1,
                        profile.id == advisedID,
-                       let activeProfile {
+                       let activeProfile,
+                       handoffEligibility.isEligible {
                         SwitchHandoffButton(
                             from: activeProfile,
                             to: profile,
                             reason: state.switchAdvice[provider]?.reason,
+                            manualSwitchEligibility: handoffEligibility,
                             action: { await state.switchCLI(to: profile) }
                         )
                     }
@@ -251,9 +270,11 @@ struct MenuRootView: View {
                         profile: profile,
                         snapshot: state.snapshots[profile.id],
                         hasStoredSnapshot: storedStatus == .present,
-                        refreshState: storedStatus == .locked
-                            ? .keychainLocked
-                            : (state.refreshStates[profile.id] ?? .idle),
+                        storedCredentialAvailability: state.storedCredentialAvailability(
+                            for: profile
+                        ),
+                        sharesActiveCredentialChain: state.sharesActiveClaudeCredentialChain(for: profile),
+                        refreshState: state.refreshStates[profile.id] ?? .idle,
                         codexResetState: state.codexResetStates[profile.id] ?? .idle,
                         loginExpiresAt: state.loginExpiresAt(for: profile),
                         estimates: state.burnRateEstimates[profile.id] ?? [:],
@@ -274,7 +295,17 @@ struct MenuRootView: View {
                         },
                         rename: { state.renameProfile(profile.id, to: $0) },
                         remove: { state.removeProfile(profile.id) },
-                        retry: { state.retryRefresh(for: profile) }
+                        retry: { state.retryRefresh(for: profile) },
+                        authorizeCredentials: { source in
+                            Task {
+                                switch source {
+                                case .claudeCode:
+                                    _ = await state.authorizeClaudeKeychainAccess()
+                                case .savedAccount:
+                                    _ = await state.authorizeStoredCredentialAccess(for: profile)
+                                }
+                            }
+                        }
                     )
                 }
             }
@@ -316,6 +347,7 @@ private struct SwitchHandoffButton: View {
     let from: AccountProfile
     let to: AccountProfile
     let reason: String?
+    let manualSwitchEligibility: AccountSwitchEligibility
     let action: () async -> Bool
 
     @State private var isSwitching = false
@@ -355,8 +387,12 @@ private struct SwitchHandoffButton: View {
                 }
             }
             .buttonStyle(.plain)
-            .disabled(isSwitching)
-            .help(reason ?? "Switch the CLI from \(from.label) to \(to.label)")
+            .disabled(isSwitching || !manualSwitchEligibility.isEligible)
+            .help(
+                manualSwitchEligibility.blockerReason
+                    ?? reason
+                    ?? "Switch the CLI from \(from.label) to \(to.label)"
+            )
             .accessibilityLabel("Switch \(from.provider.displayName) CLI from \(from.label) to \(to.label)")
 
             Rectangle()
@@ -373,6 +409,8 @@ struct AccountRowView: View {
     let profile: AccountProfile
     let snapshot: UsageSnapshot?
     let hasStoredSnapshot: Bool
+    var storedCredentialAvailability: StoredCredentialAvailability? = nil
+    var sharesActiveCredentialChain = false
     var refreshState: AccountRefreshState = .idle
     var codexResetState: CodexResetRedemptionState = .idle
     var loginExpiresAt: Date? = nil
@@ -394,6 +432,7 @@ struct AccountRowView: View {
     let rename: (String) -> Void
     let remove: () -> Void
     var retry: () -> Void = {}
+    var authorizeCredentials: (CredentialAuthorizationSource) -> Void = { _ in }
 
     @State private var showsRenameAlert = false
     @State private var renameText = ""
@@ -401,6 +440,7 @@ struct AccountRowView: View {
     @State private var showsCodexResetDetails = false
     @State private var showsHistory = false
     @State private var isHovered = false
+    @State private var presentationNow = Date()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var presentation: AccountRowPresentation {
@@ -408,11 +448,14 @@ struct AccountRowView: View {
             profile: profile,
             snapshot: snapshot,
             hasStoredSnapshot: hasStoredSnapshot,
+            storedCredentialAvailability: storedCredentialAvailability,
+            sharesActiveCredentialChain: sharesActiveCredentialChain,
             refreshState: refreshState,
             adviceReason: adviceReason,
             estimates: estimates,
             loginExpiresAt: loginExpiresAt,
-            showOrganizationName: showOrganizationName
+            showOrganizationName: showOrganizationName,
+            now: presentationNow
         )
     }
 
@@ -437,6 +480,10 @@ struct AccountRowView: View {
         .onHover { isHovered = $0 }
         .animation(reduceMotion ? nil : DS.Motion.standard, value: isExpanded)
         .animation(reduceMotion ? nil : DS.Motion.quick, value: isHovered)
+        .onAppear { presentationNow = Date() }
+        .onReceive(
+            Timer.publish(every: 60, on: .main, in: .common).autoconnect()
+        ) { presentationNow = $0 }
         .accessibilityActions {
             if hasExpandableDetails {
                 Button(isExpanded ? "Collapse usage details" : "Expand usage details") {
@@ -560,7 +607,8 @@ struct AccountRowView: View {
                 Button("Switch CLI to This Account", systemImage: "arrow.triangle.2.circlepath") {
                     switchCLI()
                 }
-                .disabled(!hasStoredSnapshot)
+                .disabled(!presentation.manualSwitchEligibility.isEligible)
+                .help(presentation.switchHelp)
                 Divider()
             }
             Button("Open Dashboard…") { openDashboard() }
@@ -569,7 +617,11 @@ struct AccountRowView: View {
                 Button("Save CLI Snapshot Now") { captureCLI() }
             } else {
                 Button("Log In via Terminal") { beginCLILoginWithoutSwitching() }
-                    .help("Re-authenticate this account in Terminal but keep the current account active.")
+                    .disabled(nonActivatingLoginBlocker != nil)
+                    .help(
+                        nonActivatingLoginBlocker
+                            ?? "Re-authenticate this account in Terminal but keep the current account active."
+                    )
                 Button("Log In and Switch") { beginCLILogin() }
                     .help("Log in and make this the active account.")
             }
@@ -665,58 +717,54 @@ struct AccountRowView: View {
         // A failed refresh takes precedence over the quiet note: the account is
         // showing stale or absent numbers for a reason the user can act on.
         // A live depletion forecast outranks the quiet note the same way.
-        let problem = presentation.refreshProblem
-        let pace = problem == nil ? presentation.paceForecast : nil
-        let note = (problem == nil && pace == nil) ? presentation.footerNote : nil
-        if problem != nil || pace != nil || note != nil {
-            HStack(spacing: DS.Spacing.sm) {
-                if let problem {
-                    Label(problem.text, systemImage: problem.icon)
-                        .font(.caption)
-                        .foregroundStyle(DS.presentationColor(problem.tone))
-                        .lineLimit(2)
-                        .help(problem.help)
-                    if let actionTitle = problem.action.title {
-                        Spacer(minLength: 0)
-                        Button(actionTitle) {
-                            switch problem.action {
-                            case .none:
-                                break
-                            case .retry:
-                                retry()
-                            case .login:
-                                beginCLILogin()
-                            case .renew:
-                                if presentation.renewalActivatesAccount {
-                                    beginCLILogin()
-                                } else {
-                                    beginCLILoginWithoutSwitching()
-                                }
-                            }
+        let problems = presentation.rowMessages
+        let pace = problems.isEmpty ? presentation.paceForecast : nil
+        let note = (problems.isEmpty && pace == nil) ? presentation.footerNote : nil
+        if !problems.isEmpty || pace != nil || note != nil {
+            VStack(alignment: .leading, spacing: DS.Spacing.tight) {
+                ForEach(Array(problems.enumerated()), id: \.offset) { _, problem in
+                    HStack(spacing: DS.Spacing.sm) {
+                        Label(problem.text, systemImage: problem.icon)
+                            .font(.caption)
+                            .foregroundStyle(DS.presentationColor(problem.tone))
+                            .lineLimit(2)
+                            .help(problem.help)
+                        if let actionTitle = problem.action.title {
+                            Spacer(minLength: 0)
+                            Button(actionTitle) { perform(problem.action) }
+                                .buttonStyle(.borderless)
+                                .controlSize(.small)
+                                .disabled(
+                                    problem.action == .switchCLI
+                                        && !presentation.manualSwitchEligibility.isEligible
+                                )
+                                .help(
+                                    problem.action == .switchCLI
+                                        ? (presentation.manualSwitchEligibility.blockerReason ?? problem.help)
+                                        : problem.help
+                                )
                         }
-                            .buttonStyle(.borderless)
-                            .controlSize(.small)
                     }
-                } else if let pace {
+                }
+                if let pace {
                     Label(paceText(pace), systemImage: "clock.badge.exclamationmark")
                         .font(.caption)
                         .foregroundStyle(DS.presentationColor(.warning))
                         .lineLimit(2)
                         .help(paceHelp(pace))
-                } else if let note {
+                } else if let note, problems.isEmpty {
                     Label(note.text, systemImage: note.icon)
                         .font(.caption)
                         .foregroundStyle(DS.presentationColor(note.tone))
                         .lineLimit(2)
                         .help(note.help)
                 }
-
             }
             .lineLimit(2)
             .padding(.horizontal, DS.Spacing.md)
             .padding(.vertical, DS.Spacing.sm)
             .background(
-                (problem.map { DS.presentationColor($0.tone) }
+                (problems.first.map { DS.presentationColor($0.tone) }
                     ?? pace.map { _ in DS.presentationColor(.warning) }
                     ?? note.map { DS.presentationColor($0.tone) }
                     ?? Color.secondary).opacity(0.065),
@@ -724,6 +772,46 @@ struct AccountRowView: View {
             )
             .transition(.opacity.combined(with: .move(edge: .top)))
         }
+    }
+
+    private func perform(_ action: AccountRowAction) {
+        switch action {
+        case .none:
+            break
+        case .retry:
+            retry()
+        case .login:
+            beginCLILogin()
+        case .renew:
+            if presentation.renewalActivatesAccount {
+                beginCLILogin()
+            } else {
+                beginCLILoginWithoutSwitching()
+            }
+        case .switchCLI:
+            switchCLI()
+        case .authorize(let source):
+            authorizeCredentials(source)
+        }
+    }
+
+    private var nonActivatingLoginBlocker: String? {
+        guard !profile.isActiveCLI, profile.provider == .claude else {
+            return nil
+        }
+        let credentialAvailability = storedCredentialAvailability
+            ?? (hasStoredSnapshot ? .available : .missing)
+        if credentialAvailability == .available,
+           loginExpiresAt.map({ presentationNow >= $0 }) == true {
+            return "This Claude login has expired. Log in and switch so the recovered account becomes active."
+        }
+        if sharesActiveCredentialChain {
+            return "This profile shares the active Claude login. Switch to it before renewing."
+        }
+        if case .switchRequired = refreshState {
+            return "This profile shares the active Claude login. Switch to it before renewing."
+        }
+        return nil
     }
 
     private func paceText(_ forecast: PaceForecast) -> String {

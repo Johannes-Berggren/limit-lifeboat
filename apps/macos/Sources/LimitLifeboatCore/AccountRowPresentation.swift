@@ -13,6 +13,8 @@ public enum AccountRowAction: Equatable, Sendable {
     case retry
     case login
     case renew
+    case switchCLI
+    case authorize(source: CredentialAuthorizationSource)
 
     public var title: String? {
         switch self {
@@ -24,6 +26,10 @@ public enum AccountRowAction: Equatable, Sendable {
             return "Log In"
         case .renew:
             return "Renew"
+        case .switchCLI:
+            return "Switch"
+        case .authorize:
+            return "Authorize"
         }
     }
 }
@@ -105,7 +111,12 @@ public struct PaceForecast: Equatable, Sendable {
 public struct AccountRowPresentation: Equatable, Sendable {
     public var identityText: String
     public var riskLevel: RiskLevel
-    public var refreshProblem: AccountRowMessage?
+    /// Ordered session/refresh messages. Access and login health lead; one
+    /// compatible Retry/repair message may follow an expiry warning.
+    public var rowMessages: [AccountRowMessage]
+    /// Compatibility accessor for views that have not yet adopted the second
+    /// row. New UI should render `rowMessages` in order.
+    public var refreshProblem: AccountRowMessage? { rowMessages.first }
     public var footerNote: AccountRowMessage?
     public var billingBadge: BillingBadgePresentation?
     public var gauges: AccountGaugeGroups
@@ -115,6 +126,8 @@ public struct AccountRowPresentation: Equatable, Sendable {
     public var switchTitle: String
     public var switchHelp: String
     public var highlightsSwitch: Bool
+    public var manualSwitchEligibility: AccountSwitchEligibility
+    public var automaticSwitchEligibility: AccountSwitchEligibility
     /// Active-account renewal uses the normal login path. Inactive renewal
     /// uses the non-activating flow so the current CLI account is restored.
     public var renewalActivatesAccount: Bool
@@ -123,6 +136,8 @@ public struct AccountRowPresentation: Equatable, Sendable {
         profile: AccountProfile,
         snapshot: UsageSnapshot?,
         hasStoredSnapshot: Bool,
+        storedCredentialAvailability: StoredCredentialAvailability? = nil,
+        sharesActiveCredentialChain: Bool = false,
         refreshState: AccountRefreshState,
         adviceReason: String?,
         estimates: [String: BurnRateEstimate] = [:],
@@ -133,13 +148,20 @@ public struct AccountRowPresentation: Equatable, Sendable {
         self.identityText = Self.identityText(profile, showOrganizationName: showOrganizationName)
         self.riskLevel = snapshot?.riskLevel ?? .unknown
         self.renewalActivatesAccount = profile.isActiveCLI
-        self.refreshProblem = Self.refreshProblem(
-            state: refreshState,
-            profile: profile,
-            hasSnapshot: snapshot != nil,
+        let session = AccountSessionPolicy.evaluate(
+            provider: profile.provider,
+            isActiveCLI: profile.isActiveCLI,
+            wasPreviouslyLinked: snapshot != nil || profile.identity != nil,
+            storedCredentials: storedCredentialAvailability
+                ?? (hasStoredSnapshot ? .available : .missing),
+            sharesActiveCredentialChain: sharesActiveCredentialChain,
+            refreshState: refreshState,
             loginExpiresAt: loginExpiresAt,
             now: now
         )
+        self.rowMessages = session.rowMessages
+        self.manualSwitchEligibility = session.manualSwitchEligibility
+        self.automaticSwitchEligibility = session.automaticSwitchEligibility
         self.footerNote = Self.footerNote(
             profile: profile,
             snapshot: snapshot,
@@ -157,14 +179,10 @@ public struct AccountRowPresentation: Equatable, Sendable {
 
         let resetElapsed = snapshot?.allWindowsResetElapsed(asOf: now) == true
         self.switchTitle = adviceReason == nil ? "Switch" : "Best"
-        let loginIsExpired = loginExpiresAt.map { now >= $0 } == true
-        self.highlightsSwitch = !refreshState.requiresLogin
-            && !loginIsExpired
+        self.highlightsSwitch = session.manualSwitchEligibility.isEligible
             && (resetElapsed || adviceReason != nil)
-        if refreshState.requiresLogin || loginIsExpired {
-            self.switchHelp = "Log in to this account again before switching the CLI to it"
-        } else if !hasStoredSnapshot {
-            self.switchHelp = "Log into this account once in the terminal so its credentials can be captured"
+        if let blocker = session.manualSwitchEligibility.blockerReason {
+            self.switchHelp = blocker
         } else if let adviceReason {
             self.switchHelp = adviceReason
         } else if resetElapsed {
@@ -190,85 +208,6 @@ public struct AccountRowPresentation: Equatable, Sendable {
             parts.append(plan)
         }
         return parts.isEmpty ? "Not linked to a login yet" : parts.joined(separator: " • ")
-    }
-
-    private static func refreshProblem(
-        state: AccountRefreshState,
-        profile: AccountProfile,
-        hasSnapshot: Bool,
-        loginExpiresAt: Date?,
-        now: Date
-    ) -> AccountRowMessage? {
-        switch state {
-        case .idle, .refreshing, .ok:
-            break
-        case .readFailed(let reason):
-            return AccountRowMessage(
-                text: "Couldn't refresh",
-                icon: "exclamationmark.triangle",
-                tone: .warning,
-                help: reason,
-                action: .retry
-            )
-        case .usagePaused:
-            return AccountRowMessage(
-                text: "Usage paused — click to refresh",
-                icon: "pause.circle",
-                tone: .secondary,
-                help: "Limit Lifeboat paused auto-refresh so it won't disturb your active Claude login. Click Retry to update usage now.",
-                action: .retry
-            )
-        case .needsLogin(let reason):
-            let wasPreviouslyLinked = hasSnapshot || profile.identity != nil
-            return AccountRowMessage(
-                text: wasPreviouslyLinked
-                    ? "Login expired — sign in again"
-                    : "Not linked — log in to track usage",
-                icon: "person.crop.circle.badge.questionmark",
-                tone: wasPreviouslyLinked ? .warning : .secondary,
-                help: reason,
-                action: .login
-            )
-        case .keychainLocked:
-            return AccountRowMessage(
-                text: "Keychain access needed",
-                icon: "lock",
-                tone: .stale,
-                help: "macOS denied access to this account's saved credentials. Tap Retry to grant access.",
-                action: .retry
-            )
-        }
-
-        guard profile.provider == .claude,
-              let loginExpiresAt,
-              loginExpiresAt <= now.addingTimeInterval(5 * 24 * 60 * 60) else {
-            return nil
-        }
-        if loginExpiresAt <= now {
-            return AccountRowMessage(
-                text: "Login expired — sign in again",
-                icon: "person.crop.circle.badge.questionmark",
-                tone: .warning,
-                help: "This Claude login expired on this Mac. Other Macs keep their own device-local logins.",
-                action: .login
-            )
-        }
-
-        let remaining = loginExpiresAt.timeIntervalSince(now)
-        let text: String
-        if remaining < 24 * 60 * 60 {
-            text = "Login expires today"
-        } else {
-            let days = Int(ceil(remaining / (24 * 60 * 60)))
-            text = "Login expires in \(days) days"
-        }
-        return AccountRowMessage(
-            text: text,
-            icon: "clock.badge.exclamationmark",
-            tone: .warning,
-            help: "Renew this Claude login before it expires. Renewal affects this Mac only.",
-            action: .renew
-        )
     }
 
     private static func footerNote(

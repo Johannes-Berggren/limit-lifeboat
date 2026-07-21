@@ -1,4 +1,21 @@
 import Foundation
+import CryptoKit
+
+/// Privacy-safe, process-local identity for one rotating refresh-token chain.
+/// Refresh tokens have high entropy, so a one-way digest can be compared
+/// without retaining or exposing the token itself outside credential scopes.
+public enum ClaudeRefreshChainFingerprint {
+    public static func make(refreshToken: String?) -> String? {
+        guard let refreshToken, !refreshToken.isEmpty else { return nil }
+        return SHA256.hash(data: Data(refreshToken.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    public static func make(credentials: ClaudeOAuthCredentials?) -> String? {
+        make(refreshToken: credentials?.refreshToken)
+    }
+}
 
 /// Endpoints and client constants for Claude Code's OAuth flow, verified
 /// against the Claude Code 2.1.202 binary and live calls.
@@ -110,6 +127,41 @@ public struct ClaudeOAuthCredentials: Equatable, Sendable {
         return now >= refreshTokenExpiresAt
     }
 
+    /// Applies only the fields advanced by a refresh-token exchange to this
+    /// holder's OAuth object. Organization/config metadata and unknown fields
+    /// remain owned by the destination snapshot.
+    public func mergingRotatedTokenFields(
+        from refreshed: ClaudeOAuthCredentials
+    ) -> ClaudeOAuthCredentials? {
+        guard var object = try? JSONSerialization.jsonObject(with: rawClaudeAiOauth)
+            as? [String: Any] else {
+            return nil
+        }
+        object["accessToken"] = refreshed.accessToken
+        if let refreshToken = refreshed.refreshToken, !refreshToken.isEmpty {
+            object["refreshToken"] = refreshToken
+        }
+        if let expiresAt = refreshed.expiresAt {
+            object["expiresAt"] = Int64(
+                (expiresAt.timeIntervalSince1970 * 1000).rounded()
+            )
+        } else {
+            object.removeValue(forKey: "expiresAt")
+        }
+        if let refreshTokenExpiresAt = refreshed.refreshTokenExpiresAt {
+            object["refreshTokenExpiresAt"] = Int64(
+                (refreshTokenExpiresAt.timeIntervalSince1970 * 1000).rounded()
+            )
+        }
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: object,
+            options: [.sortedKeys]
+        ) else {
+            return nil
+        }
+        return ClaudeOAuthCredentials(claudeAiOauthJSON: data)
+    }
+
     /// Orders two captures from the same account without inspecting their
     /// secret bytes. A renewed login wins first, then a later access-token
     /// generation. This lets reconciliation keep a rotated stored credential
@@ -124,5 +176,25 @@ public struct ClaudeOAuthCredentials: Equatable, Sendable {
         let ownAccessExpiry = expiresAt ?? .distantPast
         let otherAccessExpiry = other.expiresAt ?? .distantPast
         return ownAccessExpiry > otherAccessExpiry
+    }
+
+    /// Orders recoverable generations without treating an intentionally
+    /// unknown access expiry as older than a timestamp that is already known
+    /// to be expired. A valid refresh response may omit `expires_in`, in which
+    /// case the stale `expiresAt` field is deliberately removed.
+    public func isFresher(than other: ClaudeOAuthCredentials, asOf now: Date) -> Bool {
+        let ownLoginExpired = isLoginExpired(asOf: now)
+        let otherLoginExpired = other.isLoginExpired(asOf: now)
+        if ownLoginExpired != otherLoginExpired {
+            return !ownLoginExpired
+        }
+
+        let ownAccessExpired = isExpired(asOf: now)
+        let otherAccessExpired = other.isExpired(asOf: now)
+        if ownAccessExpired != otherAccessExpired {
+            return !ownAccessExpired
+        }
+
+        return isFresher(than: other)
     }
 }

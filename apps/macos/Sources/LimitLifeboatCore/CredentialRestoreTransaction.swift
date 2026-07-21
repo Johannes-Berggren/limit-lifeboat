@@ -2,13 +2,19 @@ import Foundation
 
 struct CredentialRestoreHooks {
     var beforeDestinationCheck: ((URL) throws -> Void)?
+    var beforeDestinationWrite: ((URL) throws -> Void)?
+    var beforeKeychainWrite: (() throws -> Void)?
     var afterDestinationWrite: ((URL) throws -> Void)?
 
     init(
         beforeDestinationCheck: ((URL) throws -> Void)? = nil,
+        beforeDestinationWrite: ((URL) throws -> Void)? = nil,
+        beforeKeychainWrite: (() throws -> Void)? = nil,
         afterDestinationWrite: ((URL) throws -> Void)? = nil
     ) {
         self.beforeDestinationCheck = beforeDestinationCheck
+        self.beforeDestinationWrite = beforeDestinationWrite
+        self.beforeKeychainWrite = beforeKeychainWrite
         self.afterDestinationWrite = afterDestinationWrite
     }
 
@@ -25,19 +31,22 @@ final class CredentialRestoreTransaction {
     private let fileManager: FileManager
     private let claudeCredentialSource: ClaudeCLICredentialSource
     private let hooks: CredentialRestoreHooks
+    private let validateMutationLease: (() throws -> Void)?
 
     init(
         homeDirectory: URL,
         backupDirectory: URL,
         fileManager: FileManager,
         claudeCredentialSource: ClaudeCLICredentialSource,
-        hooks: CredentialRestoreHooks = .none
+        hooks: CredentialRestoreHooks = .none,
+        validateMutationLease: (() throws -> Void)? = nil
     ) {
         self.homeDirectory = homeDirectory
         self.backupDirectory = backupDirectory
         self.fileManager = fileManager
         self.claudeCredentialSource = claudeCredentialSource
         self.hooks = hooks
+        self.validateMutationLease = validateMutationLease
     }
 
     func restore(
@@ -165,6 +174,7 @@ final class CredentialRestoreTransaction {
             claudeKeychainItemLocation: claudeKeychainItemLocation,
             claudeKeychainItemData: liveKeychainBackup
         )
+        try validateMutationLease?()
 
         // Phase 2: write all items; on failure roll back from the backups.
         // The keychain merge goes last so a file failure never leaves the CLI
@@ -174,6 +184,7 @@ final class CredentialRestoreTransaction {
         var writtenKeychain: Data?
         do {
             for item in fileItems {
+                try validateMutationLease?()
                 let destination = resolve(relativePath: item.relativePath)
                 if item.onlyIfDestinationExists == true,
                    !fileManager.fileExists(atPath: destination.path) {
@@ -186,33 +197,39 @@ final class CredentialRestoreTransaction {
                 guard matchesBaseline else {
                     throw CLISwitcherError.credentialConflict(destination.path)
                 }
+                try validateMutationLease?()
                 try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
                 let written: Data
                 switch item.kind {
                 case .fullFile:
-                    try item.contents.write(to: destination, options: [.atomic])
                     written = item.contents
                 case .jsonFields:
                     written = try mergeJSONFields(
                         item.contents,
                         ownedKeys: item.ownedJSONKeys,
-                        into: destination
+                        into: current,
+                        destinationPath: destination.path
                     )
                 case .keychainJSONFields:
                     preconditionFailure("Keychain items are restored after files")
                 }
+                try hooks.beforeDestinationWrite?(destination)
+                try validateMutationLease?()
+                try written.write(to: destination, options: [.atomic])
                 // Register the exact mutation before any later operation can
                 // throw. Permission changes, injected checks, and validation
                 // must all be able to roll this write back safely.
                 touched.append(destination)
                 writtenFiles[destination.path] = written
                 try hooks.afterDestinationWrite?(destination)
+                try validateMutationLease?()
                 try fileManager.setAttributes(
                     [.posixPermissions: item.posixPermissions ?? 0o600],
                     ofItemAtPath: destination.path
                 )
             }
             for item in keychainItems {
+                try validateMutationLease?()
                 let current = try readClaudeKeychainItem(
                     at: claudeKeychainItemLocation,
                     accessMode: accessMode
@@ -221,6 +238,7 @@ final class CredentialRestoreTransaction {
                     throw CLISwitcherError.credentialConflict(CLISwitcher.claudeKeychainItemPath)
                 }
                 let merged = try mergeClaudeAiOauth(item.contents, intoItemJSON: liveKeychainBackup)
+                try hooks.beforeKeychainWrite?()
                 try writeClaudeKeychainItem(
                     merged,
                     at: claudeKeychainItemLocation,
@@ -230,6 +248,7 @@ final class CredentialRestoreTransaction {
             }
             // Verification is part of the transaction: rollback material is
             // not deleted until the restored login identifies the target.
+            try validateMutationLease?()
             try validateRestoredCredentials()
         } catch {
             let originalError = error
@@ -243,13 +262,21 @@ final class CredentialRestoreTransaction {
                     continue
                 }
                 do {
+                    // Rollback is still a provider-owned Claude mutation. If
+                    // the shared lease was replaced after our forward write,
+                    // preserve the exact recovery backup and leave the current
+                    // bytes untouched for explicit repair.
+                    try validateMutationLease?()
                     if let backupURL = baselineBackupURLs[destination.path] {
                         let baseline = try Data(contentsOf: backupURL)
+                        try validateMutationLease?()
                         try baseline.write(to: destination, options: [.atomic])
                         if let permissions = baselinePermissions[destination.path] {
+                            try validateMutationLease?()
                             try fileManager.setAttributes([.posixPermissions: permissions], ofItemAtPath: destination.path)
                         }
                     } else if fileManager.fileExists(atPath: destination.path) {
+                        try validateMutationLease?()
                         try fileManager.removeItem(at: destination)
                     }
                 } catch let rollbackError {
@@ -260,6 +287,7 @@ final class CredentialRestoreTransaction {
             }
             if let writtenKeychain {
                 do {
+                    try validateMutationLease?()
                     if try readClaudeKeychainItem(
                         at: claudeKeychainItemLocation,
                         accessMode: accessMode
@@ -348,6 +376,7 @@ final class CredentialRestoreTransaction {
         at location: ClaudeKeychainItemLocation?,
         accessMode: CredentialAccessMode
     ) throws {
+        try validateMutationLease?()
         if let location {
             try claudeCredentialSource.writeLiveItemJSON(
                 data,
@@ -363,6 +392,7 @@ final class CredentialRestoreTransaction {
         at location: ClaudeKeychainItemLocation?,
         accessMode: CredentialAccessMode
     ) throws {
+        try validateMutationLease?()
         if let location {
             try claudeCredentialSource.deleteLiveItem(
                 at: location,
@@ -392,15 +422,19 @@ final class CredentialRestoreTransaction {
         }
     }
 
-    private func mergeJSONFields(_ fieldsData: Data, ownedKeys: [String]?, into url: URL) throws -> Data {
+    private func mergeJSONFields(
+        _ fieldsData: Data,
+        ownedKeys: [String]?,
+        into destinationData: Data?,
+        destinationPath: String
+    ) throws -> Data {
         guard let fields = try JSONSerialization.jsonObject(with: fieldsData) as? [String: Any] else {
-            throw CLISwitcherError.invalidJSON(url.path)
+            throw CLISwitcherError.invalidJSON(destinationPath)
         }
         var destinationObject: [String: Any] = [:]
-        if fileManager.fileExists(atPath: url.path) {
-            let destinationData = try Data(contentsOf: url)
+        if let destinationData {
             guard let parsed = try JSONSerialization.jsonObject(with: destinationData) as? [String: Any] else {
-                throw CLISwitcherError.invalidJSON(url.path)
+                throw CLISwitcherError.invalidJSON(destinationPath)
             }
             destinationObject = parsed
         }
@@ -410,9 +444,7 @@ final class CredentialRestoreTransaction {
         for (key, value) in fields {
             destinationObject[key] = value
         }
-        let data = try JSONSerialization.data(withJSONObject: destinationObject, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: url, options: [.atomic])
-        return data
+        return try JSONSerialization.data(withJSONObject: destinationObject, options: [.prettyPrinted, .sortedKeys])
     }
 
     /// Converts snapshots from older builds that captured whole auth files into

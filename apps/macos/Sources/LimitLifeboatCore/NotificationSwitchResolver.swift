@@ -41,12 +41,19 @@ public struct NotificationSwitchResolver: Sendable {
         // depletions that happened while the notification sat unclicked.
         if let advised = candidate(for: advice?.bestCandidateID),
            !advised.isActiveCLI,
-           advised.hasStoredCredentials {
+           advised.manualSwitchEligibility.isEligible {
             return .switchTo(profileID: advised.profileID, label: advised.label)
         }
 
-        if let embedded = candidate(for: embeddedTargetID), embedded.hasStoredCredentials {
+        if let embedded = candidate(for: embeddedTargetID),
+           !embedded.isActiveCLI,
+           embedded.manualSwitchEligibility.isEligible {
             return .switchTo(profileID: embedded.profileID, label: embedded.label)
+        }
+
+        if let embedded = candidate(for: embeddedTargetID),
+           let reason = embedded.manualSwitchEligibility.blockerReason {
+            return .noEligibleTarget(reason: reason)
         }
 
         return .noEligibleTarget(reason: "No saved account is ready to switch to.")

@@ -86,6 +86,16 @@ public struct VersionedCredentialSnapshot: Sendable {
 
 public protocol CredentialStoreProtocol {
     func save(snapshot: CredentialSnapshot, for accountID: UUID, accessMode: CredentialAccessMode) throws
+    /// Atomically inserts a snapshot only when the account has no existing
+    /// credential item. A concurrent creator wins and leaves its bytes intact.
+    /// Real credential-store implementations must override the compatibility
+    /// fallback below so the absence check and insert are one operation.
+    @discardableResult
+    func insertSnapshotIfAbsent(
+        _ snapshot: CredentialSnapshot,
+        for accountID: UUID,
+        accessMode: CredentialAccessMode
+    ) throws -> Bool
     func loadVersionedSnapshot(
         for accountID: UUID,
         accessMode: CredentialAccessMode
@@ -109,6 +119,18 @@ public protocol CredentialStoreProtocol {
 public extension CredentialStoreProtocol {
     func save(snapshot: CredentialSnapshot, for accountID: UUID) throws {
         try save(snapshot: snapshot, for: accountID, accessMode: CredentialAccess.currentMode)
+    }
+
+    @discardableResult
+    func insertSnapshotIfAbsent(
+        _ snapshot: CredentialSnapshot,
+        for accountID: UUID
+    ) throws -> Bool {
+        try insertSnapshotIfAbsent(
+            snapshot,
+            for: accountID,
+            accessMode: CredentialAccess.currentMode
+        )
     }
 
     func loadSnapshot(for accountID: UUID) throws -> CredentialSnapshot? {
@@ -138,6 +160,24 @@ public extension CredentialStoreProtocol {
             snapshot: snapshot,
             revision: fallbackRevision(for: snapshot)
         )
+    }
+
+    /// Compatibility for in-memory and legacy stores. Production Keychain
+    /// storage overrides this with one atomic `SecItemAdd`.
+    @discardableResult
+    func insertSnapshotIfAbsent(
+        _ snapshot: CredentialSnapshot,
+        for accountID: UUID,
+        accessMode: CredentialAccessMode
+    ) throws -> Bool {
+        guard try loadVersionedSnapshot(
+            for: accountID,
+            accessMode: accessMode
+        ) == nil else {
+            return false
+        }
+        try save(snapshot: snapshot, for: accountID, accessMode: accessMode)
+        return true
     }
 
     @discardableResult
@@ -300,6 +340,36 @@ public final class KeychainCredentialStore: CredentialStoreProtocol {
         }
 
         throw CredentialStoreError.keychainError(addStatus)
+    }
+
+    /// `SecItemAdd` is the atomic absence predicate for a generic-password
+    /// item. Unlike `save`, a duplicate is a compare-and-swap conflict and must
+    /// never be followed by an update that overwrites the concurrent creator.
+    @discardableResult
+    public func insertSnapshotIfAbsent(
+        _ snapshot: CredentialSnapshot,
+        for accountID: UUID,
+        accessMode: CredentialAccessMode
+    ) throws -> Bool {
+        try validateCredentialAccess()
+        guard let data = try? encoder.encode(snapshot) else {
+            throw CredentialStoreError.encodeFailed
+        }
+
+        var addQuery = baseQuery(accountID: accountID, accessMode: accessMode)
+        addQuery.removeValue(forKey: kSecMatchSearchList as String)
+        if let keychain {
+            addQuery[kSecUseKeychain as String] = keychain
+        }
+        addQuery[kSecValueData as String] = data
+        addQuery[kSecAttrGeneric as String] = freshRevision().rawValue
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+
+        CredentialAccess.recordKeychainWrite()
+        let status = operations.add(addQuery as CFDictionary)
+        if status == errSecSuccess { return true }
+        if status == errSecDuplicateItem { return false }
+        throw CredentialStoreError.keychainError(status)
     }
 
     /// The opaque revision is mirrored into `kSecAttrGeneric`, which is a

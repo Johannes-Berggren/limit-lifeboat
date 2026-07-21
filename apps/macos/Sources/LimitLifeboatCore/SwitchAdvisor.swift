@@ -2,25 +2,30 @@ import Foundation
 
 /// One Claude account considered as a switch target: the profile's stable id
 /// and label, whether the CLI is currently logged into it, whether a stored
-/// credential snapshot exists to switch to, and its latest usage reading.
+/// switch eligibility for manual and automatic sources, and its latest usage
+/// reading. Automatic eligibility is deliberately stricter because automatic
+/// switching must never rotate credentials.
 public struct SwitchCandidate: Equatable, Sendable {
     public var profileID: UUID
     public var label: String
     public var isActiveCLI: Bool
-    public var hasStoredCredentials: Bool
+    public var manualSwitchEligibility: AccountSwitchEligibility
+    public var automaticSwitchEligibility: AccountSwitchEligibility
     public var snapshot: UsageSnapshot?
 
     public init(
         profileID: UUID,
         label: String,
         isActiveCLI: Bool,
-        hasStoredCredentials: Bool,
+        manualSwitchEligibility: AccountSwitchEligibility,
+        automaticSwitchEligibility: AccountSwitchEligibility,
         snapshot: UsageSnapshot?
     ) {
         self.profileID = profileID
         self.label = label
         self.isActiveCLI = isActiveCLI
-        self.hasStoredCredentials = hasStoredCredentials
+        self.manualSwitchEligibility = manualSwitchEligibility
+        self.automaticSwitchEligibility = automaticSwitchEligibility
         self.snapshot = snapshot
     }
 }
@@ -89,7 +94,7 @@ public struct SwitchAdvisor: Sendable {
 
     public func advise(candidates: [SwitchCandidate], now: Date = Date()) -> SwitchAdvice {
         let targets = candidates
-            .filter { !$0.isActiveCLI && $0.hasStoredCredentials }
+            .filter { !$0.isActiveCLI && $0.manualSwitchEligibility.isEligible }
             .compactMap { scoredTarget(for: $0, now: now) }
             .sorted { left, right in
                 if left.score != right.score {
@@ -98,15 +103,30 @@ public struct SwitchAdvisor: Sendable {
                 return left.candidate.label < right.candidate.label
             }
 
-        guard let best = targets.first else {
+        guard let manualBest = targets.first else {
             return SwitchAdvice()
         }
 
+        // If the active account is depleted, skip a higher-scoring target that
+        // needs user-authorized rotation and choose the best read-only target
+        // that actually clears the auto-switch bars. Otherwise preserve the
+        // best manually switchable account as the passive UI hint.
+        if let automaticBest = targets.first(where: {
+            $0.candidate.automaticSwitchEligibility.isEligible
+        }), shouldAutoSwitch(to: automaticBest, candidates: candidates, now: now) {
+            return SwitchAdvice(
+                bestCandidateID: automaticBest.candidate.profileID,
+                bestCandidateLabel: automaticBest.candidate.label,
+                shouldAutoSwitch: true,
+                reason: reason(for: automaticBest)
+            )
+        }
+
         return SwitchAdvice(
-            bestCandidateID: best.candidate.profileID,
-            bestCandidateLabel: best.candidate.label,
-            shouldAutoSwitch: shouldAutoSwitch(to: best, candidates: candidates, now: now),
-            reason: reason(for: best)
+            bestCandidateID: manualBest.candidate.profileID,
+            bestCandidateLabel: manualBest.candidate.label,
+            shouldAutoSwitch: false,
+            reason: reason(for: manualBest)
         )
     }
 
@@ -201,6 +221,7 @@ public struct SwitchAdvisor: Sendable {
 
     private func shouldAutoSwitch(to best: ScoredTarget, candidates: [SwitchCandidate], now: Date) -> Bool {
         guard best.canAutoSwitch,
+              best.candidate.automaticSwitchEligibility.isEligible,
               best.score >= configuration.minimumHeadroomPercent,
               let active = candidates.first(where: { $0.isActiveCLI }),
               let activeSnapshot = active.snapshot,

@@ -78,6 +78,10 @@ public final class CLISwitcher {
     private let backupDirectory: URL
     private let credentialStore: CredentialStoreProtocol
     private let claudeCLICredentialSource: ClaudeCLICredentialSource
+    /// Production enables this so every provider-owned Claude OAuth write is
+    /// impossible outside Claude Code's cross-process lease. Tests and tools
+    /// that use in-memory credential sources may leave it disabled.
+    private let requiresClaudeOAuthLease: Bool
     private let codexCredentials: CodexCredentialAdapter
     private let claudeCredentials: ClaudeCredentialAdapter
 
@@ -86,13 +90,15 @@ public final class CLISwitcher {
         backupDirectory: URL,
         credentialStore: CredentialStoreProtocol,
         fileManager: FileManager = .default,
-        claudeCLICredentialSource: ClaudeCLICredentialSource = ClaudeCodeCredentialsKeychain()
+        claudeCLICredentialSource: ClaudeCLICredentialSource = ClaudeCodeCredentialsKeychain(),
+        requiresClaudeOAuthLease: Bool = false
     ) {
         self.homeDirectory = homeDirectory
         self.backupDirectory = backupDirectory
         self.credentialStore = credentialStore
         self.fileManager = fileManager
         self.claudeCLICredentialSource = claudeCLICredentialSource
+        self.requiresClaudeOAuthLease = requiresClaudeOAuthLease
         self.codexCredentials = CodexCredentialAdapter(homeDirectory: homeDirectory, fileManager: fileManager)
         self.claudeCredentials = ClaudeCredentialAdapter(
             homeDirectory: homeDirectory,
@@ -159,7 +165,7 @@ public final class CLISwitcher {
                    let liveCredentials = ClaudeOAuthCredentials(
                     claudeAiOauthJSON: snapshot.items[liveIndex].contents
                    ),
-                   storedCredentials.isFresher(than: liveCredentials) {
+                   storedCredentials.isFresher(than: liveCredentials, asOf: Date()) {
                     snapshot.items[liveIndex] = storedItem
                 }
             } else {
@@ -174,7 +180,47 @@ public final class CLISwitcher {
            CredentialFingerprint.make(for: stored) == CredentialFingerprint.make(for: snapshot) {
             return snapshot
         }
-        try credentialStore.save(snapshot: snapshot, for: profile.id, accessMode: accessMode)
+        if let revision = storedRecord?.storeRevision {
+            // Observation planning already read this exact encrypted owner.
+            // Preserve a concurrent newer generation instead of turning the
+            // capture into an unconditional last-writer-wins overwrite.
+            guard try credentialStore.replaceSnapshot(
+                snapshot,
+                for: profile.id,
+                ifRevisionMatches: revision,
+                accessMode: accessMode
+            ) != nil else {
+                throw CLISwitcherError.credentialConflict(
+                    "saved \(profile.provider.displayName) credentials"
+                )
+            }
+        } else if let storedRecord {
+            // Compatibility for snapshots created before opaque revisions:
+            // compare the semantic generation again at the write boundary.
+            guard let current = try credentialStore.loadSnapshot(
+                for: profile.id,
+                accessMode: accessMode
+            ),
+            CredentialFingerprint.make(for: current) == storedRecord.summary.fingerprint else {
+                throw CLISwitcherError.credentialConflict(
+                    "saved \(profile.provider.displayName) credentials"
+                )
+            }
+            try credentialStore.save(snapshot: snapshot, for: profile.id, accessMode: accessMode)
+        } else {
+            // A first capture has no generation to replace. The store's atomic
+            // insert makes an item appearing concurrently win without exposing
+            // or overwriting its credential bytes.
+            guard try credentialStore.insertSnapshotIfAbsent(
+                snapshot,
+                for: profile.id,
+                accessMode: accessMode
+            ) else {
+                throw CLISwitcherError.credentialConflict(
+                    "saved \(profile.provider.displayName) credentials"
+                )
+            }
+        }
         return snapshot
     }
 
@@ -342,6 +388,9 @@ public final class CLISwitcher {
         enforceExpectedLiveState: Bool = false,
         accessMode: CredentialAccessMode = CredentialAccess.currentMode
     ) throws -> RestoreResult {
+        if profile.provider == .claude {
+            try validateClaudeOAuthMutationLease()
+        }
         let snapshot = storedRecord.snapshot
         guard snapshot.provider == profile.provider else {
             throw CLISwitcherError.providerMismatch(expected: profile.provider, actual: snapshot.provider)
@@ -375,7 +424,10 @@ public final class CLISwitcher {
             homeDirectory: homeDirectory,
             backupDirectory: backupDirectory,
             fileManager: fileManager,
-            claudeCredentialSource: claudeCLICredentialSource
+            claudeCredentialSource: claudeCLICredentialSource,
+            validateMutationLease: profile.provider == .claude
+                ? { [self] in try validateClaudeOAuthMutationLease() }
+                : nil
         ).restore(
             snapshot,
             expectedLiveFingerprint: shouldEnforceLiveState ? .some(expectedLiveFingerprint) : nil,
@@ -434,10 +486,16 @@ public final class CLISwitcher {
     }
 
     public func deleteStoredSnapshot(
-        for profileID: UUID,
+        for profile: AccountProfile,
         accessMode: CredentialAccessMode = CredentialAccess.currentMode
     ) throws {
-        try credentialStore.deleteSnapshot(for: profileID, accessMode: accessMode)
+        if profile.provider == .claude {
+            // Profile removal participates in the same provider-wide
+            // transaction as journal reconciliation. Check at the actual
+            // Keychain mutation boundary, not only when that workflow starts.
+            try validateClaudeOAuthMutationLease()
+        }
+        try credentialStore.deleteSnapshot(for: profile.id, accessMode: accessMode)
     }
 
     public func currentIdentity(
@@ -482,12 +540,17 @@ public final class CLISwitcher {
         storeRevision: CredentialStoreRevision? = nil
     ) -> StoredCredentialRecord {
         let expiresAt: Date?
+        let refreshChainFingerprint: String?
         if snapshot.provider == .claude,
            let item = snapshot.items.first(where: { $0.kind == .keychainJSONFields }) {
-            expiresAt = ClaudeOAuthCredentials(claudeAiOauthJSON: item.contents)?
-                .refreshTokenExpiresAt
+            let credentials = ClaudeOAuthCredentials(claudeAiOauthJSON: item.contents)
+            expiresAt = credentials?.refreshTokenExpiresAt
+            refreshChainFingerprint = ClaudeRefreshChainFingerprint.make(
+                credentials: credentials
+            )
         } else {
             expiresAt = nil
+            refreshChainFingerprint = nil
         }
         return StoredCredentialRecord(
             snapshot: snapshot,
@@ -495,7 +558,8 @@ public final class CLISwitcher {
                 provider: snapshot.provider,
                 fingerprint: CredentialFingerprint.make(for: snapshot),
                 isRestorable: isRestorable(snapshot, for: snapshot.provider),
-                claudeRefreshTokenExpiresAt: expiresAt
+                claudeRefreshTokenExpiresAt: expiresAt,
+                claudeRefreshChainFingerprint: refreshChainFingerprint
             ),
             storeRevision: storeRevision
         )
@@ -600,6 +664,7 @@ public final class CLISwitcher {
         _ credentials: ClaudeOAuthCredentials,
         accessMode: CredentialAccessMode = CredentialAccess.currentMode
     ) throws {
+        try validateClaudeOAuthMutationLease()
         // A thrown read must abort the write: collapsing it into nil would
         // merge into {} and drop the item's siblings (mcpOAuth). Only a
         // genuine nil (item absent) starts a fresh item.
@@ -613,17 +678,17 @@ public final class CLISwitcher {
     public func replaceLiveClaudeOAuthCredentials(
         _ credentials: ClaudeOAuthCredentials,
         at expectedItemLocation: ClaudeKeychainItemLocation? = nil,
-        ifAccessTokenMatches expectedAccessToken: String,
+        ifCurrentCredentialsMatch expectedCredentials: ClaudeOAuthCredentials,
         accessMode: CredentialAccessMode = CredentialAccess.currentMode
     ) throws -> Bool {
+        try validateClaudeOAuthMutationLease()
         let location = try expectedItemLocation
             ?? resolveClaudeKeychainItemForMutation(accessMode: accessMode)
         let live = try readClaudeKeychainItem(at: location, accessMode: accessMode)
-        guard live.flatMap({ ClaudeOAuthCredentials.extract(fromKeychainItemJSON: $0) })?.accessToken == expectedAccessToken else {
-            return false
-        }
-        let baselineCredentials = live.flatMap {
+        guard live.flatMap({
             ClaudeOAuthCredentials.extract(fromKeychainItemJSON: $0)
+        })?.rawClaudeAiOauth == expectedCredentials.rawClaudeAiOauth else {
+            return false
         }
         // Re-read at the last mutation boundary. An unrelated MCP sibling may
         // legitimately rotate while the OAuth request is in flight; preserve
@@ -634,7 +699,7 @@ public final class CLISwitcher {
             accessMode: accessMode
         ),
         ClaudeOAuthCredentials.extract(fromKeychainItemJSON: latest)?
-            .rawClaudeAiOauth == baselineCredentials?.rawClaudeAiOauth else {
+            .rawClaudeAiOauth == expectedCredentials.rawClaudeAiOauth else {
             return false
         }
         let merged = try mergeClaudeAiOauth(
@@ -643,6 +708,11 @@ public final class CLISwitcher {
         )
         try writeClaudeKeychainItem(merged, at: location, accessMode: accessMode)
         return true
+    }
+
+    private func validateClaudeOAuthMutationLease() throws {
+        guard requiresClaudeOAuthLease else { return }
+        try ClaudeOAuthMutationLeaseContext.requireCurrent().validate()
     }
 
     /// The OAuth tokens captured into a profile's stored snapshot, if any.
@@ -664,9 +734,16 @@ public final class CLISwitcher {
         for profileID: UUID,
         accessMode: CredentialAccessMode = CredentialAccess.currentMode
     ) throws {
-        guard var snapshot = try credentialStore.loadSnapshot(for: profileID, accessMode: accessMode) else {
+        guard let versioned = try credentialStore.loadVersionedSnapshot(
+            for: profileID,
+            accessMode: accessMode
+        ) else {
             throw CLISwitcherError.missingStoredSnapshot(profileID)
         }
+        let baselineFingerprint = CredentialFingerprint.make(
+            for: versioned.snapshot
+        )
+        var snapshot = versioned.snapshot
         if let index = snapshot.items.firstIndex(where: { $0.kind == .keychainJSONFields }) {
             snapshot.items[index].contents = credentials.rawClaudeAiOauth
         } else {
@@ -679,14 +756,46 @@ public final class CLISwitcher {
                 )
             )
         }
-        try credentialStore.save(snapshot: snapshot, for: profileID, accessMode: accessMode)
+        if let revision = versioned.revision {
+            try validateClaudeOAuthMutationLease()
+            guard try credentialStore.replaceSnapshot(
+                snapshot,
+                for: profileID,
+                ifRevisionMatches: revision,
+                accessMode: accessMode
+            ) != nil else {
+                throw CLISwitcherError.credentialConflict(
+                    "saved Claude credentials"
+                )
+            }
+            return
+        }
+
+        // Legacy snapshots have no opaque revision. Re-read and compare their
+        // complete semantic generation immediately before the one-time save;
+        // the save stamps a revision for all later rotations.
+        guard let current = try credentialStore.loadSnapshot(
+            for: profileID,
+            accessMode: accessMode
+        ),
+        CredentialFingerprint.make(for: current) == baselineFingerprint else {
+            throw CLISwitcherError.credentialConflict(
+                "saved Claude credentials"
+            )
+        }
+        try validateClaudeOAuthMutationLease()
+        try credentialStore.save(
+            snapshot: snapshot,
+            for: profileID,
+            accessMode: accessMode
+        )
     }
 
     @discardableResult
     public func replaceStoredClaudeOAuthCredentials(
         _ credentials: ClaudeOAuthCredentials,
         for profileID: UUID,
-        ifAccessTokenMatches expectedAccessToken: String,
+        ifCurrentCredentialsMatch expectedCredentials: ClaudeOAuthCredentials,
         accessMode: CredentialAccessMode = CredentialAccess.currentMode
     ) throws -> Bool {
         guard let stored = try credentialStore.loadVersionedSnapshot(
@@ -702,7 +811,7 @@ public final class CLISwitcher {
                 from: stored.snapshot,
                 storeRevision: stored.revision
             ),
-            ifAccessTokenMatches: expectedAccessToken,
+            ifCurrentCredentialsMatch: expectedCredentials,
             accessMode: accessMode
         ) != nil
     }
@@ -716,7 +825,7 @@ public final class CLISwitcher {
         _ credentials: ClaudeOAuthCredentials,
         for profileID: UUID,
         using storedRecord: StoredCredentialRecord,
-        ifAccessTokenMatches expectedAccessToken: String,
+        ifCurrentCredentialsMatch expectedCredentials: ClaudeOAuthCredentials,
         accessMode: CredentialAccessMode = CredentialAccess.currentMode
     ) throws -> StoredCredentialRecord? {
         guard storedRecord.snapshot.provider == .claude else {
@@ -733,7 +842,7 @@ public final class CLISwitcher {
         guard let index = snapshot.items.firstIndex(where: { $0.kind == .keychainJSONFields }),
               ClaudeOAuthCredentials(
                   claudeAiOauthJSON: snapshot.items[index].contents
-              )?.accessToken == expectedAccessToken else {
+              )?.rawClaudeAiOauth == expectedCredentials.rawClaudeAiOauth else {
             return nil
         }
         snapshot.items[index].contents = credentials.rawClaudeAiOauth
@@ -741,6 +850,7 @@ public final class CLISwitcher {
             return storedRecord
         }
         if let expectedRevision = storedRecord.storeRevision {
+            try validateClaudeOAuthMutationLease()
             guard let newRevision = try credentialStore.replaceSnapshot(
                 snapshot,
                 for: profileID,
@@ -766,6 +876,7 @@ public final class CLISwitcher {
         CredentialFingerprint.make(for: current) == expectedFingerprint else {
             return nil
         }
+        try validateClaudeOAuthMutationLease()
         try credentialStore.save(snapshot: snapshot, for: profileID, accessMode: accessMode)
         return makeStoredCredentialRecord(from: snapshot)
     }
@@ -801,6 +912,10 @@ public final class CLISwitcher {
         at location: ClaudeKeychainItemLocation?,
         accessMode: CredentialAccessMode
     ) throws {
+        // The reads and JSON merge preceding this helper can outlive a lock
+        // replacement. Validate at the actual mutation boundary as well as at
+        // the workflow entry so a stale lease can never write the live item.
+        try validateClaudeOAuthMutationLease()
         if let location {
             try claudeCLICredentialSource.writeLiveItemJSON(
                 data,

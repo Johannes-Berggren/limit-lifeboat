@@ -166,23 +166,44 @@ final class ClaudeUsageAPIClientTests: XCTestCase {
         XCTAssertEqual(usage.windows[0].usedPercent, 53.5)
     }
 
-    func testThrowsUnauthorizedOn401And403() async {
+    func testDistinguishesUnauthorizedFromForbidden() async {
         let httpClient = MockHTTPClient()
         httpClient.stub(status: 401, bodyText: "{}")
+        httpClient.stub(status: 401, bodyText: #"{"error":"insufficient_scope"}"#)
         httpClient.stub(status: 403, bodyText: "{}")
         let client = ClaudeUsageAPIClient(httpClient: httpClient)
 
-        for _ in 0..<2 {
-            do {
-                _ = try await client.fetchUsage(accessToken: "expired-token")
-                XCTFail("Expected unauthorized")
-            } catch let error as ClaudeUsageAPIError {
-                guard case .unauthorized = error else {
-                    return XCTFail("Unexpected error: \(error)")
-                }
-            } catch {
-                XCTFail("Unexpected error: \(error)")
+        do {
+            _ = try await client.fetchUsage(accessToken: "expired-token")
+            XCTFail("Expected unauthorized")
+        } catch let error as ClaudeUsageAPIError {
+            guard case .unauthorized = error else {
+                return XCTFail("Unexpected error: \(error)")
             }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        do {
+            _ = try await client.fetchUsage(accessToken: "insufficient-scope-token")
+            XCTFail("Expected forbidden")
+        } catch let error as ClaudeUsageAPIError {
+            guard case .forbidden = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        do {
+            _ = try await client.fetchUsage(accessToken: "wrong-scope-token")
+            XCTFail("Expected forbidden")
+        } catch let error as ClaudeUsageAPIError {
+            guard case .forbidden = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
         }
     }
 
@@ -574,23 +595,44 @@ final class ClaudeUsageAPIClientTests: XCTestCase {
         XCTAssertEqual(action, .activate(profile.id))
     }
 
-    func testFetchAccountInfoThrowsUnauthorizedOn401And403() async {
+    func testFetchAccountInfoDistinguishesUnauthorizedFromForbidden() async {
         let httpClient = MockHTTPClient()
         httpClient.stub(status: 401, bodyText: "{}")
+        httpClient.stub(status: 401, bodyText: #"{"error":"insufficient_scope"}"#)
         httpClient.stub(status: 403, bodyText: "{}")
         let client = ClaudeUsageAPIClient(httpClient: httpClient)
 
-        for _ in 0..<2 {
-            do {
-                _ = try await client.fetchAccountInfo(accessToken: "expired-token")
-                XCTFail("Expected unauthorized")
-            } catch let error as ClaudeUsageAPIError {
-                guard case .unauthorized = error else {
-                    return XCTFail("Unexpected error: \(error)")
-                }
-            } catch {
-                XCTFail("Unexpected error: \(error)")
+        do {
+            _ = try await client.fetchAccountInfo(accessToken: "expired-token")
+            XCTFail("Expected unauthorized")
+        } catch let error as ClaudeUsageAPIError {
+            guard case .unauthorized = error else {
+                return XCTFail("Unexpected error: \(error)")
             }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        do {
+            _ = try await client.fetchAccountInfo(accessToken: "insufficient-scope-token")
+            XCTFail("Expected forbidden")
+        } catch let error as ClaudeUsageAPIError {
+            guard case .forbidden = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        do {
+            _ = try await client.fetchAccountInfo(accessToken: "wrong-scope-token")
+            XCTFail("Expected forbidden")
+        } catch let error as ClaudeUsageAPIError {
+            guard case .forbidden = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
         }
     }
 

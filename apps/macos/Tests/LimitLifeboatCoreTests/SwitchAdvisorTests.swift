@@ -179,10 +179,10 @@ final class SwitchAdvisorTests: XCTestCase {
         XCTAssertFalse(advice.shouldAutoSwitch)
     }
 
-    func testTargetWithoutStoredCredentialsIsIneligible() {
+    func testTargetBlockedBySessionPolicyIsIneligible() {
         let target = candidate(
             label: "Claude B",
-            hasStoredCredentials: false,
+            manualSwitchEligibility: .blocked(reason: "Login expired"),
             snapshot: freshSnapshot(usedPercent: 15)
         )
 
@@ -191,6 +191,42 @@ final class SwitchAdvisorTests: XCTestCase {
         XCTAssertNil(advice.bestCandidateID)
         XCTAssertFalse(advice.shouldAutoSwitch)
         XCTAssertNil(advice.reason)
+    }
+
+    func testManualOnlyTargetRemainsPassiveHintButCannotAutoSwitch() {
+        let target = candidate(
+            label: "Claude B",
+            manualSwitchEligibility: .eligible,
+            automaticSwitchEligibility: .blocked(reason: "Rotation required"),
+            snapshot: freshSnapshot(usedPercent: 15)
+        )
+
+        let advice = advisor.advise(candidates: [depletedActive(), target], now: now)
+
+        XCTAssertEqual(advice.bestCandidateID, target.profileID)
+        XCTAssertFalse(advice.shouldAutoSwitch)
+    }
+
+    func testAutomaticSwitchSkipsManualOnlyBestForNextReadOnlyTarget() {
+        let manualOnly = candidate(
+            label: "Manual Only",
+            manualSwitchEligibility: .eligible,
+            automaticSwitchEligibility: .blocked(reason: "Rotation required"),
+            snapshot: freshSnapshot(usedPercent: 5)
+        )
+        let readOnly = candidate(
+            label: "Read Only",
+            snapshot: freshSnapshot(usedPercent: 15)
+        )
+
+        let advice = advisor.advise(
+            candidates: [depletedActive(), manualOnly, readOnly],
+            now: now
+        )
+
+        XCTAssertEqual(advice.bestCandidateID, readOnly.profileID)
+        XCTAssertEqual(advice.bestCandidateLabel, "Read Only")
+        XCTAssertTrue(advice.shouldAutoSwitch)
     }
 
     func testDepletedTargetIsIneligible() {
@@ -241,14 +277,16 @@ final class SwitchAdvisorTests: XCTestCase {
     private func candidate(
         label: String,
         isActiveCLI: Bool = false,
-        hasStoredCredentials: Bool = true,
+        manualSwitchEligibility: AccountSwitchEligibility = .eligible,
+        automaticSwitchEligibility: AccountSwitchEligibility? = nil,
         snapshot: UsageSnapshot?
     ) -> SwitchCandidate {
         SwitchCandidate(
             profileID: UUID(),
             label: label,
             isActiveCLI: isActiveCLI,
-            hasStoredCredentials: hasStoredCredentials,
+            manualSwitchEligibility: manualSwitchEligibility,
+            automaticSwitchEligibility: automaticSwitchEligibility ?? manualSwitchEligibility,
             snapshot: snapshot
         )
     }

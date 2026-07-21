@@ -210,7 +210,12 @@ struct ClaudeCredentialAdapter: ProviderCredentialAdapter {
             credentialFingerprint: hasOAuth ? CredentialFingerprint.make(for: snapshot) : nil,
             snapshot: hasOAuth ? snapshot : nil,
             claudeKeychainItemLocation: location,
-            claudeKeychainPayloadFingerprint: liveItem.flatMap(Self.payloadFingerprint)
+            claudeKeychainPayloadFingerprint: liveItem.flatMap(Self.payloadFingerprint),
+            claudeRefreshChainFingerprint: liveItem.flatMap {
+                ClaudeRefreshChainFingerprint.make(
+                    credentials: ClaudeOAuthCredentials.extract(fromKeychainItemJSON: $0)
+                )
+            }
         )
     }
 
@@ -276,7 +281,8 @@ struct ClaudeCredentialAdapter: ProviderCredentialAdapter {
             credentialFingerprint: snapshot.map(CredentialFingerprint.make),
             snapshot: snapshot,
             claudeKeychainItemLocation: observation.claudeKeychainItemLocation,
-            claudeKeychainPayloadFingerprint: observation.claudeKeychainPayloadFingerprint
+            claudeKeychainPayloadFingerprint: observation.claudeKeychainPayloadFingerprint,
+            claudeRefreshChainFingerprint: observation.claudeRefreshChainFingerprint
         )
     }
 

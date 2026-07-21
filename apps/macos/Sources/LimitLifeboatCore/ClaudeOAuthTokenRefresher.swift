@@ -1,12 +1,11 @@
 import Foundation
 
-public enum ClaudeOAuthError: Error, LocalizedError {
+public enum ClaudeOAuthError: Error, LocalizedError, CustomStringConvertible, CustomDebugStringConvertible {
     case missingRefreshToken
     case refreshTokenExpired
     case refreshRejected(status: Int, body: String)
-    /// A prior refresh attempt established that this exact credential cannot
-    /// recover. Scheduled refreshes stay quiet until the credential changes;
-    /// an explicit user retry is still allowed.
+    /// Rotation is deliberately deferred for this credential. This is a
+    /// recoverable policy/concurrency outcome, not proof that login expired.
     case refreshSuppressed(reason: String)
     case network(Error)
     case malformedResponse
@@ -29,37 +28,55 @@ public enum ClaudeOAuthError: Error, LocalizedError {
         }
     }
 
+    /// Keep accidental string interpolation and debug logging on the same
+    /// redacted path as LocalizedError; refresh rejection bodies can contain
+    /// credential material.
+    public var description: String {
+        errorDescription ?? "Claude OAuth error."
+    }
+
+    public var debugDescription: String { description }
+
     /// Whether retrying the same saved refresh token cannot recover the
     /// account. Network/server/protocol failures remain retryable; only a
     /// missing token or an authentication-specific rejection asks the user to
     /// sign in again.
     public var requiresLogin: Bool {
         switch self {
-        case .missingRefreshToken, .refreshTokenExpired, .refreshSuppressed:
+        case .missingRefreshToken, .refreshTokenExpired:
             return true
-        case .refreshRejected(let status, let body):
-            guard status != 408, status != 429, (400..<500).contains(status) else {
-                return false
-            }
-            if status == 401 || status == 403 {
-                return true
-            }
-            let normalized = body.lowercased()
-            let authenticationMarkers = [
-                "invalid_grant",
-                "invalid refresh",
-                "refresh token",
-                "token_invalidated",
-                "token expired",
-                "token revoked",
-                "already used",
-                "sign in again",
-                "login again"
-            ]
-            return authenticationMarkers.contains(where: normalized.contains)
-        case .network, .malformedResponse:
+        case .refreshRejected(_, let body):
+            guard let code = Self.rejectionCode(in: body) else { return false }
+            return Self.terminalRejectionCodes.contains(code)
+        case .refreshSuppressed, .network, .malformedResponse:
             return false
         }
+    }
+
+    /// The OAuth error code returned by the token endpoint, when the body is a
+    /// structured OAuth error response. The raw body remains private to the
+    /// workflow and is never included in a localized description.
+    public var rejectionCode: String? {
+        guard case .refreshRejected(_, let body) = self else { return nil }
+        return Self.rejectionCode(in: body)
+    }
+
+    private static let terminalRejectionCodes: Set<String> = [
+        "invalid_grant",
+        "invalid_refresh_token",
+        "refresh_token_expired",
+        "token_invalidated",
+        "token_revoked"
+    ]
+
+    private static func rejectionCode(in body: String) -> String? {
+        guard let data = body.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rawCode = object["error"] as? String else {
+            return nil
+        }
+        let code = rawCode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return code.isEmpty ? nil : code
     }
 }
 
@@ -75,7 +92,7 @@ public struct ClaudeOAuthTokenRefresher: Sendable {
     }
 
     public func refresh(_ credentials: ClaudeOAuthCredentials, now: Date = Date()) async throws -> ClaudeOAuthCredentials {
-        guard let refreshToken = credentials.refreshToken, !refreshToken.isEmpty else {
+        guard let refreshToken = Self.nonemptyString(credentials.refreshToken) else {
             throw ClaudeOAuthError.missingRefreshToken
         }
         guard !credentials.isLoginExpired(asOf: now) else {
@@ -110,20 +127,54 @@ public struct ClaudeOAuthTokenRefresher: Sendable {
         }
 
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let accessToken = object["access_token"] as? String,
-              !accessToken.isEmpty else {
+              let accessToken = Self.nonemptyString(object["access_token"]) else {
             throw ClaudeOAuthError.malformedResponse
         }
 
         // The endpoint may rotate the refresh token; keep the old one when it
         // does not.
-        let rotatedRefreshToken = (object["refresh_token"] as? String) ?? refreshToken
-        let expiresAt = (object["expires_in"] as? NSNumber).map {
-            now.addingTimeInterval($0.doubleValue)
+        let rotatedRefreshToken: String
+        if let rawRefreshToken = Self.presentValue(object["refresh_token"]) {
+            guard let value = Self.nonemptyString(rawRefreshToken) else {
+                throw ClaudeOAuthError.malformedResponse
+            }
+            rotatedRefreshToken = value
+        } else {
+            // An omitted key or an explicit null both mean "not rotating";
+            // keep the existing token instead of discarding the exchange.
+            rotatedRefreshToken = refreshToken
         }
-        let refreshTokenExpiresAt = (object["refresh_token_expires_in"] as? NSNumber).map {
-            now.addingTimeInterval($0.doubleValue)
-        } ?? credentials.refreshTokenExpiresAt
+
+        let expiresAt: Date?
+        if let rawExpiresIn = Self.presentValue(object["expires_in"]) {
+            guard let expires = Self.expirationDate(
+                after: rawExpiresIn,
+                now: now
+            ) else {
+                throw ClaudeOAuthError.malformedResponse
+            }
+            expiresAt = expires
+        } else {
+            // A missing or explicitly null lifetime means "unknown", not
+            // "reuse the already expired timestamp". Removing it also prevents
+            // an immediate second refresh of this newly-issued access token.
+            expiresAt = nil
+        }
+
+        let refreshTokenExpiresAt: Date?
+        if let rawRefreshExpiresIn = Self.presentValue(object["refresh_token_expires_in"]) {
+            guard let expires = Self.expirationDate(
+                after: rawRefreshExpiresIn,
+                now: now
+            ) else {
+                throw ClaudeOAuthError.malformedResponse
+            }
+            refreshTokenExpiresAt = expires
+        } else {
+            // Claude's fixed login expiry survives responses which do not
+            // repeat refresh_token_expires_in (an omitted key or explicit null).
+            refreshTokenExpiresAt = credentials.refreshTokenExpiresAt
+        }
 
         let updatedRaw = updatedRawClaudeAiOauth(
             from: credentials.rawClaudeAiOauth,
@@ -136,6 +187,41 @@ public struct ClaudeOAuthTokenRefresher: Sendable {
             throw ClaudeOAuthError.malformedResponse
         }
         return updated
+    }
+
+    /// A JSON value that is present and not explicit `null`. An omitted key and
+    /// a `null` value both mean "no value" — a non-rotating refresh token or an
+    /// unknown lifetime — and must be distinguished from a present-but-invalid
+    /// value, which stays malformed.
+    private static func presentValue(_ value: Any?) -> Any? {
+        guard let value, !(value is NSNull) else { return nil }
+        return value
+    }
+
+    private static func nonemptyString(_ value: Any?) -> String? {
+        guard let string = value as? String,
+              !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return string
+    }
+
+    private static func expirationDate(after value: Any?, now: Date) -> Date? {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID() else {
+            return nil
+        }
+        let duration = number.doubleValue
+        guard duration.isFinite, duration > 0 else { return nil }
+        let epochSeconds = now.timeIntervalSince1970 + duration
+        let epochMilliseconds = epochSeconds * 1_000
+        guard epochSeconds.isFinite,
+              epochMilliseconds.isFinite,
+              epochMilliseconds >= Double(Int64.min),
+              epochMilliseconds < Double(Int64.max) else {
+            return nil
+        }
+        return Date(timeIntervalSince1970: epochSeconds)
     }
 
     /// The old `claudeAiOauth` JSON with only accessToken/refreshToken/
@@ -153,6 +239,8 @@ public struct ClaudeOAuthTokenRefresher: Sendable {
         object["refreshToken"] = refreshToken
         if let expiresAt {
             object["expiresAt"] = Int64((expiresAt.timeIntervalSince1970 * 1000).rounded())
+        } else {
+            object.removeValue(forKey: "expiresAt")
         }
         if let refreshTokenExpiresAt {
             object["refreshTokenExpiresAt"] = Int64(

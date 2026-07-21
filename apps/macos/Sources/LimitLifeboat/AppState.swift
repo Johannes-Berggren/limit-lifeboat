@@ -1,8 +1,10 @@
 import AppKit
 import Combine
 import Foundation
+import LimitLifeboatAppWorkflows
 import LimitLifeboatCore
 import os
+import Security
 import WebKit
 
 @MainActor
@@ -31,6 +33,14 @@ final class AppState: ObservableObject {
     /// perform a Keychain query. The cache is populated non-interactively at
     /// launch and updated at every credential mutation boundary.
     @Published private(set) var storedSnapshotStatuses: [UUID: StoredSnapshotStatus] = [:]
+    /// Secret-free summaries captured during bounded credential workflows.
+    /// Refresh-chain digests recognize shared Claude holders without keeping
+    /// decoded tokens alive or querying Keychain from presentation code.
+    private var storedCredentialSummaries: [UUID: StoredCredentialSummary] = [:]
+    /// Latest successfully decoded live Claude refresh-chain digest. Keeping
+    /// this beside the stored summaries lets row and switch policy stay pure
+    /// and prevents SwiftUI/advisor recomputation from querying Keychain.
+    private var liveClaudeRefreshChainFingerprint: String?
     /// Item-scoped authorization health for Claude's provider-owned legacy
     /// Keychain item. `ready` is entered only after a fresh noninteractive data
     /// read succeeds; metadata probes and ACL guesses can never clear a known
@@ -48,6 +58,7 @@ final class AppState: ObservableObject {
     /// persisted event log off the live @MainActor store.
     var applicationSupportDirectory: URL { repository.applicationSupportDirectory }
     private let cliSwitcher: CLISwitcher
+    private let claudeRotationRecoveryStore: ClaudeRotationRecoveryStoring
     private let codeSignatureStatus: ApplicationCodeSignatureStatus
     private let parser = UsageTextParser()
     private let identityExtractor = AccountIdentityExtractor()
@@ -57,6 +68,7 @@ final class AppState: ObservableObject {
     private let codexResetAttemptStore = CodexResetAttemptStore()
     private let codexResetAutomationPolicy = CodexResetAutomationPolicy()
     private let claudeCodeUsageReader = ClaudeCodeUsageReader()
+    private let claudeRefreshCoordinator: ClaudeOAuthRefreshCoordinator
     private let claudeUsageService: ClaudeAccountUsageService
     private let codexAuthPreflightService = CodexAuthPreflightService()
     private let dashboardWindowManager = DashboardWindowManager()
@@ -79,7 +91,20 @@ final class AppState: ObservableObject {
     private var reconciliationFlights: [Provider: (id: UUID, origin: AuthChangeOrigin, task: Task<Void, Never>)] = [:]
     /// Duplicate switch clicks for the same account await one workflow instead
     /// of racing for the provider mutation gate.
-    private var switchFlights: [Provider: (id: UUID, profileID: UUID, task: Task<Bool, Never>)] = [:]
+    private var switchFlights: [Provider: (
+        id: UUID,
+        profileID: UUID,
+        automatic: Bool,
+        task: Task<Bool, Never>
+    )] = [:]
+    /// Duplicate row Retry actions share one profile flight. Notification
+    /// refreshes use a provider-scoped active-profile flight because their
+    /// embedded profile id is intentionally stale and must be re-resolved when
+    /// execution starts; joining a row flight would lose that semantic.
+    private var retryFlights: [ClaudeSessionRetryFlightKey: (
+        id: UUID,
+        task: Task<RetryRefreshResult, Never>
+    )] = [:]
     /// A single read is enough when the provider-owned state has not changed
     /// since the last accepted observation. Only a newly observed key is
     /// followed by the delayed stability-confirmation read.
@@ -87,6 +112,11 @@ final class AppState: ObservableObject {
     /// Ownership tokens prevent an old workflow's defer from releasing a gate
     /// that has already been deliberately handed off to a login watcher.
     private var credentialMutationsInProgress: [Provider: UUID] = [:]
+    /// Covers the complete scheduled provider workflow, including the stable
+    /// external observation that runs before the ordinary mutation gate is
+    /// acquired. Explicit Claude retries wait for this marker to clear, then
+    /// re-resolve their target instead of cancelling the scheduled read.
+    private var scheduledCredentialReadsInProgress: Set<Provider> = []
     private var deferredReconciliationOrigins: [Provider: AuthChangeOrigin] = [:]
     private var deferredAutomaticSwitchProviders: Set<Provider> = []
     private var deferredFullRefresh = false
@@ -123,6 +153,7 @@ final class AppState: ObservableObject {
     /// the profile reaches any other state (re-arming the next episode).
     private var claudeUsagePausedSince: [UUID: Date] = [:]
     private var notifiedUsagePaused: Set<UUID> = []
+    private var usagePausedNotificationTasks: [UUID: Task<Void, Never>] = [:]
     private let usagePausedAlertPolicy = UsagePausedAlertPolicy()
     /// The last credential outcome recorded per Claude profile, so the durable
     /// event log only appends on transitions (episode start/recovery).
@@ -134,13 +165,21 @@ final class AppState: ObservableObject {
     init(
         repository: ProfileRepository,
         cliSwitcher: CLISwitcher,
+        claudeRotationRecoveryStore: ClaudeRotationRecoveryStoring = KeychainClaudeRotationRecoveryStore(),
+        claudeRefreshCoordinator: ClaudeOAuthRefreshCoordinator = ClaudeOAuthRefreshCoordinator(),
         settings: SettingsStore? = nil,
         codeSignatureStatus: ApplicationCodeSignatureStatus = .unsupported
     ) throws {
         self.repository = repository
         self.cliSwitcher = cliSwitcher
+        self.claudeRotationRecoveryStore = claudeRotationRecoveryStore
+        self.claudeRefreshCoordinator = claudeRefreshCoordinator
         self.codeSignatureStatus = codeSignatureStatus
-        self.claudeUsageService = ClaudeAccountUsageService(credentials: cliSwitcher)
+        self.claudeUsageService = ClaudeAccountUsageService(
+            credentials: cliSwitcher,
+            refreshCoordinator: claudeRefreshCoordinator,
+            recoveryStore: claudeRotationRecoveryStore
+        )
         self.settings = settings ?? SettingsStore()
         self.updater = AppUpdater()
         self.profiles = try repository.loadProfiles()
@@ -155,6 +194,7 @@ final class AppState: ObservableObject {
         }
         self.eventStore = AppEventStore(applicationSupportDirectory: repository.applicationSupportDirectory)
         refreshStoredSnapshotStatuses()
+        refreshClaudeRecoveryStates()
         updateMenuBarSummary()
         // History can be tens of thousands of lines; load it off the launch
         // path. Appends before this finishes are safe — the store lazily
@@ -205,6 +245,10 @@ final class AppState: ObservableObject {
         reconciliationFlights.removeAll()
         switchFlights.values.forEach { $0.task.cancel() }
         switchFlights.removeAll()
+        retryFlights.values.forEach { $0.task.cancel() }
+        retryFlights.removeAll()
+        usagePausedNotificationTasks.values.forEach { $0.cancel() }
+        usagePausedNotificationTasks.removeAll()
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
         }
@@ -224,7 +268,12 @@ final class AppState: ObservableObject {
         reconciliationFlights.removeAll()
         switchFlights.values.forEach { $0.task.cancel() }
         switchFlights.removeAll()
+        retryFlights.values.forEach { $0.task.cancel() }
+        retryFlights.removeAll()
+        usagePausedNotificationTasks.values.forEach { $0.cancel() }
+        usagePausedNotificationTasks.removeAll()
         credentialMutationsInProgress.removeAll()
+        scheduledCredentialReadsInProgress.removeAll()
         deferredReconciliationOrigins.removeAll()
         deferredAutomaticSwitchProviders.removeAll()
         deferredFullRefresh = false
@@ -275,6 +324,7 @@ final class AppState: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
+                self?.recheckUsagePausedNotificationsAfterWake()
                 // Give the network and the CLIs a moment to come back.
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
                 await self?.refreshAll()
@@ -361,7 +411,12 @@ final class AppState: ObservableObject {
         }
 
         isRefreshing = true
-        defer { isRefreshing = false }
+        let scheduledProviders = Set(Provider.allCases)
+        scheduledCredentialReadsInProgress.formUnion(scheduledProviders)
+        defer {
+            scheduledCredentialReadsInProgress.subtract(scheduledProviders)
+            isRefreshing = false
+        }
 
         // Reset alerts are evaluated against the pre-refresh snapshots first:
         // fresh data for a rolled-over inactive account would otherwise erase
@@ -386,6 +441,10 @@ final class AppState: ObservableObject {
         // Both providers now use account-specific live usage sources for every
         // captured profile. Codex's account-blind local logs remain only as an
         // active-account fallback for old CLIs and transient network failures.
+        // Removing each read marker and taking its mutation gate are
+        // synchronous on the main actor, so a queued Retry cannot enter the
+        // gap between reconciliation and usage.
+        scheduledCredentialReadsInProgress.remove(.claude)
         guard let claudeMutation = beginCredentialMutation(for: .claude) else {
             deferredFullRefresh = true
             return
@@ -393,6 +452,7 @@ final class AppState: ObservableObject {
         await refreshClaudeUsage()
         finishCredentialMutation(for: .claude, owner: claudeMutation)
 
+        scheduledCredentialReadsInProgress.remove(.codex)
         guard let codexMutation = beginCredentialMutation(for: .codex) else {
             deferredFullRefresh = true
             return
@@ -481,15 +541,32 @@ final class AppState: ObservableObject {
         profiles
             .filter { $0.provider == provider }
             .map { profile in
-                SwitchCandidate(
+                let session = accountSessionEvaluation(for: profile)
+                return SwitchCandidate(
                     profileID: profile.id,
                     label: profile.label,
                     isActiveCLI: profile.isActiveCLI,
-                    hasStoredCredentials: hasStoredSnapshot(for: profile)
-                        && !(refreshStates[profile.id]?.requiresLogin ?? false),
+                    manualSwitchEligibility: session.manualSwitchEligibility,
+                    automaticSwitchEligibility: session.automaticSwitchEligibility,
                     snapshot: snapshots[profile.id]
                 )
             }
+    }
+
+    func accountSessionEvaluation(
+        for profile: AccountProfile,
+        now: Date = Date()
+    ) -> AccountSessionEvaluation {
+        return AccountSessionPolicy.evaluate(
+            provider: profile.provider,
+            isActiveCLI: profile.isActiveCLI,
+            wasPreviouslyLinked: snapshots[profile.id] != nil || profile.identity != nil,
+            storedCredentials: storedCredentialAvailability(for: profile),
+            sharesActiveCredentialChain: sharesActiveClaudeCredentialChain(for: profile),
+            refreshState: refreshStates[profile.id] ?? .idle,
+            loginExpiresAt: loginExpiresAt(for: profile),
+            now: now
+        )
     }
 
     /// A clicked "Switch" button on a notification. The notification may be
@@ -501,34 +578,83 @@ final class AppState: ObservableObject {
     /// the same user-initiated retry the row's Retry button does, so the active
     /// login's expired access token is rotated without opening the popover.
     func performNotificationRefresh(provider: Provider, profileID: UUID?) async {
-        let target = profileID.flatMap { id in profiles.first { $0.id == id } }
-            ?? activeProfile(for: provider)
-        guard let target else {
+        guard provider == .claude else {
             usageAlertController.handleNotificationSwitchOutcome(
-                title: "Could not refresh",
-                body: "That \(provider.displayName) account is no longer saved in Limit Lifeboat."
+                title: "Refresh no longer needed",
+                body: "This refresh action only applies to a paused Claude account."
             )
             return
         }
-        // Re-arm the paused nudge: if this refresh actually succeeds the state
-        // clears anyway, but if it's dropped because a background cycle is
-        // mid-flight (retryRefreshInteractively guards on isRefreshing), the
-        // next cycle can nudge again instead of leaving the tap silently unmet.
+        func shouldQueuePausedRefresh(_ profile: AccountProfile) -> Bool {
+            guard profile.provider == provider else { return false }
+            switch refreshStates[profile.id] {
+            case .rotationDeferred, .usagePaused, .credentialRepairRequired, .refreshing:
+                return true
+            default:
+                return false
+            }
+        }
+        // The embedded id is stale notification context only. Rotation always
+        // re-resolves to the account that is active *now*; never consume an
+        // inactive account's chain because it used to be active when the
+        // notification was posted.
+        _ = profileID
+        guard let target = activeProfile(for: provider), shouldQueuePausedRefresh(target) else {
+            usageAlertController.handleNotificationSwitchOutcome(
+                title: "Refresh no longer needed",
+                body: "The paused \(provider.displayName) account was removed, switched, or has already recovered."
+            )
+            return
+        }
+        // Re-arm the paused nudge while the explicit intent waits behind any
+        // scheduled read. The shared retry workflow re-resolves the resulting
+        // state after it acquires the provider gate.
         notifiedUsagePaused.remove(target.id)
-        await CredentialAccess.userInitiated(
-            reason: "access saved credentials for \(target.label)"
-        ) {
-            await retryRefreshInteractively(for: target)
+        let result = await retryRefresh(
+            profileID: target.id,
+            source: .notification
+        )
+        // The provider operation may have waited behind a login or switch. Its
+        // execution path re-resolves the active paused profile after acquiring
+        // the provider gate, so use the current label for the outcome too.
+        let resolvedLabel = activeProfile(for: provider)?.label ?? target.label
+        switch result {
+        case .completed:
+            usageAlertController.handleNotificationSwitchOutcome(
+                title: "Usage refreshed",
+                body: "Updated \(resolvedLabel)."
+            )
+        case .needsLogin(let reason):
+            usageAlertController.handleNotificationSwitchOutcome(
+                title: "Claude login needs renewal",
+                body: reason
+            )
+        case .authorizationRequired(let reason), .deferred(let reason), .failed(let reason):
+            usageAlertController.handleNotificationSwitchOutcome(
+                title: "Could not refresh \(resolvedLabel)",
+                body: reason
+            )
+        case .noLongerAvailable:
+            usageAlertController.handleNotificationSwitchOutcome(
+                title: "Refresh no longer needed",
+                body: "That account is no longer available or paused."
+            )
         }
         updateSwitchAdvice()
         updateMenuBarSummary()
     }
 
     func performNotificationSwitch(provider: Provider, embeddedTargetID: UUID?) async {
+        let candidates = switchCandidates(for: provider)
+        let currentAdvice = switchAdvisor.advise(
+            candidates: candidates,
+            now: Date()
+        )
+        switchAdvice[provider] = currentAdvice
         let resolution = NotificationSwitchResolver().resolve(
             embeddedTargetID: embeddedTargetID,
-            advice: switchAdvice[provider],
-            candidates: switchCandidates(for: provider)
+            advice: currentAdvice,
+            candidates: candidates
         )
         switch resolution {
         case .switchTo(let profileID, let label):
@@ -609,42 +735,46 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Which stored credential fingerprints appear on more than one holder
-    /// (another profile's snapshot or the live keychain item), computed once
-    /// per cycle so each Claude profile can be checked against
-    /// `RotationProtectionPolicy` without re-reading the keychain per profile.
-    private func claudeRotationContext() -> (duplicated: Set<String>, byProfile: [UUID: String]) {
-        var byProfile: [UUID: String] = [:]
-        var counts: [String: Int] = [:]
-        for profile in profiles where profile.provider == .claude {
-            guard let fingerprint = try? cliSwitcher.storedCredentialFingerprint(for: profile.id) else {
-                continue
-            }
-            byProfile[profile.id] = fingerprint
-            counts[fingerprint, default: 0] += 1
+    /// Refresh-chain ownership cached for one usage cycle. Unrelated config or
+    /// organization metadata can no longer make a shared chain look unique.
+    private func claudeRotationContext() -> (live: String?, byProfile: [UUID: String]) {
+        let byProfile = storedCredentialSummaries.compactMapValues(
+            \.claudeRefreshChainFingerprint
+        )
+        return (liveClaudeRefreshChainFingerprint, byProfile)
+    }
+
+    /// Secret-free, cache-only shared-chain lookup used by row presentation
+    /// and switch eligibility. If no live digest has been observed yet, the
+    /// active profile's stored digest is the best pinned local generation.
+    func sharesActiveClaudeCredentialChain(for profile: AccountProfile) -> Bool {
+        guard profile.provider == .claude, !profile.isActiveCLI else {
+            return false
         }
-        // The live item's fingerprint is directly comparable to the stored ones
-        // (the sync planner matches them for `.activate`). Counting it lets an
-        // inactive profile that holds the active login's exact chain register as
-        // a duplicate holder even when identities don't reveal the sharing.
-        if let liveFingerprint = try? cliSwitcher.liveObservation(provider: .claude).credentialFingerprint {
-            counts[liveFingerprint, default: 0] += 1
-        }
-        let duplicated = Set(counts.filter { $0.value > 1 }.map(\.key))
-        return (duplicated, byProfile)
+        let candidate = storedCredentialSummaries[profile.id]?
+            .claudeRefreshChainFingerprint
+        let activeStored = profiles.first(where: {
+            $0.provider == .claude && $0.isActiveCLI
+        }).flatMap { storedCredentialSummaries[$0.id]?.claudeRefreshChainFingerprint }
+        return RotationProtectionPolicy.accountIsLiveElsewhere(
+            profile: profile,
+            among: profiles,
+            storedChainFingerprint: candidate,
+            liveChainFingerprint: liveClaudeRefreshChainFingerprint ?? activeStored
+        )
     }
 
     /// Whether rotating `profile`'s refresh token in the background could
     /// invalidate a chain the live CLI login relies on.
     private func claudeAccountIsLiveElsewhere(
         _ profile: AccountProfile,
-        context: (duplicated: Set<String>, byProfile: [UUID: String])
+        context: (live: String?, byProfile: [UUID: String])
     ) -> Bool {
         RotationProtectionPolicy.accountIsLiveElsewhere(
             profile: profile,
             among: profiles,
-            storedFingerprint: context.byProfile[profile.id],
-            duplicatedStoredFingerprints: context.duplicated
+            storedChainFingerprint: context.byProfile[profile.id],
+            liveChainFingerprint: context.live
         )
     }
 
@@ -652,6 +782,7 @@ final class AppState: ObservableObject {
     /// numbers land even if an inactive account's refresh stalls). The slow
     /// expect-probe of the CLI remains the fallback for the active account.
     private func refreshClaudeUsage() async {
+        guard validateClaudeNativeConfiguration() else { return }
         let counter = CredentialKeychainIOCounter()
         await CredentialAccess.counting(counter) {
             await refreshClaudeUsageImpl()
@@ -700,6 +831,12 @@ final class AppState: ObservableObject {
                     liveCredentialReadPolicy: liveContext?.readPolicy ?? .read,
                     credentialDidResolve: { resolvedUsageCredentials = $0 }
                 )
+                if profile.isActiveCLI, let resolvedUsageCredentials {
+                    liveClaudeRefreshChainFingerprint =
+                        ClaudeRefreshChainFingerprint.make(
+                            credentials: resolvedUsageCredentials
+                        )
+                }
                 applySnapshot(snapshot, for: profile)
                 clearUsagePaused(for: profile.id)
                 recordClaudeCredentialOutcome(.success, for: profile, codePath: "background")
@@ -754,29 +891,126 @@ final class AppState: ObservableObject {
     }
 
     /// Sets a Claude profile's refresh state and maintains the "usage paused too
-    /// long" nudge for the active account. A login stuck in `.usagePaused`
+    /// long" nudge for the active account. A login stuck in a read-only
+    /// rotation deferral (formerly `.usagePaused`)
     /// (access token expired while the CLI was idle) is healthy but silent, so
     /// after a threshold it earns one actionable notification.
     private func applyClaudeRefreshState(_ state: AccountRefreshState, for profile: AccountProfile) {
         refreshStates[profile.id] = state
-        guard profile.isActiveCLI, state == .usagePaused else {
+        let now = Date()
+        guard profile.isActiveCLI,
+              isUsagePausedState(state),
+              !isFixedClaudeLoginExpired(profile, now: now) else {
             clearUsagePaused(for: profile.id)
             return
         }
-        let now = Date()
         let pausedSince = claudeUsagePausedSince[profile.id] ?? now
         claudeUsagePausedSince[profile.id] = pausedSince
+        scheduleUsagePausedNotification(for: profile, pausedSince: pausedSince, now: now)
+        deliverUsagePausedNotificationIfDue(for: profile, now: now)
+    }
+
+    private func isUsagePausedState(_ state: AccountRefreshState?) -> Bool {
+        switch state {
+        case .usagePaused, .rotationDeferred:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func scheduleUsagePausedNotification(
+        for profile: AccountProfile,
+        pausedSince: Date,
+        now: Date
+    ) {
+        usagePausedNotificationTasks[profile.id]?.cancel()
+        guard !notifiedUsagePaused.contains(profile.id) else {
+            usagePausedNotificationTasks[profile.id] = nil
+            return
+        }
+        let deadline = pausedSince.addingTimeInterval(usagePausedAlertPolicy.threshold)
+        let delay = max(0, deadline.timeIntervalSince(now))
+        usagePausedNotificationTasks[profile.id] = Task { @MainActor [weak self] in
+            if delay > 0 {
+                let capped = min(delay, Double(UInt64.max) / 1_000_000_000)
+                try? await Task.sleep(
+                    nanoseconds: UInt64(ceil(capped * 1_000_000_000))
+                )
+            }
+            guard !Task.isCancelled, let self,
+                  let current = self.profiles.first(where: { $0.id == profile.id }) else {
+                return
+            }
+            guard current.isActiveCLI,
+                  self.isUsagePausedState(self.refreshStates[current.id]),
+                  !self.isFixedClaudeLoginExpired(current, now: Date()) else {
+                self.clearUsagePaused(for: profile.id)
+                return
+            }
+            self.deliverUsagePausedNotificationIfDue(for: current, now: Date())
+            if !self.notifiedUsagePaused.contains(current.id),
+               let pausedSince = self.claudeUsagePausedSince[current.id] {
+                // A clock correction or scheduler's early wake must not lose
+                // the reminder; re-arm from the actual deadline.
+                self.scheduleUsagePausedNotification(
+                    for: current,
+                    pausedSince: pausedSince,
+                    now: Date()
+                )
+            }
+        }
+    }
+
+    private func deliverUsagePausedNotificationIfDue(
+        for profile: AccountProfile,
+        now: Date
+    ) {
+        guard !isFixedClaudeLoginExpired(profile, now: now) else {
+            clearUsagePaused(for: profile.id)
+            return
+        }
         if usagePausedAlertPolicy.shouldNotify(
-            pausedSince: pausedSince,
+            pausedSince: claudeUsagePausedSince[profile.id],
+            fixedLoginExpiresAt: loginExpiresAt(for: profile),
+            storedCredentials: storedCredentialAvailability(for: profile),
             now: now,
             alreadyNotified: notifiedUsagePaused.contains(profile.id)
         ) {
             notifiedUsagePaused.insert(profile.id)
+            usagePausedNotificationTasks[profile.id]?.cancel()
+            usagePausedNotificationTasks[profile.id] = nil
             usageAlertController.handleUsagePausedStuck(profile: profile)
         }
     }
 
+    private func recheckUsagePausedNotificationsAfterWake(now: Date = Date()) {
+        for profile in profiles where profile.provider == .claude && profile.isActiveCLI {
+            guard isUsagePausedState(refreshStates[profile.id]),
+                  !isFixedClaudeLoginExpired(profile, now: now),
+                  let pausedSince = claudeUsagePausedSince[profile.id] else {
+                clearUsagePaused(for: profile.id)
+                continue
+            }
+            deliverUsagePausedNotificationIfDue(for: profile, now: now)
+            if !notifiedUsagePaused.contains(profile.id) {
+                scheduleUsagePausedNotification(for: profile, pausedSince: pausedSince, now: now)
+            }
+        }
+    }
+
+    private func isFixedClaudeLoginExpired(
+        _ profile: AccountProfile,
+        now: Date
+    ) -> Bool {
+        profile.provider == .claude
+            && storedCredentialAvailability(for: profile) == .available
+            && loginExpiresAt(for: profile).map { now >= $0 } == true
+    }
+
     private func clearUsagePaused(for profileID: UUID) {
+        usagePausedNotificationTasks[profileID]?.cancel()
+        usagePausedNotificationTasks[profileID] = nil
         claudeUsagePausedSince[profileID] = nil
         notifiedUsagePaused.remove(profileID)
     }
@@ -809,11 +1043,41 @@ final class AppState: ObservableObject {
     /// profile's recorded episode.
     private static func credentialOutcome(for error: ClaudeAccountUsageFetchError) -> AppEvent.CredentialOutcome? {
         switch error {
-        case .interactiveRefreshRequired, .accountActiveElsewhere:
-            return .rotationWithheld
+        case .interactiveRefreshRequired:
+            return .rotationDeferred
+        case .accountActiveElsewhere:
+            return .switchRequired
+        case .rotationDeferred(let underlying):
+            if let coordinatorError = underlying as? ClaudeOAuthRefreshCoordinatorError {
+                switch coordinatorError {
+                case .busy:
+                    return .rotationBusy
+                case .leaseLost, .leaseReleased, .missingLease:
+                    return .leaseLost
+                case .ambiguousConfiguration, .unsafePath, .fileSystem:
+                    return .rotationDeferred
+                }
+            }
+            return .rotationDeferred
+        case .credentialRepairRequired:
+            return .repairRequired
+        case .credentialRecoveryFailed:
+            return .persistenceFailed
         case .unauthorized:
             return .unauthorized
+        case .forbidden:
+            return .forbidden
         case .refreshFailed(let underlying):
+            if let coordinatorError = underlying as? ClaudeOAuthRefreshCoordinatorError {
+                switch coordinatorError {
+                case .busy:
+                    return .rotationBusy
+                case .leaseLost, .leaseReleased, .missingLease:
+                    return .leaseLost
+                case .ambiguousConfiguration, .unsafePath, .fileSystem:
+                    return .rotationDeferred
+                }
+            }
             if let oauth = underlying as? ClaudeOAuthError, oauth.requiresLogin {
                 return .invalidGrant
             }
@@ -1000,6 +1264,17 @@ final class AppState: ObservableObject {
             } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
                 storedSnapshotStatuses[profile.id] = .locked
                 throw error
+            } catch {
+                // A malformed or mismatched saved item is neither absent nor
+                // evidence that its cached login expiry is trustworthy.
+                storedSnapshotStatuses[profile.id] = .unreadable(
+                    reason: "The saved credential snapshot could not be decoded. Relaunch the installed app or repair this saved login."
+                )
+                storedCredentialSummaries[profile.id] = nil
+                if profile.provider == .claude {
+                    claudeLoginExpirations[profile.id] = nil
+                }
+                throw error
             }
         }
         return workflow
@@ -1040,6 +1315,15 @@ final class AppState: ObservableObject {
             } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
                 storedSnapshotStatuses[profile.id] = .locked
                 throw error
+            } catch {
+                storedSnapshotStatuses[profile.id] = .unreadable(
+                    reason: "The saved credential snapshot could not be decoded. Relaunch the installed app or repair this saved login."
+                )
+                storedCredentialSummaries[profile.id] = nil
+                if provider == .claude {
+                    claudeLoginExpirations[profile.id] = nil
+                }
+                throw error
             }
         }
         var action = syncPlanner.plan(
@@ -1072,6 +1356,12 @@ final class AppState: ObservableObject {
         preferredLoginProfileID: UUID? = nil,
         storedCredentialWorkflow: SwitchStoredCredentialWorkflow? = nil
     ) throws -> AccountProfile? {
+        if provider == .claude {
+            // Defense in depth for every capture/adoption call site: custom
+            // Claude configurations must never be mapped onto the default
+            // macOS Keychain service, even when an observation was supplied.
+            try claudeRefreshCoordinator.validateSupportedConfiguration()
+        }
         let observation = try suppliedObservation ?? cliSwitcher.liveObservation(provider: provider)
         let previousActiveID = activeProfile(for: provider)?.id
         let ownershipPlan = try planLiveOwnership(
@@ -1145,11 +1435,26 @@ final class AppState: ObservableObject {
            observation.isLoggedIn,
            observation.snapshot != nil {
             do {
-                let snapshot = try cliSwitcher.storeObservation(
-                    observation,
-                    for: active,
-                    storedRecord: ownershipPlan.storedRecords[active.id]
+                let storedRecord = ownershipPlan.storedRecords[active.id]
+                let preserveStoredRecoveryOwner = try shouldPreserveStoredClaudeRecoveryOwner(
+                    profile: active,
+                    observation: observation,
+                    storedRecord: storedRecord
                 )
+                let snapshot: CredentialSnapshot
+                if preserveStoredRecoveryOwner, let storedRecord {
+                    // The live item is proven to be the pinned pre-exchange
+                    // generation while this stored owner advanced. Scheduled
+                    // reconciliation stays read-only until explicit recovery
+                    // repairs the split under the Claude lease.
+                    snapshot = storedRecord.snapshot
+                } else {
+                    snapshot = try cliSwitcher.storeObservation(
+                        observation,
+                        for: active,
+                        storedRecord: storedRecord
+                    )
+                }
                 storedCredentialWorkflow?.markLoaded(
                     cliSwitcher.makeStoredCredentialRecord(from: snapshot),
                     for: active.id
@@ -1181,7 +1486,42 @@ final class AppState: ObservableObject {
         return active
     }
 
+    private func shouldPreserveStoredClaudeRecoveryOwner(
+        profile: AccountProfile,
+        observation: LiveCredentialObservation,
+        storedRecord: StoredCredentialRecord?
+    ) throws -> Bool {
+        guard profile.provider == .claude,
+              let stored = storedRecord?.claudeOAuthCredentials,
+              let live = try cliSwitcher.claudeOAuthCredentialRecord(
+                  from: observation
+              )?.credentials else {
+            return false
+        }
+        return try claudeRotationRecoveryStore.loadAll(
+            accessMode: .nonInteractive
+        ).contains {
+            $0.protectsStoredOwnerFromStaleLiveCapture(
+                profileID: profile.id,
+                stored: stored,
+                live: live
+            )
+        }
+    }
+
     private func reconcileStableExternalChange(provider: Provider, origin: AuthChangeOrigin) async {
+        if provider == .claude, !validateClaudeNativeConfiguration() {
+            return
+        }
+        // `refreshAll` owns the full provider read from its first stability
+        // observation through usage. A file/auth event arriving in the
+        // Claude-to-Codex gap must queue, not create a second reconciliation
+        // flight that would make the scheduled usage phase defer itself.
+        if origin != .scheduledRefresh,
+           scheduledCredentialReadsInProgress.contains(provider) {
+            deferredReconciliationOrigins[provider] = origin
+            return
+        }
         guard credentialMutationsInProgress[provider] == nil else {
             deferredReconciliationOrigins[provider] = origin
             return
@@ -1205,17 +1545,25 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Acquires the provider's mutation gate and cancels any reconciliation
-    /// that is between its first and confirmation reads. The cancelled origin
-    /// is replayed once the mutation completes, so outside changes are delayed
-    /// rather than lost.
+    /// Acquires the provider's mutation gate only after scheduled observation
+    /// has finished. Callers that support queuing (notably Retry and
+    /// notification Refresh) wait and re-resolve current state; other callers
+    /// receive an ordinary busy/deferred outcome without cancelling the read.
     private func beginCredentialMutation(for provider: Provider) -> UUID? {
-        guard credentialMutationsInProgress[provider] == nil else {
-            return nil
-        }
-        if let flight = reconciliationFlights.removeValue(forKey: provider) {
-            flight.task.cancel()
-            deferredReconciliationOrigins[provider] = flight.origin
+        if provider == .claude {
+            guard ClaudeSessionOperationAdmissionPolicy.allowsMutation(
+                scheduledReadInProgress: scheduledCredentialReadsInProgress.contains(provider),
+                reconciliationInProgress: reconciliationFlights[provider] != nil,
+                mutationInProgress: credentialMutationsInProgress[provider] != nil
+            ) else {
+                return nil
+            }
+        } else {
+            guard !scheduledCredentialReadsInProgress.contains(provider),
+                  reconciliationFlights[provider] == nil,
+                  credentialMutationsInProgress[provider] == nil else {
+                return nil
+            }
         }
         let owner = UUID()
         credentialMutationsInProgress[provider] = owner
@@ -1412,6 +1760,29 @@ final class AppState: ObservableObject {
         return false
     }
 
+    /// Native Claude support deliberately targets Claude Code's default macOS
+    /// configuration and Keychain service. Validate this before *reads* as
+    /// well as mutations so a custom configuration can never be mistaken for
+    /// or captured over the default login.
+    @discardableResult
+    private func validateClaudeNativeConfiguration() -> Bool {
+        do {
+            try claudeRefreshCoordinator.validateSupportedConfiguration()
+            return true
+        } catch {
+            let reason = "\(error.localizedDescription) Limit Lifeboat supports Claude Code's default macOS configuration only. Remove the custom CLAUDE_CONFIG_DIR setting and relaunch the app."
+            for profile in profiles where profile.provider == .claude {
+                refreshStates[profile.id] = .credentialAccessBlocked(
+                    source: .claudeCode,
+                    disposition: .unavailable,
+                    reason: reason
+                )
+            }
+            statusMessage = "Claude session handling paused: \(reason)"
+            return false
+        }
+    }
+
     private enum AutomaticClaudeLiveAccess {
         /// A non-nil item is the exact replacement/modification generation
         /// which may receive one retry while the older denial remains sticky.
@@ -1428,6 +1799,9 @@ final class AppState: ObservableObject {
     /// secret is tried again automatically only after Claude changes the exact
     /// item generation; explicit Authorize continues to bypass this gate.
     private func automaticClaudeLiveAccess() -> AutomaticClaudeLiveAccess {
+        guard validateClaudeNativeConfiguration() else {
+            return .unavailable
+        }
         switch claudeKeychainAuthorizationState {
         case .needsAuthorization(let deniedItem, let disposition):
             do {
@@ -2362,17 +2736,51 @@ final class AppState: ObservableObject {
             statusMessage = "Wait for the current \(profile.provider.displayName) credential operation to finish before removing this account."
             return
         }
+
+        Task { @MainActor [weak self] in
+            await self?.removeProfileAfterConfirmation(
+                profileID,
+                expectedProfile: profile,
+                mutationOwner: mutationOwner
+            )
+        }
+    }
+
+    private func removeProfileAfterConfirmation(
+        _ profileID: UUID,
+        expectedProfile profile: AccountProfile,
+        mutationOwner: UUID
+    ) async {
         defer {
             finishCredentialMutation(for: profile.provider, owner: mutationOwner)
         }
+        guard profiles.contains(where: { $0.id == profileID }) else { return }
 
         let counter = CredentialKeychainIOCounter()
-        let deleted = CredentialAccess.counting(counter) { () -> Bool in
+        let deleted = await CredentialAccess.counting(counter) { () async -> Bool in
             do {
-                try cliSwitcher.deleteStoredSnapshot(
-                    for: profile.id,
-                    accessMode: .nonInteractive
-                )
+                if profile.provider == .claude {
+                    // Keep preparation, journal reconciliation, and snapshot
+                    // deletion inside one cross-process lease. A prepared
+                    // record may need this snapshot as its only surviving
+                    // source of the fresh post-exchange generation.
+                    try await claudeRefreshCoordinator.withLease { _ in
+                        try claudeUsageService.performStoredProfileRemoval(
+                            profile.id,
+                            accessMode: .nonInteractive
+                        ) {
+                            try cliSwitcher.deleteStoredSnapshot(
+                                for: profile,
+                                accessMode: .nonInteractive
+                            )
+                        }
+                    }
+                } else {
+                    try cliSwitcher.deleteStoredSnapshot(
+                        for: profile,
+                        accessMode: .nonInteractive
+                    )
+                }
                 storedSnapshotStatuses[profile.id] = .absent
                 return true
             } catch {
@@ -2392,6 +2800,9 @@ final class AppState: ObservableObject {
         if profile.webDataStoreKind == .isolated {
             WKWebsiteDataStore.remove(forIdentifier: profile.webDataStoreID) { _ in }
         }
+        guard let index = profiles.firstIndex(where: { $0.id == profileID }) else {
+            return
+        }
         profiles.remove(at: index)
         snapshots[profile.id] = nil
         refreshStates[profile.id] = nil
@@ -2399,6 +2810,7 @@ final class AppState: ObservableObject {
         lastAutomaticCodexResetAttempt[profile.id] = nil
         codexResetAttemptStore.removeAccount(profile.id)
         storedSnapshotStatuses[profile.id] = nil
+        storedCredentialSummaries[profile.id] = nil
         claudeLoginExpirations[profile.id] = nil
         do {
             try historyStore?.removeAccount(profile.id)
@@ -2412,6 +2824,8 @@ final class AppState: ObservableObject {
         }
         burnRateEstimates[profile.id] = nil
         claudeUsagePausedSince[profile.id] = nil
+        usagePausedNotificationTasks[profile.id]?.cancel()
+        usagePausedNotificationTasks[profile.id] = nil
         notifiedUsagePaused.remove(profile.id)
         lastClaudeCredentialOutcome[profile.id] = nil
         warnedSharedAccountProfiles.remove(profile.id)
@@ -2424,25 +2838,59 @@ final class AppState: ObservableObject {
 
     // MARK: - CLI switching
 
-    /// Switches the CLI to `profile`. `interactive: false` (auto-switch path)
-    /// skips confirmation dialogs and reports problems via status/notification
-    /// text instead of modals. Returns whether the switch happened.
+    /// Switches the CLI to `profile`. Noninteractive notification and automatic
+    /// paths skip confirmation dialogs and report problems via status or a
+    /// follow-up notification. Returns whether the switch happened.
     @discardableResult
     func switchCLI(
         to profile: AccountProfile,
         interactive: Bool = true,
         automatic: Bool = false
     ) async -> Bool {
+        if profile.provider == .claude,
+           !validateClaudeNativeConfiguration() {
+            return false
+        }
         if let existing = switchFlights[profile.provider] {
+            // Automatic work may never borrow the rotation authority of a
+            // user-started flight, even when both currently name the same
+            // target. Treat provider contention as a defer without starting
+            // the one-hour failed-switch backoff.
+            if automatic {
+                deferredAutomaticSwitchProviders.insert(profile.provider)
+                lastAutoSwitchAttempt[profile.provider] = nil
+                statusMessage = "Automatic switch deferred while another credential operation is in progress."
+                return false
+            }
+
+            // A row or notification click is a distinct user intent. If an
+            // automatic read-only flight got there first, wait for it to end,
+            // then reload the requested profile and run with user authority.
+            // Joining the automatic task would silently discard permission to
+            // rotate a target that requires renewal.
+            if existing.automatic {
+                _ = await existing.task.value
+                if switchFlights[profile.provider]?.id == existing.id {
+                    switchFlights[profile.provider] = nil
+                }
+                guard let current = profiles.first(where: { $0.id == profile.id }) else {
+                    statusMessage = "That \(profile.provider.displayName) account is no longer available to switch to."
+                    return false
+                }
+                if current.isActiveCLI {
+                    return true
+                }
+                return await switchCLI(
+                    to: current,
+                    interactive: interactive,
+                    automatic: false
+                )
+            }
+
             if existing.profileID == profile.id {
                 return await existing.task.value
             }
-            if automatic {
-                deferredAutomaticSwitchProviders.insert(profile.provider)
-            }
-            statusMessage = automatic
-                ? "Automatic switch deferred while another credential operation is in progress."
-                : "A \(profile.provider.displayName) credential operation is already in progress."
+            statusMessage = "A \(profile.provider.displayName) credential operation is already in progress."
             return false
         }
 
@@ -2470,19 +2918,48 @@ final class AppState: ObservableObject {
                 return result
             }
         }
-        switchFlights[profile.provider] = (flightID, profile.id, task)
+        switchFlights[profile.provider] = (flightID, profile.id, automatic, task)
         let result = await task.value
         if switchFlights[profile.provider]?.id == flightID {
             switchFlights[profile.provider] = nil
         }
+        if result, !automatic {
+            // The switch transaction and its Claude lease have fully ended.
+            // Post-switch verification is a separate scheduled/read-only
+            // workflow and cannot inherit mutation authority.
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await CredentialAccess.independentWorkflow {
+                    await CredentialAccess.nonInteractive { await self.refreshAll() }
+                }
+            }
+        }
         return result
+    }
+
+    private struct ClaudeLiveGenerationBaseline {
+        var credentials: ClaudeOAuthCredentials?
+        var itemLocation: ClaudeKeychainItemLocation?
+
+        init(_ record: LiveClaudeOAuthCredentialRecord?) {
+            credentials = record?.credentials
+            itemLocation = record?.itemLocation
+        }
+
+        func matches(_ record: LiveClaudeOAuthCredentialRecord?) -> Bool {
+            credentials == record?.credentials
+                && itemLocation == record?.itemLocation
+        }
     }
 
     private func performSwitchCLI(
         to profile: AccountProfile,
         interactive: Bool,
         automatic: Bool,
-        storedCredentialWorkflow: SwitchStoredCredentialWorkflow?
+        storedCredentialWorkflow: SwitchStoredCredentialWorkflow?,
+        claudeLeaseAcquired: Bool = false,
+        allowUnverifiedTarget: Bool = false,
+        preLeaseLiveGeneration: ClaudeLiveGenerationBaseline? = nil
     ) async -> Bool {
         if storedCredentialWorkflow == nil {
             guard let mutationOwner = beginCredentialMutation(for: profile.provider) else {
@@ -2579,46 +3056,232 @@ final class AppState: ObservableObject {
             }
         }
 
-        guard let storedCredentialWorkflow,
-              let targetStoredRecord = storedCredentialWorkflow.record(for: profile.id),
-              targetStoredRecord.summary.isRestorable else {
-            refreshStates[profile.id] = .needsLogin(
-                reason: "No saved credentials are available for this account."
-            )
-            finishCurrentCredentialMutation(for: profile.provider)
-            handleLoginRequired(
-                for: profile,
-                reason: "No saved credentials are available. Log in once and the app will capture them automatically.",
-                interactive: interactive
-            )
+        guard let storedCredentialWorkflow else { return false }
+        let preLeaseTargetFingerprint = storedCredentialWorkflow
+            .record(for: profile.id)?.summary.fingerprint
+        let targetStoredRecord: StoredCredentialRecord?
+        if profile.provider == .claude, claudeLeaseAcquired {
+            // The target snapshot is not the only shared owner. Pin the live
+            // generation immediately before acquiring the cross-process lock
+            // and refuse to consume a target refresh token if Claude Code
+            // advanced that generation while we waited.
+            if let preLeaseLiveGeneration {
+                do {
+                    let currentLive = try cliSwitcher.liveClaudeOAuthCredentialRecord(
+                        accessMode: .nonInteractive
+                    )
+                    guard preLeaseLiveGeneration.matches(currentLive) else {
+                        let reason = "Claude Code changed its login while Limit Lifeboat waited for the shared credential lock. The newer login was left untouched; retry the switch."
+                        refreshStates[profile.id] = .rotationDeferred(reason: reason)
+                        statusMessage = "Switch deferred: \(reason)"
+                        updateSwitchAdvice()
+                        return false
+                    }
+                } catch {
+                    let reason = "The live Claude generation could not be re-read safely under the shared credential lock: \(error.localizedDescription)"
+                    refreshStates[profile.id] = isKeychainAccessDenied(error)
+                        ? .authorizationRequired(source: .claudeCode, reason: reason)
+                        : .rotationDeferred(reason: reason)
+                    statusMessage = "Switch deferred: \(reason)"
+                    updateSwitchAdvice()
+                    return false
+                }
+            }
+            // The pre-prompt workflow record is only an authorization and UI
+            // preflight. Once the shared lease is held, reload its opaque
+            // revision and fixed expiry so a CLI/login change that happened
+            // while the user was deciding always wins.
+            do {
+                targetStoredRecord = try cliSwitcher.storedCredentialRecord(
+                    for: profile,
+                    accessMode: .nonInteractive
+                )
+                storedCredentialWorkflow.markLoaded(
+                    targetStoredRecord,
+                    for: profile.id
+                )
+                guard preLeaseTargetFingerprint
+                    == targetStoredRecord?.summary.fingerprint else {
+                    if let targetStoredRecord {
+                        cacheStoredCredentialSummary(targetStoredRecord, for: profile)
+                    } else {
+                        cacheStoredCredentialSummary(nil, for: profile)
+                    }
+                    let reason = "The saved Claude generation changed while Limit Lifeboat waited for the shared credential lock. The newer generation was left untouched; retry the switch."
+                    refreshStates[profile.id] = .rotationDeferred(reason: reason)
+                    statusMessage = "Switch deferred: \(reason)"
+                    updateSwitchAdvice()
+                    return false
+                }
+            } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
+                storedSnapshotStatuses[profile.id] = .locked
+                refreshStates[profile.id] = .authorizationRequired(
+                    source: .savedAccount,
+                    reason: error.localizedDescription
+                )
+                statusMessage = "Switch stopped because the saved login could not be re-read under the Claude credential lock."
+                return false
+            } catch {
+                storedSnapshotStatuses[profile.id] = .unreadable(
+                    reason: "The saved credential snapshot could not be decoded. Relaunch the installed app or repair this saved login."
+                )
+                storedCredentialSummaries[profile.id] = nil
+                claudeLoginExpirations[profile.id] = nil
+                refreshStates[profile.id] = .credentialAccessBlocked(
+                    source: .savedAccount,
+                    disposition: .other(errSecDecode),
+                    reason: error.localizedDescription
+                )
+                statusMessage = "Switch stopped because the saved Claude generation is unreadable: \(error.localizedDescription)"
+                return false
+            }
+        } else {
+            targetStoredRecord = storedCredentialWorkflow.record(for: profile.id)
+        }
+        guard let targetStoredRecord, targetStoredRecord.summary.isRestorable else {
+            let reason = "No saved credentials are available. Log in once and the app will capture them automatically."
+            refreshStates[profile.id] = .needsLogin(reason: reason)
+            statusMessage = reason
+            if !claudeLeaseAcquired {
+                finishCurrentCredentialMutation(for: profile.provider)
+                handleLoginRequired(
+                    for: profile,
+                    reason: reason,
+                    interactive: interactive
+                )
+            }
+            return false
+        }
+
+        // Re-evaluate against the freshly loaded record rather than the
+        // popover/advisor cache. A notification can be hours old and an expiry
+        // boundary can pass while the menu remains open.
+        cacheStoredCredentialSummary(targetStoredRecord, for: profile)
+        let switchSession = AccountSessionPolicy.evaluate(
+            provider: profile.provider,
+            isActiveCLI: profile.isActiveCLI,
+            wasPreviouslyLinked: snapshots[profile.id] != nil || profile.identity != nil,
+            storedCredentials: .available,
+            refreshState: refreshStates[profile.id] ?? .idle,
+            loginExpiresAt: targetStoredRecord.summary.claudeRefreshTokenExpiresAt,
+            now: Date()
+        )
+        let switchEligibility = automatic
+            ? switchSession.automaticSwitchEligibility
+            : switchSession.manualSwitchEligibility
+        guard switchEligibility.isEligible else {
+            let reason = switchEligibility.blockerReason
+                ?? "This saved login is not ready to switch."
+            if profile.provider == .claude,
+               targetStoredRecord.summary.claudeRefreshTokenExpiresAt.map({ Date() >= $0 }) == true {
+                refreshStates[profile.id] = .needsLogin(reason: reason)
+                statusMessage = reason
+                if !claudeLeaseAcquired {
+                    finishCurrentCredentialMutation(for: profile.provider)
+                    handleLoginRequired(for: profile, reason: reason, interactive: interactive)
+                }
+            } else {
+                if automatic {
+                    deferredAutomaticSwitchProviders.insert(profile.provider)
+                    lastAutoSwitchAttempt[profile.provider] = nil
+                }
+                statusMessage = automatic
+                    ? "Automatic switch deferred: \(reason)"
+                    : reason
+            }
+            updateSwitchAdvice()
             return false
         }
 
         if case .needsLogin(let reason) = refreshStates[profile.id] {
-            finishCurrentCredentialMutation(for: profile.provider)
-            handleLoginRequired(for: profile, reason: reason, interactive: interactive)
+            statusMessage = reason
+            if !claudeLeaseAcquired {
+                finishCurrentCredentialMutation(for: profile.provider)
+                handleLoginRequired(for: profile, reason: reason, interactive: interactive)
+            }
             return false
         }
 
-        switch await preflightSwitchTarget(
-            profile,
-            storedRecord: targetStoredRecord,
-            storedCredentialWorkflow: storedCredentialWorkflow
-        ) {
+        var allowUnverifiedTarget = allowUnverifiedTarget
+        let preflightIntent: ClaudeRotationIntent = claudeLeaseAcquired
+            ? (automatic ? .automaticSwitch : .userInitiatedSwitch)
+            : .scheduledReadOnly
+        let preflightResult: SwitchPreflightResult
+        if claudeLeaseAcquired,
+           claudeUsageService.hasPendingCredentialRepair {
+            preflightResult = .repairRequired(
+                reason: "A fresh Claude credential generation still needs local repair. Retry the affected account before switching."
+            )
+        } else if claudeLeaseAcquired,
+           allowUnverifiedTarget,
+           preLeaseTargetFingerprint == targetStoredRecord.summary.fingerprint {
+            // The user accepted skipping only the remote usage check. A
+            // recovery journal may have appeared after that decision, so
+            // local transaction state must still be resolved before restoring
+            // this snapshot into Claude Code.
+            do {
+                let pendingRecovery = try claudeRotationRecoveryStore.loadAll(
+                    accessMode: .nonInteractive
+                ).contains { !$0.pendingDestinations.isEmpty }
+                if pendingRecovery {
+                    refreshClaudeRecoveryStates()
+                    preflightResult = .repairRequired(
+                        reason: "A fresh Claude credential generation is waiting for local reconciliation. Retry the affected account before switching."
+                    )
+                } else {
+                    preflightResult = .ready
+                }
+            } catch {
+                if let credentialError = error as? CredentialStoreError,
+                   credentialError.isKeychainAccessDenied {
+                    preflightResult = .authorizationRequired(
+                        source: .savedAccount,
+                        reason: "Authorize access to the encrypted Claude recovery journal before switching."
+                    )
+                } else {
+                    preflightResult = .repairRequired(
+                        reason: "Claude credential recovery could not be inspected safely: \(error.localizedDescription)"
+                    )
+                }
+            }
+        } else {
+            preflightResult = await preflightSwitchTarget(
+                profile,
+                storedRecord: targetStoredRecord,
+                storedCredentialWorkflow: storedCredentialWorkflow,
+                rotationIntent: preflightIntent
+            )
+        }
+        switch preflightResult {
         case .ready:
             break
         case .requiresLogin(let reason):
             refreshStates[profile.id] = .needsLogin(reason: reason)
-            finishCurrentCredentialMutation(for: profile.provider)
-            handleLoginRequired(for: profile, reason: reason, interactive: interactive)
+            statusMessage = reason
+            if !claudeLeaseAcquired {
+                finishCurrentCredentialMutation(for: profile.provider)
+                handleLoginRequired(for: profile, reason: reason, interactive: interactive)
+            }
             updateSwitchAdvice()
             return false
         case .temporarilyUnavailable(let reason):
             refreshStates[profile.id] = .readFailed(reason: reason)
             updateSwitchAdvice()
-            if !interactive {
-                statusMessage = "Automatic switch skipped: \(profile.label) could not be verified. \(reason)"
+            if claudeLeaseAcquired {
+                statusMessage = "Switch stopped after the target changed during final verification: \(reason)"
                 return false
+            }
+            if !interactive {
+                if automatic {
+                    statusMessage = "Automatic switch skipped: \(profile.label) could not be verified. \(reason)"
+                    return false
+                }
+                // Clicking a notification is an explicit switch intent even
+                // though it has no key window for a confirmation sheet. Match
+                // the row's "Switch Anyway" behavior without granting this
+                // authority to an automatic switch.
+                allowUnverifiedTarget = true
+                break
             }
             let alert = NSAlert()
             alert.messageText = "Could not verify \(profile.label)"
@@ -2628,9 +3291,88 @@ final class AppState: ObservableObject {
             guard alert.runModalActivating() == .alertFirstButtonReturn else {
                 return false
             }
+            allowUnverifiedTarget = true
+        case .forbidden(let reason):
+            // A scope/administrator denial is not an expired credential and
+            // must never consume a refresh token. Manual switching remains a
+            // valid user choice. A notification click is also user initiated,
+            // but has no key window for a modal, so it proceeds without the
+            // remote usage check after surfacing the guidance in app state.
+            refreshStates[profile.id] = .providerAccessForbidden(reason: reason)
+            statusMessage = reason
+            updateSwitchAdvice()
+            guard !claudeLeaseAcquired, !automatic else {
+                return false
+            }
+            if !interactive {
+                allowUnverifiedTarget = true
+                break
+            }
+            let alert = NSAlert()
+            alert.messageText = "Claude usage access is denied for \(profile.label)"
+            alert.informativeText = "\(reason) Switching will not renew its scope, but you can switch the CLI anyway."
+            alert.addButton(withTitle: "Switch Anyway")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModalActivating() == .alertFirstButtonReturn else {
+                return false
+            }
+            allowUnverifiedTarget = true
+        case .repairRequired(let reason):
+            refreshStates[profile.id] = .credentialRepairRequired(reason: reason)
+            // The transaction may have left a different shared sibling as the
+            // pending owner. Inventory the encrypted journal immediately so
+            // that row also exposes Retry without waiting for a relaunch.
+            refreshClaudeRecoveryStates()
+            statusMessage = reason
+            updateSwitchAdvice()
+            return false
+        case .authorizationRequired(let source, let reason):
+            refreshStates[profile.id] = .authorizationRequired(
+                source: source,
+                reason: reason
+            )
+            statusMessage = reason
+            updateSwitchAdvice()
+            return false
+        case .credentialAccessBlocked(let source, let disposition, let reason):
+            refreshStates[profile.id] = .credentialAccessBlocked(
+                source: source,
+                disposition: disposition,
+                reason: reason
+            )
+            statusMessage = reason
+            updateSwitchAdvice()
+            return false
+        case .rotationRequired(let reason):
+            if claudeLeaseAcquired {
+                refreshStates[profile.id] = .rotationDeferred(reason: reason)
+                if automatic {
+                    deferredAutomaticSwitchProviders.insert(profile.provider)
+                    // The final leased reread can discover a rotation need
+                    // that the optimistic preflight did not. This is still a
+                    // read-only skip, not a failed automatic switch.
+                    lastAutoSwitchAttempt[profile.provider] = nil
+                }
+                statusMessage = automatic
+                    ? "Automatic switch deferred: \(reason)"
+                    : "Switch deferred after the credential generation changed: \(reason)"
+                updateSwitchAdvice()
+                return false
+            }
+            if automatic {
+                refreshStates[profile.id] = .rotationDeferred(reason: reason)
+                deferredAutomaticSwitchProviders.insert(profile.provider)
+                // A busy/read-only target is a skip, not a failed switch. Let
+                // the next ordinary advice cycle reconsider without backoff.
+                lastAutoSwitchAttempt[profile.provider] = nil
+                statusMessage = "Automatic switch deferred: \(reason)"
+                updateSwitchAdvice()
+                return false
+            }
         }
 
-        if interactive, cliSwitcher.hasActiveProcesses(provider: profile.provider) {
+        if !claudeLeaseAcquired,
+           interactive, cliSwitcher.hasActiveProcesses(provider: profile.provider) {
             let alert = NSAlert()
             alert.messageText = "\(profile.provider.displayName) is running"
             alert.informativeText = "The account will be switched for new credential reads. Existing sessions may keep credentials they already loaded."
@@ -2645,11 +3387,89 @@ final class AppState: ObservableObject {
         // the prompt-free stored-credential and login preflights. A target
         // that needs login may replace the item and should require at most one
         // authorization for the resulting item, never one for each side.
-        if interactive, profile.provider == .claude {
+        if !claudeLeaseAcquired, interactive, profile.provider == .claude {
             guard await authorizeClaudeKeychainAccess(
                 reason: "before switching to \(profile.label)",
                 allowDuringCredentialMutation: true
             ) else {
+                return false
+            }
+        }
+
+        // All prompt-capable work is complete. Claude's final target reread,
+        // optional user-authorized rotation, outgoing capture, restore,
+        // validation, and safe rollback share one uninterrupted cross-process
+        // lease. Re-entering with the workflow avoids another Keychain prompt.
+        if profile.provider == .claude, !claudeLeaseAcquired {
+            let acceptedUnverifiedTarget = allowUnverifiedTarget
+            let liveGenerationBaseline: ClaudeLiveGenerationBaseline
+            do {
+                liveGenerationBaseline = ClaudeLiveGenerationBaseline(
+                    try cliSwitcher.liveClaudeOAuthCredentialRecord(
+                        accessMode: .nonInteractive
+                    )
+                )
+            } catch {
+                let reason = "The current Claude login could not be pinned before switching: \(error.localizedDescription)"
+                refreshStates[profile.id] = isKeychainAccessDenied(error)
+                    ? .authorizationRequired(source: .claudeCode, reason: reason)
+                    : .rotationDeferred(reason: reason)
+                statusMessage = "Switch deferred: \(reason)"
+                updateSwitchAdvice()
+                return false
+            }
+            do {
+                let switched = try await claudeRefreshCoordinator.withLease(retrying: !automatic) { _ in
+                    await self.performSwitchCLI(
+                        to: profile,
+                        // Any final failure UI is presented by the outer frame
+                        // only after this closure releases both Claude locks.
+                        interactive: false,
+                        automatic: automatic,
+                        storedCredentialWorkflow: storedCredentialWorkflow,
+                        claudeLeaseAcquired: true,
+                        allowUnverifiedTarget: acceptedUnverifiedTarget,
+                        preLeaseLiveGeneration: liveGenerationBaseline
+                    )
+                }
+                if !switched, interactive {
+                    if case .needsLogin(let reason) = refreshStates[profile.id] {
+                        // A terminal login may launch a provider process. Drop
+                        // the app gate as well as the cross-process lease first.
+                        finishCurrentCredentialMutation(for: profile.provider)
+                        handleLoginRequired(
+                            for: profile,
+                            reason: reason,
+                            interactive: true
+                        )
+                    } else if !statusMessage.isEmpty {
+                        showError(
+                            message: "Could not switch to \(profile.label)",
+                            details: statusMessage
+                        )
+                    }
+                }
+                return switched
+            } catch let error as ClaudeOAuthRefreshCoordinatorError {
+                refreshStates[profile.id] = .rotationDeferred(reason: error.localizedDescription)
+                recordClaudeCredentialOutcome(
+                    Self.credentialOutcome(for: .rotationDeferred(error)),
+                    for: profile,
+                    codePath: automatic ? "automaticSwitch" : "userSwitch"
+                )
+                if automatic {
+                    deferredAutomaticSwitchProviders.insert(profile.provider)
+                    lastAutoSwitchAttempt[profile.provider] = nil
+                }
+                statusMessage = automatic
+                    ? "Automatic switch deferred: \(error.localizedDescription)"
+                    : "Switch deferred: \(error.localizedDescription)"
+                updateSwitchAdvice()
+                return false
+            } catch {
+                refreshStates[profile.id] = .rotationDeferred(reason: error.localizedDescription)
+                statusMessage = "Switch deferred: \(error.localizedDescription)"
+                updateSwitchAdvice()
                 return false
             }
         }
@@ -2671,7 +3491,7 @@ final class AppState: ObservableObject {
             if !liveAlreadyTargetsProfile {
                 _ = try reconcileLiveCredentials(
                     provider: profile.provider,
-                    origin: interactive ? .manualSwitch : .automaticSwitch,
+                    origin: automatic ? .automaticSwitch : .manualSwitch,
                     observation: outgoingObservation,
                     storedCredentialWorkflow: storedCredentialWorkflow
                 )
@@ -2703,19 +3523,77 @@ final class AppState: ObservableObject {
             applySnapshot(snapshot, for: outgoing)
         }
 
+        let finalTargetRecord: StoredCredentialRecord
+        if profile.provider == .claude {
+            do {
+                guard let latest = try cliSwitcher.storedCredentialRecord(
+                    for: profile,
+                    accessMode: .nonInteractive
+                ), latest.summary.isRestorable else {
+                    let reason = "The saved Claude login disappeared before it could be restored. Log in again."
+                    refreshStates[profile.id] = .needsLogin(reason: reason)
+                    statusMessage = reason
+                    return false
+                }
+                storedCredentialWorkflow.markLoaded(latest, for: profile.id)
+                cacheStoredCredentialSummary(latest, for: profile)
+                let finalSession = AccountSessionPolicy.evaluate(
+                    provider: .claude,
+                    isActiveCLI: profile.isActiveCLI,
+                    wasPreviouslyLinked: snapshots[profile.id] != nil || profile.identity != nil,
+                    storedCredentials: .available,
+                    sharesActiveCredentialChain: sharesActiveClaudeCredentialChain(for: profile),
+                    refreshState: refreshStates[profile.id] ?? .idle,
+                    loginExpiresAt: latest.summary.claudeRefreshTokenExpiresAt,
+                    now: Date()
+                )
+                let finalEligibility = automatic
+                    ? finalSession.automaticSwitchEligibility
+                    : finalSession.manualSwitchEligibility
+                guard finalEligibility.isEligible else {
+                    let reason = finalEligibility.blockerReason
+                        ?? "This Claude login is no longer eligible to switch."
+                    if latest.summary.claudeRefreshTokenExpiresAt
+                        .map({ Date() >= $0 }) == true {
+                        refreshStates[profile.id] = .needsLogin(reason: reason)
+                    }
+                    statusMessage = reason
+                    return false
+                }
+                finalTargetRecord = latest
+            } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
+                refreshStates[profile.id] = .authorizationRequired(
+                    source: .savedAccount,
+                    reason: error.localizedDescription
+                )
+                statusMessage = "The saved Claude login could not be re-read immediately before switching."
+                return false
+            } catch {
+                refreshStates[profile.id] = .credentialAccessBlocked(
+                    source: .savedAccount,
+                    disposition: .other(errSecDecode),
+                    reason: error.localizedDescription
+                )
+                statusMessage = "The saved Claude login became unreadable before switching: \(error.localizedDescription)"
+                return false
+            }
+        } else {
+            finalTargetRecord = storedCredentialWorkflow.record(for: profile.id)
+                ?? targetStoredRecord
+        }
+
         let outgoingProfileID = activeProfile(for: profile.provider)?.id
         do {
             let result = try cliSwitcher.restoreSnapshot(
                 for: profile,
-                storedRecord: storedCredentialWorkflow.record(for: profile.id)
-                    ?? targetStoredRecord,
+                storedRecord: finalTargetRecord,
                 expectedLiveFingerprint: outgoingObservation.credentialFingerprint,
                 enforceExpectedLiveState: true
             )
             let verified = result.verifiedObservation
             _ = try reconcileLiveCredentials(
                 provider: profile.provider,
-                origin: interactive ? .manualSwitch : .automaticSwitch,
+                origin: automatic ? .automaticSwitch : .manualSwitch,
                 observation: verified,
                 storedCredentialWorkflow: storedCredentialWorkflow
             )
@@ -2732,20 +3610,15 @@ final class AppState: ObservableObject {
                         provider: profile.provider,
                         toProfileID: profile.id,
                         fromProfileID: outgoingProfileID == profile.id ? nil : outgoingProfileID,
-                        interactive: interactive
+                        interactive: !automatic
                     )
                 )
             } catch {
                 AppLog.history.error("Could not record the switch event: \(error.localizedDescription, privacy: .public)")
             }
             refreshStates[profile.id] = .ok
-            if interactive {
+            if !automatic {
                 lastManualSwitchAt[profile.provider] = Date()
-                Task {
-                    await CredentialAccess.independentWorkflow {
-                        await CredentialAccess.nonInteractive { await refreshAll() }
-                    }
-                }
             }
             return true
         } catch {
@@ -2755,8 +3628,10 @@ final class AppState: ObservableObject {
                 // the only saved login as an error-recovery side effect; the
                 // user must explicitly recreate the provider login or remove
                 // the account after deciding the old snapshot is expendable.
-                refreshStates[profile.id] = .needsLogin(
-                    reason: "The saved credential snapshot is unreadable and was left unchanged."
+                refreshStates[profile.id] = .credentialAccessBlocked(
+                    source: .savedAccount,
+                    disposition: .other(errSecDecode),
+                    reason: "The saved credential snapshot is unreadable and was left unchanged. Relaunch the installed app or repair this saved login."
                 )
                 statusMessage = "Saved credentials for \(profile.label) are unreadable; no changes were made."
                 reportSwitchProblem(
@@ -2811,21 +3686,44 @@ final class AppState: ObservableObject {
         case ready
         case requiresLogin(reason: String)
         case temporarilyUnavailable(reason: String)
+        case forbidden(reason: String)
+        case repairRequired(reason: String)
+        case authorizationRequired(
+            source: CredentialAuthorizationSource,
+            reason: String
+        )
+        case credentialAccessBlocked(
+            source: CredentialAuthorizationSource,
+            disposition: CredentialAccessDisposition,
+            reason: String
+        )
+        case rotationRequired(reason: String)
     }
 
     private func preflightSwitchTarget(
         _ profile: AccountProfile,
         storedRecord: StoredCredentialRecord,
-        storedCredentialWorkflow: SwitchStoredCredentialWorkflow
+        storedCredentialWorkflow: SwitchStoredCredentialWorkflow,
+        rotationIntent: ClaudeRotationIntent
     ) async -> SwitchPreflightResult {
         switch profile.provider {
         case .claude:
             do {
+                let staleChain = storedRecord.summary.claudeRefreshChainFingerprint
+                let additionalDestinations = rotationIntent.allowsCredentialRotation
+                    ? try additionalClaudeRecoveryDestinations(
+                        staleChainFingerprint: staleChain,
+                        targetProfileID: profile.id,
+                        storedCredentialWorkflow: storedCredentialWorkflow
+                    )
+                    : []
                 let result = try await claudeUsageService.fetchSnapshot(
                     for: profile,
                     isActiveCLI: profile.isActiveCLI,
                     storedRecord: storedRecord,
-                    accessMode: CredentialAccess.currentMode
+                    accessMode: CredentialAccess.currentMode,
+                    rotationIntent: rotationIntent,
+                    additionalRecoveryDestinations: additionalDestinations
                 )
                 // Inactive resolution is owned by the stored snapshot, so a
                 // changed generation was compare-and-swap persisted there.
@@ -2840,6 +3738,24 @@ final class AppState: ObservableObject {
                     )
                 storedCredentialWorkflow.markLoaded(updatedRecord, for: profile.id)
                 cacheStoredCredentialSummary(updatedRecord, for: profile)
+                if rotationIntent.allowsCredentialRotation,
+                   claudeOAuthGenerationAdvanced(
+                    from: storedRecord.claudeOAuthCredentials,
+                    to: result.credentials
+                   ) {
+                    do {
+                        try reconcileClaudeChainOwners(
+                            additionalDestinations,
+                            staleChainFingerprint: staleChain,
+                            freshCredentials: result.credentials,
+                            storedCredentialWorkflow: storedCredentialWorkflow
+                        )
+                    } catch {
+                        throw ClaudeAccountUsageFetchError.credentialRepairRequired(
+                            error
+                        )
+                    }
+                }
                 applySnapshot(result.snapshot, for: profile)
                 return .ready
             } catch {
@@ -2870,8 +3786,31 @@ final class AppState: ObservableObject {
                 if case .needsLogin(let reason) = outcome.state {
                     return .requiresLogin(reason: reason)
                 }
-                if case .keychainLocked = outcome.state {
-                    return .temporarilyUnavailable(reason: "Keychain access is required to verify this account.")
+                if case .rotationDeferred(let reason) = outcome.state {
+                    return .rotationRequired(reason: reason)
+                }
+                if case .switchRequired(let reason) = outcome.state {
+                    return .rotationRequired(reason: reason)
+                }
+                if case .providerAccessForbidden(let reason) = outcome.state {
+                    return .forbidden(reason: reason)
+                }
+                if case .credentialRepairRequired(let reason) = outcome.state {
+                    return .repairRequired(reason: reason)
+                }
+                if case .authorizationRequired(let source, let reason) = outcome.state {
+                    return .authorizationRequired(source: source, reason: reason)
+                }
+                if case .credentialAccessBlocked(
+                    let source,
+                    let disposition,
+                    let reason
+                ) = outcome.state {
+                    return .credentialAccessBlocked(
+                        source: source,
+                        disposition: disposition,
+                        reason: reason
+                    )
                 }
                 return .temporarilyUnavailable(reason: error.localizedDescription)
             }
@@ -3042,6 +3981,7 @@ final class AppState: ObservableObject {
         reason: String = "to stop repeated password prompts",
         allowDuringCredentialMutation: Bool = false
     ) async -> Bool {
+        guard validateClaudeNativeConfiguration() else { return false }
         let result = await CredentialAccess.withWorkflowCounter { counter, ownsScope in
             let result = await authorizeClaudeKeychainAccessImpl(
                 reason: reason,
@@ -3218,7 +4158,121 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Explicitly unlocks this app's encrypted snapshot for one profile. This
+    /// is separate from authorizing Claude Code's provider-owned item: each
+    /// Keychain owner has an independent ACL and remediation path.
+    @discardableResult
+    func authorizeStoredCredentialAccess(for profile: AccountProfile) async -> Bool {
+        guard let owner = beginCredentialMutation(for: profile.provider) else {
+            statusMessage = "Wait for the current credential operation to finish, then authorize this saved login."
+            return false
+        }
+        defer { finishCredentialMutation(for: profile.provider, owner: owner) }
+
+        let counter = CredentialKeychainIOCounter()
+        return await CredentialAccess.counting(counter) {
+            defer {
+                logCredentialWorkflow(
+                    workflow: "authorize_saved_snapshot",
+                    provider: profile.provider,
+                    origin: "explicit_action",
+                    access: "mixed",
+                    status: storedSnapshotStatuses[profile.id] == .present
+                        ? "ready"
+                        : "needs_authorization",
+                    counts: counter.snapshot
+                )
+            }
+            do {
+                let interactiveRecord = try CredentialAccess.userInitiated(
+                    reason: "authorize Limit Lifeboat for \(profile.label)'s saved login",
+                    operation: {
+                        try cliSwitcher.storedCredentialRecord(
+                            for: profile,
+                            accessMode: .userInitiated
+                        )
+                    }
+                )
+                if profile.provider == .claude {
+                    // Recovery entries are separate app-owned Keychain items.
+                    // The saved-login action authorizes both surfaces so a
+                    // journal denial never points at a button that only opens
+                    // the profile snapshot.
+                    _ = try CredentialAccess.userInitiated(
+                        reason: "authorize Limit Lifeboat for Claude credential recovery",
+                        operation: {
+                            try claudeRotationRecoveryStore.loadAll(
+                                accessMode: .userInitiated
+                            )
+                        }
+                    )
+                }
+                guard interactiveRecord != nil else {
+                    storedSnapshotStatuses[profile.id] = .absent
+                    storedCredentialSummaries[profile.id] = nil
+                    if profile.provider == .claude {
+                        claudeLoginExpirations[profile.id] = nil
+                    }
+                    statusMessage = "No saved login exists for \(profile.label)."
+                    return false
+                }
+
+                // A one-time Allow is not durable. Prove a fresh background
+                // context can read the exact snapshot before declaring success.
+                guard let verified = try await CredentialAccess.nonInteractive(operation: {
+                    try cliSwitcher.storedCredentialRecord(
+                        for: profile,
+                        accessMode: .nonInteractive
+                    )
+                }) else {
+                    storedSnapshotStatuses[profile.id] = .absent
+                    storedCredentialSummaries[profile.id] = nil
+                    if profile.provider == .claude {
+                        claudeLoginExpirations[profile.id] = nil
+                    }
+                    return false
+                }
+                if profile.provider == .claude {
+                    _ = try await CredentialAccess.nonInteractive(operation: {
+                        try claudeRotationRecoveryStore.loadAll(
+                            accessMode: .nonInteractive
+                        )
+                    })
+                }
+                cacheStoredCredentialSummary(verified, for: profile)
+                if profile.provider == .claude {
+                    refreshClaudeRecoveryStates()
+                }
+                statusMessage = "Saved login access authorized for \(profile.label)."
+                return true
+            } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
+                storedSnapshotStatuses[profile.id] = .locked
+                statusMessage = error.credentialAccessDisposition == .userCancelled
+                    ? "Saved login authorization cancelled."
+                    : "Access was allowed once but was not saved. Choose Always Allow when you retry."
+                return false
+            } catch {
+                let reason = "The saved credential snapshot is unreadable. Relaunch the installed app or repair this saved login."
+                storedSnapshotStatuses[profile.id] = .unreadable(reason: reason)
+                storedCredentialSummaries[profile.id] = nil
+                claudeLoginExpirations[profile.id] = nil
+                refreshStates[profile.id] = .credentialAccessBlocked(
+                    source: .savedAccount,
+                    disposition: .other(errSecDecode),
+                    reason: reason
+                )
+                statusMessage = "Could not authorize \(profile.label): \(error.localizedDescription)"
+                showError(
+                    message: "Saved login access failed",
+                    details: error.localizedDescription
+                )
+                return false
+            }
+        }
+    }
+
     private func recordSuccessfulClaudeKeychainRead(_ observation: LiveCredentialObservation) {
+        liveClaudeRefreshChainFingerprint = observation.claudeRefreshChainFingerprint
         guard let location = observation.claudeKeychainItemLocation else {
             if !observation.isLoggedIn {
                 claudeKeychainAuthorizationState = .notFound
@@ -3349,6 +4403,15 @@ final class AppState: ObservableObject {
         return disposition.isAccessDenied && disposition != .userCancelled
     }
 
+    /// A post-login recovery-journal cleanup error that does not mean the saved
+    /// login itself needs repair: shared-lock contention (another process is
+    /// mid-refresh) or a transient Keychain denial. The login already
+    /// succeeded and the cleanup retries on the next refresh, so these must not
+    /// downgrade a healthy row to "needs repair".
+    private func loginRecoveryCleanupIsTransient(_ error: Error) -> Bool {
+        error is ClaudeOAuthRefreshCoordinatorError || isKeychainAccessDenied(error)
+    }
+
     private func showClaudeAuthorizationFailure(_ error: Error) {
         let details: String
         switch credentialAccessDisposition(for: error) {
@@ -3363,6 +4426,10 @@ final class AppState: ObservableObject {
     }
 
     func captureCLISnapshot(for profile: AccountProfile) {
+        if profile.provider == .claude,
+           !validateClaudeNativeConfiguration() {
+            return
+        }
         guard let mutationOwner = beginCredentialMutation(for: profile.provider) else {
             statusMessage = "A \(profile.provider.displayName) credential operation is already in progress."
             return
@@ -3435,10 +4502,30 @@ final class AppState: ObservableObject {
         case present
         case absent
         case locked
+        case unreadable(reason: String)
     }
 
     func storedSnapshotStatus(for profile: AccountProfile) -> StoredSnapshotStatus {
         storedSnapshotStatuses[profile.id] ?? .absent
+    }
+
+    func storedCredentialAvailability(
+        for profile: AccountProfile
+    ) -> StoredCredentialAvailability {
+        switch storedSnapshotStatus(for: profile) {
+        case .present:
+            return .available
+        case .absent:
+            return .missing
+        case .locked:
+            return .authorizationRequired(source: .savedAccount)
+        case .unreadable(let reason):
+            return .accessBlocked(
+                source: .savedAccount,
+                disposition: .other(errSecDecode),
+                reason: reason
+            )
+        }
     }
 
     func loginExpiresAt(for profile: AccountProfile) -> Date? {
@@ -3449,6 +4536,7 @@ final class AppState: ObservableObject {
     private func refreshStoredSnapshotStatuses() {
         var statuses: [UUID: StoredSnapshotStatus] = [:]
         var expirations: [UUID: Date] = [:]
+        var summaries: [UUID: StoredCredentialSummary] = [:]
         for provider in Provider.allCases {
             let counter = CredentialKeychainIOCounter()
             var providerLocked = false
@@ -3456,6 +4544,7 @@ final class AppState: ObservableObject {
                 for profile in profiles where profile.provider == provider {
                     do {
                         if let record = try cliSwitcher.storedCredentialRecord(for: profile) {
+                            summaries[profile.id] = record.summary
                             statuses[profile.id] = record.summary.isRestorable ? .present : .absent
                             if let expiresAt = record.summary.claudeRefreshTokenExpiresAt {
                                 expirations[profile.id] = expiresAt
@@ -3467,7 +4556,9 @@ final class AppState: ObservableObject {
                         statuses[profile.id] = .locked
                         providerLocked = true
                     } catch {
-                        statuses[profile.id] = .absent
+                        statuses[profile.id] = .unreadable(
+                            reason: "The saved credential snapshot could not be decoded. Relaunch the installed app or repair this saved login."
+                        )
                     }
                 }
             }
@@ -3481,11 +4572,62 @@ final class AppState: ObservableObject {
             )
         }
         storedSnapshotStatuses = statuses
+        storedCredentialSummaries = summaries
         claudeLoginExpirations = expirations
+    }
+
+    /// Recovery journal inventory is read-only at launch. Pending owners are
+    /// surfaced as repairable—not expired—and the next explicit Retry/switch
+    /// performs reconciliation under the cross-process lease.
+    private func refreshClaudeRecoveryStates() {
+        do {
+            let records = try claudeRotationRecoveryStore.loadAll(
+                accessMode: .nonInteractive
+            )
+            for record in records {
+                for destination in record.pendingDestinations {
+                    let profileID: UUID?
+                    switch destination {
+                    case .storedProfile(let id):
+                        profileID = id
+                    case .liveClaudeCode:
+                        profileID = profiles.first(where: {
+                            $0.provider == .claude && $0.isActiveCLI
+                        })?.id
+                    }
+                    guard let profileID,
+                          profiles.contains(where: { $0.id == profileID }) else {
+                        continue
+                    }
+                    refreshStates[profileID] = .credentialRepairRequired(
+                        reason: record.isPrepared
+                            ? "A prepared Claude credential transaction needs local reconciliation before another refresh."
+                            : "A fresh Claude login generation is safely journaled and needs local reconciliation."
+                    )
+                }
+            }
+        } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
+            for profile in profiles where profile.provider == .claude {
+                refreshStates[profile.id] = .authorizationRequired(
+                    source: .savedAccount,
+                    reason: "Authorize access to the encrypted Claude recovery journal."
+                )
+                storedSnapshotStatuses[profile.id] = .locked
+            }
+        } catch {
+            for profile in profiles where profile.provider == .claude {
+                refreshStates[profile.id] = .credentialRepairRequired(
+                    reason: "The encrypted Claude recovery journal could not be inspected. Relaunch the installed app, then Retry."
+                )
+            }
+        }
     }
 
     private func cacheStoredSnapshotSummary(_ snapshot: CredentialSnapshot, for profile: AccountProfile) {
         storedSnapshotStatuses[profile.id] = .present
+        storedCredentialSummaries[profile.id] = cliSwitcher.makeStoredCredentialRecord(
+            from: snapshot
+        ).summary
         guard profile.provider == .claude else { return }
         let item = snapshot.items.first(where: { $0.kind == .keychainJSONFields })
         claudeLoginExpirations[profile.id] = item.flatMap {
@@ -3500,6 +4642,7 @@ final class AppState: ObservableObject {
         storedSnapshotStatuses[profile.id] = record?.summary.isRestorable == true
             ? .present
             : .absent
+        storedCredentialSummaries[profile.id] = record?.summary
         if profile.provider == .claude {
             claudeLoginExpirations[profile.id] = record?.summary.claudeRefreshTokenExpiresAt
         }
@@ -3519,6 +4662,246 @@ final class AppState: ObservableObject {
         return cliSwitcher.makeStoredCredentialRecord(from: snapshot)
     }
 
+    private func claudeOAuthGenerationAdvanced(
+        from old: ClaudeOAuthCredentials?,
+        to fresh: ClaudeOAuthCredentials
+    ) -> Bool {
+        guard let old else { return true }
+        return old.accessToken != fresh.accessToken
+            || old.refreshToken != fresh.refreshToken
+            || old.expiresAt != fresh.expiresAt
+            || old.refreshTokenExpiresAt != fresh.refreshTokenExpiresAt
+    }
+
+    /// Resolves every local owner that still holds the target's old refresh
+    /// chain before a token exchange. The returned destinations are included
+    /// in the encrypted checkpoint *before* the irreversible request.
+    private func additionalClaudeRecoveryDestinations(
+        staleChainFingerprint: String?,
+        targetProfileID: UUID,
+        storedCredentialWorkflow: SwitchStoredCredentialWorkflow?
+    ) throws -> Set<ClaudeRotationRecoveryDestination> {
+        guard let staleChainFingerprint else { return [] }
+        _ = try ClaudeOAuthMutationLeaseContext.requireCurrent()
+
+        var destinations: Set<ClaudeRotationRecoveryDestination> = []
+        for sibling in profiles where sibling.provider == .claude
+            && sibling.id != targetProfileID {
+            let siblingRecord: StoredCredentialRecord?
+            do {
+                // Never use the pre-prompt workflow cache here. Owner
+                // discovery is part of the credential transaction and every
+                // sibling revision must be re-read after the lease is held.
+                siblingRecord = try cliSwitcher.storedCredentialRecord(
+                    for: sibling,
+                    accessMode: .nonInteractive
+                )
+                storedCredentialWorkflow?.markLoaded(
+                    siblingRecord,
+                    for: sibling.id
+                )
+                cacheStoredCredentialSummary(siblingRecord, for: sibling)
+            } catch let error as CredentialStoreError
+                where error.isKeychainAccessDenied {
+                storedSnapshotStatuses[sibling.id] = .locked
+                refreshStates[sibling.id] = .authorizationRequired(
+                    source: .savedAccount,
+                    reason: error.localizedDescription
+                )
+                throw ClaudeAccountUsageFetchError.keychainLocked
+            } catch {
+                // An unreadable owner may share the single-use chain. Cached
+                // digests cannot prove otherwise, so fail closed before the
+                // exchange instead of risking a stranded sibling.
+                let reason = "A saved Claude sibling could not be re-read under the shared credential lock: \(error.localizedDescription)"
+                storedSnapshotStatuses[sibling.id] = .unreadable(reason: reason)
+                storedCredentialSummaries[sibling.id] = nil
+                claudeLoginExpirations[sibling.id] = nil
+                refreshStates[sibling.id] = .credentialAccessBlocked(
+                    source: .savedAccount,
+                    disposition: .other(errSecDecode),
+                    reason: reason
+                )
+                throw ClaudeAccountUsageFetchError.credentialUnavailable(error)
+            }
+            if siblingRecord?.summary.claudeRefreshChainFingerprint
+                == staleChainFingerprint {
+                destinations.insert(.storedProfile(sibling.id))
+            }
+        }
+
+        do {
+            if let live = try cliSwitcher.liveClaudeOAuthCredentialRecord(
+                accessMode: .nonInteractive
+            ) {
+                let liveChain = ClaudeRefreshChainFingerprint.make(
+                    credentials: live.credentials
+                )
+                liveClaudeRefreshChainFingerprint = liveChain
+                if liveChain == staleChainFingerprint {
+                    destinations.insert(.liveClaudeCode)
+                }
+            }
+        } catch let error as ClaudeCodeCredentialsKeychainError
+            where error.isKeychainAccessDenied {
+            recordClaudeKeychainFailure(error)
+            throw ClaudeAccountUsageFetchError.liveCredentialAccessDenied(
+                error: error,
+                item: nil
+            )
+        } catch {
+            throw ClaudeAccountUsageFetchError.credentialUnavailable(error)
+        }
+        return destinations
+    }
+
+    /// Reloads every sibling after the service's leased transaction so the
+    /// switch workflow and presentation caches follow the committed owners.
+    /// The service is the sole writer: repeating its merge here would lack the
+    /// journal's pre-exchange generation baseline and could overwrite a newer
+    /// access-token generation that retained the same refresh token.
+    private func reconcileClaudeChainOwners(
+        _ destinations: Set<ClaudeRotationRecoveryDestination>,
+        staleChainFingerprint: String?,
+        freshCredentials: ClaudeOAuthCredentials,
+        storedCredentialWorkflow: SwitchStoredCredentialWorkflow?
+    ) throws {
+        guard let staleChainFingerprint, !destinations.isEmpty else { return }
+        _ = try ClaudeOAuthMutationLeaseContext.requireCurrent()
+        var failedProfiles: [UUID] = []
+        var liveFailed = false
+
+        for destination in destinations {
+            do {
+                switch destination {
+                case .liveClaudeCode:
+                    guard let current = try cliSwitcher.liveClaudeOAuthCredentialRecord(
+                        accessMode: .nonInteractive
+                    ) else {
+                        throw ClaudeCredentialRepairRequiredError(
+                            reason: "The live Claude Code credential disappeared while reconciling a rotated chain."
+                        )
+                    }
+                    let currentChain = ClaudeRefreshChainFingerprint.make(
+                        credentials: current.credentials
+                    )
+                    guard claudeRotatedFieldsMatch(
+                        current.credentials,
+                        freshCredentials
+                    ) || currentChain != staleChainFingerprint else {
+                        throw ClaudeAccountUsageFetchError.credentialRepairRequired(
+                            ClaudeCredentialRepairRequiredError(
+                                reason: "The live Claude Code owner is still on the stale generation after credential reconciliation."
+                            )
+                        )
+                    }
+                    // Matching fresh fields are committed. A different chain
+                    // is a superseding external login and wins untouched.
+                    liveClaudeRefreshChainFingerprint = currentChain
+                    bestEffortCompleteClaudeRecoveryDestination(
+                        destination,
+                        staleChainFingerprint: staleChainFingerprint,
+                        freshCredentials: freshCredentials
+                    )
+
+                case .storedProfile(let profileID):
+                    guard let sibling = profiles.first(where: {
+                        $0.id == profileID && $0.provider == .claude
+                    }), let current = try cliSwitcher.storedCredentialRecord(
+                        for: sibling,
+                        accessMode: .nonInteractive
+                    ), let currentCredentials = current.claudeOAuthCredentials else {
+                        throw ClaudeCredentialRepairRequiredError(
+                            reason: "A saved sibling credential is unavailable for rotated-chain reconciliation."
+                        )
+                    }
+                    let currentChain = current.summary.claudeRefreshChainFingerprint
+                    guard claudeRotatedFieldsMatch(
+                        currentCredentials,
+                        freshCredentials
+                    ) || currentChain != staleChainFingerprint else {
+                        throw ClaudeAccountUsageFetchError.credentialRepairRequired(
+                            ClaudeCredentialRepairRequiredError(
+                                reason: "A saved Claude sibling is still on the stale generation after credential reconciliation."
+                            )
+                        )
+                    }
+                    storedCredentialWorkflow?.markLoaded(
+                        current,
+                        for: profileID
+                    )
+                    cacheStoredCredentialSummary(current, for: sibling)
+                    bestEffortCompleteClaudeRecoveryDestination(
+                        destination,
+                        staleChainFingerprint: staleChainFingerprint,
+                        freshCredentials: freshCredentials
+                    )
+                }
+            } catch {
+                switch destination {
+                case .liveClaudeCode:
+                    liveFailed = true
+                case .storedProfile(let profileID):
+                    failedProfiles.append(profileID)
+                    refreshStates[profileID] = .credentialRepairRequired(
+                        reason: error.localizedDescription
+                    )
+                }
+            }
+        }
+
+        if liveFailed || !failedProfiles.isEmpty {
+            throw ClaudeAccountUsageFetchError.credentialRepairRequired(
+                ClaudeCredentialRepairRequiredError(
+                    reason: "Claude's fresh credential is safely journaled, but one or more shared local owners still need repair. Retry without signing in again."
+                )
+            )
+        }
+    }
+
+    private func claudeRotatedFieldsMatch(
+        _ lhs: ClaudeOAuthCredentials,
+        _ rhs: ClaudeOAuthCredentials
+    ) -> Bool {
+        lhs.accessToken == rhs.accessToken
+            && lhs.refreshToken == rhs.refreshToken
+            && lhs.expiresAt == rhs.expiresAt
+            && lhs.refreshTokenExpiresAt == rhs.refreshTokenExpiresAt
+    }
+
+    /// Journal cleanup happens after the owner CAS. If only cleanup fails, the
+    /// fresh owner remains authoritative and the next explicit action can
+    /// remove the stale journal entry without another exchange.
+    private func bestEffortCompleteClaudeRecoveryDestination(
+        _ destination: ClaudeRotationRecoveryDestination,
+        staleChainFingerprint: String,
+        freshCredentials: ClaudeOAuthCredentials
+    ) {
+        do {
+            _ = try ClaudeOAuthMutationLeaseContext.requireCurrent()
+            for var record in try claudeRotationRecoveryStore.loadAll(
+                accessMode: .nonInteractive
+            ) where record.staleChainFingerprint == staleChainFingerprint
+                && record.credentials?.accessToken == freshCredentials.accessToken
+                && record.pendingDestinations.contains(destination) {
+                record.pendingDestinations.remove(destination)
+                if record.pendingDestinations.isEmpty {
+                    try claudeRotationRecoveryStore.delete(
+                        id: record.id,
+                        accessMode: .nonInteractive
+                    )
+                } else {
+                    try claudeRotationRecoveryStore.save(
+                        record,
+                        accessMode: .nonInteractive
+                    )
+                }
+            }
+        } catch {
+            AppLog.credentials.error("A committed Claude owner could not clear its encrypted recovery checkpoint; a later explicit action will retry cleanup.")
+        }
+    }
+
     private func readStoredSnapshotStatus(for profile: AccountProfile) -> StoredSnapshotStatus {
         do {
             return try cliSwitcher.storedCredentialRecord(for: profile)?.summary.isRestorable == true
@@ -3527,7 +4910,9 @@ final class AppState: ObservableObject {
         } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
             return .locked
         } catch {
-            return .absent
+            return .unreadable(
+                reason: "The saved credential snapshot could not be decoded. Relaunch the installed app or repair this saved login."
+            )
         }
     }
 
@@ -3535,98 +4920,267 @@ final class AppState: ObservableObject {
         storedSnapshotStatus(for: profile) == .present
     }
 
-    /// Row-level "try again" for an account whose last refresh failed.
+    private enum RetryRefreshSource: Equatable {
+        case row
+        case notification
+    }
+
+    private enum RetryRefreshResult: Sendable {
+        case completed
+        case needsLogin(reason: String)
+        case authorizationRequired(reason: String)
+        case deferred(reason: String)
+        case failed(reason: String)
+        case noLongerAvailable
+    }
+
+    /// Row-level entry point. Notification actions call the same awaitable
+    /// workflow below, so both sources share mutation gating and coalescing.
     func retryRefresh(for profile: AccountProfile) {
         Task {
-            let counter = CredentialKeychainIOCounter()
-            var workflowStatus = "aborted"
-            await CredentialAccess.counting(counter) {
-                defer {
-                    logCredentialWorkflow(
-                        workflow: "usage_retry",
-                        provider: profile.provider,
-                        origin: "explicit_action",
-                        access: "noninteractive",
-                        status: workflowStatus,
-                        counts: counter.snapshot
-                    )
-                }
-                guard let mutationOwner = beginCredentialMutation(for: profile.provider) else {
-                    workflowStatus = "deferred"
-                    statusMessage = "A \(profile.provider.displayName) credential operation is already in progress."
-                    return
-                }
-                if profile.provider == .claude, profile.isActiveCLI {
-                    switch automaticClaudeLiveAccess() {
-                    case .read(let pinnedItem):
-                        if let pinnedItem {
-                            var attemptedItem: ClaudeKeychainItemLocation? = pinnedItem
-                            do {
-                                _ = try readAutomaticClaudeOAuthCredentials(
-                                    pinnedItem: pinnedItem,
-                                    attemptedItem: &attemptedItem
-                                )
-                            } catch {
-                                recordClaudeKeychainFailure(
-                                    error,
-                                    item: attemptedItem,
-                                    resolveItemIfNeeded: false
-                                )
-                                refreshStates[profile.id] = isKeychainAccessDenied(error)
-                                    ? .keychainLocked
-                                    : .readFailed(reason: error.localizedDescription)
-                                statusMessage = "Retry stopped because the changed Claude credential could not be verified."
-                                workflowStatus = isKeychainAccessDenied(error)
-                                    ? "authorization_required"
-                                    : "credential_unavailable"
-                                finishCredentialMutation(
-                                    for: profile.provider,
-                                    owner: mutationOwner
-                                )
-                                return
-                            }
-                        }
-                    case .knownDenied, .unavailable:
-                        refreshStates[profile.id] = .keychainLocked
-                        statusMessage = "Retry stopped. Authorize Claude Keychain access from the More menu first."
-                        workflowStatus = "authorization_required"
-                        finishCredentialMutation(
-                            for: profile.provider,
-                            owner: mutationOwner
-                        )
-                        return
-                    }
-                }
-                await CredentialAccess.nonInteractive {
-                    await retryRefreshInteractively(for: profile)
-                }
-                let loginReason: String?
-                if case .needsLogin(let reason) = refreshStates[profile.id] {
-                    loginReason = reason
-                } else {
-                    loginReason = nil
-                }
-                finishCredentialMutation(for: profile.provider, owner: mutationOwner)
-                if let loginReason {
-                    workflowStatus = "needs_login"
-                    handleLoginRequired(for: profile, reason: loginReason, interactive: true)
-                } else if case .ok = refreshStates[profile.id] {
-                    workflowStatus = "completed"
-                } else if case .keychainLocked = refreshStates[profile.id] {
-                    workflowStatus = "authorization_required"
-                } else {
-                    workflowStatus = "failed"
-                }
-                updateSwitchAdvice()
-                updateMenuBarSummary()
-            }
+            _ = await retryRefresh(profileID: profile.id, source: .row)
         }
     }
 
+    private func retryRefresh(
+        profileID: UUID,
+        source: RetryRefreshSource
+    ) async -> RetryRefreshResult {
+        guard let requestedProfile = profiles.first(where: { $0.id == profileID }) else {
+            return .noLongerAvailable
+        }
+        let flightKey: ClaudeSessionRetryFlightKey = source == .notification
+            ? .activePausedNotification(requestedProfile.provider)
+            : .profile(profileID)
+        if let existing = retryFlights[flightKey] {
+            return await existing.task.value
+        }
+
+        let flightID = UUID()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return RetryRefreshResult.noLongerAvailable }
+            return await self.performRetryRefresh(profileID: profileID, source: source)
+        }
+        retryFlights[flightKey] = (flightID, task)
+        let result = await task.value
+        if retryFlights[flightKey]?.id == flightID {
+            retryFlights[flightKey] = nil
+        }
+        return result
+    }
+
+    private func performRetryRefresh(
+        profileID: UUID,
+        source: RetryRefreshSource
+    ) async -> RetryRefreshResult {
+        guard var profile = profiles.first(where: { $0.id == profileID }) else {
+            return .noLongerAvailable
+        }
+        if profile.provider == .claude,
+           !validateClaudeNativeConfiguration() {
+            return .deferred(
+                reason: statusMessage.isEmpty
+                    ? "Claude session handling is unavailable for this configuration."
+                    : statusMessage
+            )
+        }
+
+        // A scheduled read or switch already owns this provider. Queue the
+        // explicit intent briefly, yielding the main actor, then re-resolve the
+        // profile before touching credentials. This is deterministic for
+        // notification clicks and avoids carrying a stale profile value.
+        let provider = profile.provider
+        var mutationOwner = beginCredentialMutation(for: provider)
+        while mutationOwner == nil {
+            if Task.isCancelled { return .deferred(reason: "Refresh was cancelled.") }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            switch source {
+            case .row:
+                guard let current = profiles.first(where: { $0.id == profileID }) else {
+                    return .noLongerAvailable
+                }
+                profile = current
+            case .notification:
+                // The notification's original profile is stale context. A
+                // switch/removal while this intent is queued must retarget the
+                // account that is active now, never rotate the old inactive
+                // holder merely because its paused state has not cleared yet.
+                guard let current = activeProfile(for: provider) else {
+                    return .noLongerAvailable
+                }
+                profile = current
+            }
+            mutationOwner = beginCredentialMutation(for: provider)
+        }
+        guard let mutationOwner else {
+            let reason = "Another \(profile.provider.displayName) credential operation is still in progress. Try again shortly."
+            statusMessage = reason
+            return .deferred(reason: reason)
+        }
+        defer { finishCredentialMutation(for: provider, owner: mutationOwner) }
+
+        if source == .notification {
+            guard let current = activeProfile(for: provider) else {
+                return .noLongerAvailable
+            }
+            profile = current
+        }
+
+        // A Retry tap or delivered notification may have waited across the
+        // fixed login-expiry boundary. Re-evaluate the final resolved profile
+        // after the provider gate and stop before acquiring a mutation lease or
+        // invoking the token service; fixed-expiry recovery is an explicit
+        // login, not rotation.
+        if isFixedClaudeLoginExpired(profile, now: Date()) {
+            let reason = "This Claude login has expired on this Mac. Log in again to renew it."
+            clearUsagePaused(for: profile.id)
+            refreshStates[profile.id] = .needsLogin(reason: reason)
+            return .needsLogin(reason: reason)
+        }
+
+        // A scheduled read, login, or switch may have resolved the problem
+        // while this user intent waited for the provider gate. Do not turn a
+        // stale Retry tap into an unnecessary OAuth-capable request.
+        switch (source, refreshStates[profile.id]) {
+        case (.notification, .rotationDeferred),
+             (.notification, .usagePaused),
+             (.notification, .credentialRepairRequired),
+             (.row, .readFailed),
+             (.row, .rotationDeferred),
+             (.row, .usagePaused),
+             (.row, .credentialRepairRequired):
+            break
+        default:
+            return .noLongerAvailable
+        }
+
+        let counter = CredentialKeychainIOCounter()
+        var workflowStatus = "aborted"
+        let result: RetryRefreshResult = await CredentialAccess.counting(counter) {
+            if profile.provider == .claude, profile.isActiveCLI {
+                switch automaticClaudeLiveAccess() {
+                case .read(let pinnedItem):
+                    if let pinnedItem {
+                        var attemptedItem: ClaudeKeychainItemLocation? = pinnedItem
+                        do {
+                            _ = try readAutomaticClaudeOAuthCredentials(
+                                pinnedItem: pinnedItem,
+                                attemptedItem: &attemptedItem
+                            )
+                        } catch {
+                            recordClaudeKeychainFailure(
+                                error,
+                                item: attemptedItem,
+                                resolveItemIfNeeded: false
+                            )
+                            let reason = error.localizedDescription
+                            if isKeychainAccessDenied(error) {
+                                refreshStates[profile.id] = .authorizationRequired(
+                                    source: .claudeCode,
+                                    reason: reason
+                                )
+                                workflowStatus = "authorization_required"
+                                return .authorizationRequired(reason: reason)
+                            }
+                            refreshStates[profile.id] = .readFailed(reason: reason)
+                            workflowStatus = "credential_unavailable"
+                            return .failed(reason: reason)
+                        }
+                    }
+                case .knownDenied, .unavailable:
+                    let reason = "Authorize Claude Code Keychain access before retrying."
+                    refreshStates[profile.id] = .authorizationRequired(
+                        source: .claudeCode,
+                        reason: reason
+                    )
+                    statusMessage = reason
+                    workflowStatus = "authorization_required"
+                    return .authorizationRequired(reason: reason)
+                }
+            }
+
+            if profile.provider == .claude {
+                do {
+                    try await claudeRefreshCoordinator.withLease { _ in
+                        await CredentialAccess.nonInteractive {
+                            await retryRefreshInteractively(for: profile)
+                        }
+                    }
+                } catch let error as ClaudeOAuthRefreshCoordinatorError {
+                    refreshStates[profile.id] = .rotationDeferred(
+                        reason: error.localizedDescription
+                    )
+                    recordClaudeCredentialOutcome(
+                        Self.credentialOutcome(for: .rotationDeferred(error)),
+                        for: profile,
+                        codePath: "userRetry"
+                    )
+                    statusMessage = "Retry deferred: \(error.localizedDescription)"
+                } catch {
+                    refreshStates[profile.id] = .rotationDeferred(
+                        reason: error.localizedDescription
+                    )
+                    statusMessage = "Retry deferred: \(error.localizedDescription)"
+                }
+            } else {
+                await CredentialAccess.nonInteractive {
+                    await retryRefreshInteractively(for: profile)
+                }
+            }
+            switch refreshStates[profile.id] {
+            case .ok:
+                workflowStatus = "completed"
+                return .completed
+            case .needsLogin(let reason):
+                workflowStatus = "needs_login"
+                if source == .row {
+                    handleLoginRequired(for: profile, reason: reason, interactive: true)
+                }
+                return .needsLogin(reason: reason)
+            case .authorizationRequired(_, let reason),
+                 .credentialAccessBlocked(_, _, let reason):
+                workflowStatus = "authorization_required"
+                return .authorizationRequired(reason: reason)
+            case .keychainLocked:
+                workflowStatus = "authorization_required"
+                return .authorizationRequired(reason: "Authorize Keychain access before retrying.")
+            case .rotationDeferred(let reason), .switchRequired(let reason):
+                workflowStatus = "deferred"
+                return .deferred(reason: reason)
+            case .credentialRepairRequired(let reason), .readFailed(let reason):
+                workflowStatus = "failed"
+                return .failed(reason: reason)
+            case .providerAccessForbidden(let reason):
+                workflowStatus = "forbidden"
+                return .failed(reason: reason)
+            case .idle, .refreshing, .usagePaused, .none:
+                workflowStatus = "failed"
+                return .failed(reason: statusMessage.isEmpty
+                    ? "The usage refresh did not complete."
+                    : statusMessage)
+            }
+        }
+
+        logCredentialWorkflow(
+            workflow: "usage_retry",
+            provider: profile.provider,
+            origin: source == .row ? "row" : "notification",
+            access: "noninteractive",
+            status: workflowStatus,
+            counts: counter.snapshot
+        )
+        updateSwitchAdvice()
+        updateMenuBarSummary()
+        return result
+    }
+
     private func retryRefreshInteractively(for profile: AccountProfile) async {
-        guard !isRefreshing else { return }
-        isRefreshing = true
-        defer { isRefreshing = false }
+        // A user Retry can legitimately wait behind a scheduled refresh. It
+        // owns the visible flag only when the flag is not already set by the
+        // outer operation; never discard the queued explicit intent.
+        let ownsRefreshFlag = !isRefreshing
+        if ownsRefreshFlag { isRefreshing = true }
+        defer { if ownsRefreshFlag { isRefreshing = false } }
 
         var retryLiveRecord: LiveClaudeOAuthCredentialRecord?
         if profile.provider == .claude, profile.isActiveCLI {
@@ -3669,6 +5223,15 @@ final class AppState: ObservableObject {
             refreshStates[profile.id] = .keychainLocked
             return
         }
+        if case .unreadable(let reason) = storedStatus {
+            claudeLoginExpirations[profile.id] = nil
+            refreshStates[profile.id] = .credentialAccessBlocked(
+                source: .savedAccount,
+                disposition: .other(errSecDecode),
+                reason: reason
+            )
+            return
+        }
 
         switch profile.provider {
         case .claude:
@@ -3677,16 +5240,64 @@ final class AppState: ObservableObject {
             refreshStates[profile.id] = .refreshing
             var resolvedUsageCredentials: ClaudeOAuthCredentials?
             do {
+                let retryStoredRecord = try cliSwitcher.storedCredentialRecord(
+                    for: profile,
+                    accessMode: .nonInteractive
+                )
+                let predictedCredential = preferredClaudeCredential(
+                    live: retryLiveRecord?.credentials,
+                    stored: retryStoredRecord?.claudeOAuthCredentials,
+                    isActiveCLI: profile.isActiveCLI
+                )
+                let staleChain = ClaudeRefreshChainFingerprint.make(
+                    credentials: predictedCredential
+                )
+                let additionalDestinations = try additionalClaudeRecoveryDestinations(
+                    staleChainFingerprint: staleChain,
+                    targetProfileID: profile.id,
+                    storedCredentialWorkflow: nil
+                )
                 let snapshot = try await claudeUsageService.fetchSnapshot(
                     for: profile,
                     isActiveCLI: profile.isActiveCLI,
                     accountIsLiveElsewhere: liveElsewhere,
-                    userExplicitlyRequestedRefresh: true,
+                    rotationIntent: .userRetry,
+                    additionalRecoveryDestinations: additionalDestinations,
                     liveCredentialReadPolicy: profile.isActiveCLI
                         ? .preloaded(retryLiveRecord)
                         : .read,
-                    credentialDidResolve: { resolvedUsageCredentials = $0 }
+                    credentialDidResolve: {
+                        resolvedUsageCredentials = $0
+                    }
                 )
+                // Compare against the pre-rotation credential predicted before
+                // the fetch. The resolve callback only ever reports the
+                // post-rotation value, so comparing its first and last reports
+                // would miss the primary rotation. Mirrors the switch path.
+                if let resolvedUsageCredentials,
+                   claudeOAuthGenerationAdvanced(
+                    from: predictedCredential,
+                    to: resolvedUsageCredentials
+                   ) {
+                    try reconcileClaudeChainOwners(
+                        additionalDestinations,
+                        staleChainFingerprint: staleChain,
+                        freshCredentials: resolvedUsageCredentials,
+                        storedCredentialWorkflow: nil
+                    )
+                }
+                if let refreshedRecord = try? cliSwitcher.storedCredentialRecord(
+                    for: profile,
+                    accessMode: .nonInteractive
+                ) {
+                    cacheStoredCredentialSummary(refreshedRecord, for: profile)
+                }
+                if profile.isActiveCLI, let resolvedUsageCredentials {
+                    liveClaudeRefreshChainFingerprint =
+                        ClaudeRefreshChainFingerprint.make(
+                            credentials: resolvedUsageCredentials
+                        )
+                }
                 applySnapshot(snapshot, for: profile)
                 clearUsagePaused(for: profile.id)
                 recordClaudeCredentialOutcome(.success, for: profile, codePath: "userRetry")
@@ -3712,6 +5323,13 @@ final class AppState: ObservableObject {
                     for: profile,
                     codePath: "userRetry"
                 )
+                if case .credentialRepairRequired = fetchError {
+                    // Sibling propagation can be the incomplete owner even
+                    // when this row initiated the exchange. Surface every
+                    // journal destination now; each can repair from the saved
+                    // fresh generation without another token request.
+                    refreshClaudeRecoveryStates()
+                }
                 let outcome = RefreshOutcomePolicy.outcome(for: fetchError, isActiveCLI: profile.isActiveCLI)
                 if outcome.attemptTUIFallback {
                     clearUsagePaused(for: profile.id)
@@ -3751,6 +5369,10 @@ final class AppState: ObservableObject {
     }
 
     func beginCLILogin(for profile: AccountProfile, activateAfterLogin: Bool = true) {
+        if profile.provider == .claude,
+           !validateClaudeNativeConfiguration() {
+            return
+        }
         guard let mutationOwner = beginCredentialMutation(for: profile.provider) else {
             statusMessage = "A \(profile.provider.displayName) credential operation is already in progress."
             return
@@ -3765,9 +5387,15 @@ final class AppState: ObservableObject {
             let counter = CredentialKeychainIOCounter()
             let started = await CredentialAccess.counting(counter) {
                 await CredentialAccess.nonInteractive {
-                    self.beginCLILoginPrepared(
-                        for: profile,
+                    guard let request = self.revalidatedLoginRequest(
+                        for: profile.id,
                         activateAfterLogin: activateAfterLogin
+                    ) else {
+                        return false
+                    }
+                    return self.beginCLILoginPrepared(
+                        for: request.profile,
+                        activateAfterLogin: request.activateAfterLogin
                     )
                 }
             }
@@ -3786,6 +5414,134 @@ final class AppState: ObservableObject {
                 )
             }
         }
+    }
+
+    private struct RevalidatedLoginRequest {
+        var profile: AccountProfile
+        var activateAfterLogin: Bool
+    }
+
+    /// Re-resolves an inactive renewal after it owns the provider gate and
+    /// immediately before Terminal is launched. Cached popover state is only a
+    /// hint: a newly shared Claude chain must switch first, while a fixed expiry
+    /// crossed since the click turns recovery into an activating login.
+    private func revalidatedLoginRequest(
+        for profileID: UUID,
+        activateAfterLogin: Bool
+    ) -> RevalidatedLoginRequest? {
+        guard let profile = profiles.first(where: { $0.id == profileID }) else {
+            statusMessage = "That account was removed before login could start."
+            return nil
+        }
+        guard profile.provider == .claude,
+              !profile.isActiveCLI,
+              !activateAfterLogin else {
+            return RevalidatedLoginRequest(
+                profile: profile,
+                activateAfterLogin: activateAfterLogin
+            )
+        }
+
+        let targetRecord: StoredCredentialRecord?
+        do {
+            targetRecord = try cliSwitcher.storedCredentialRecord(
+                for: profile,
+                accessMode: .nonInteractive
+            )
+            cacheStoredCredentialSummary(targetRecord, for: profile)
+        } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
+            storedSnapshotStatuses[profile.id] = .locked
+            refreshStates[profile.id] = .authorizationRequired(
+                source: .savedAccount,
+                reason: error.localizedDescription
+            )
+            statusMessage = "Authorize this saved Claude login before renewing it."
+            return nil
+        } catch {
+            let reason = "The saved Claude login could not be decoded: \(error.localizedDescription)"
+            storedSnapshotStatuses[profile.id] = .unreadable(reason: reason)
+            storedCredentialSummaries[profile.id] = nil
+            claudeLoginExpirations[profile.id] = nil
+            refreshStates[profile.id] = .credentialAccessBlocked(
+                source: .savedAccount,
+                disposition: .other(errSecDecode),
+                reason: reason
+            )
+            statusMessage = reason
+            return nil
+        }
+
+        let now = Date()
+        if targetRecord?.summary.claudeRefreshTokenExpiresAt
+            .map({ now >= $0 }) == true {
+            let reason = "This Claude login expired before renewal started, so recovery will make it the active account."
+            refreshStates[profile.id] = .needsLogin(reason: reason)
+            statusMessage = reason
+            return RevalidatedLoginRequest(
+                profile: profile,
+                activateAfterLogin: true
+            )
+        }
+
+        let liveRecord: LiveClaudeOAuthCredentialRecord?
+        do {
+            liveRecord = try cliSwitcher.liveClaudeOAuthCredentialRecord(
+                accessMode: .nonInteractive
+            )
+            liveClaudeRefreshChainFingerprint = ClaudeRefreshChainFingerprint.make(
+                credentials: liveRecord?.credentials
+            )
+        } catch let error as ClaudeCodeCredentialsKeychainError
+            where error.isKeychainAccessDenied {
+            recordClaudeKeychainFailure(error)
+            refreshStates[profile.id] = .authorizationRequired(
+                source: .claudeCode,
+                reason: error.localizedDescription
+            )
+            statusMessage = "Authorize Claude Code Keychain access before renewing an inactive account."
+            return nil
+        } catch {
+            let reason = "The live Claude login could not be inspected safely: \(error.localizedDescription)"
+            refreshStates[profile.id] = .credentialAccessBlocked(
+                source: .claudeCode,
+                disposition: credentialAccessDisposition(for: error) ?? .unavailable,
+                reason: reason
+            )
+            statusMessage = reason
+            return nil
+        }
+
+        let targetChain = targetRecord?.summary.claudeRefreshChainFingerprint
+        let liveChain = ClaudeRefreshChainFingerprint.make(
+            credentials: liveRecord?.credentials
+        )
+        if RotationProtectionPolicy.accountIsLiveElsewhere(
+            profile: profile,
+            among: profiles,
+            storedChainFingerprint: targetChain,
+            liveChainFingerprint: liveChain
+        ) {
+            let reason = "This profile shares the active Claude login. Switch the CLI to it before renewing."
+            refreshStates[profile.id] = .switchRequired(reason: reason)
+            statusMessage = reason
+            return nil
+        }
+
+        return RevalidatedLoginRequest(
+            profile: profile,
+            activateAfterLogin: false
+        )
+    }
+
+    private func preferredClaudeCredential(
+        live: ClaudeOAuthCredentials?,
+        stored: ClaudeOAuthCredentials?,
+        isActiveCLI: Bool
+    ) -> ClaudeOAuthCredentials? {
+        guard isActiveCLI else { return stored }
+        guard let live else { return stored }
+        guard let stored else { return live }
+        return stored.isFresher(than: live, asOf: Date()) ? stored : live
     }
 
     /// Performs prompt-free preparation. Claude authorization is deliberately
@@ -4314,11 +6070,21 @@ final class AppState: ObservableObject {
             recordSuccessfulClaudeKeychainRead(current)
         }
         guard activateAfterLogin else {
-            return await handleNonActivatingLoginCompletion(
+            let completion = await handleNonActivatingLoginCompletion(
                 current: current,
                 profileID: profileID,
                 previousActiveID: previousActiveID
-            ) ? .completed : .pending
+            )
+            if let deferredError = completion.deferredError {
+                // `handleNonActivatingLoginCompletion` returns only after its
+                // Claude lease has been released. Never hold Claude Code's
+                // cross-process locks while a user dismisses a modal.
+                showError(
+                    message: deferredError.message,
+                    details: deferredError.details
+                )
+            }
+            return completion.completed ? .completed : .pending
         }
         do {
             _ = try reconcileLiveCredentials(
@@ -4328,6 +6094,9 @@ final class AppState: ObservableObject {
                 preferredLoginProfileID: profileID
             )
             refreshStates[profileID] = .ok
+            if provider == .claude {
+                await reconcileClaudeRecoveryAfterLogin(profileID: profileID)
+            }
             await CredentialAccess.nonInteractive { await refreshAll() }
             return profiles.first(where: { $0.id == profileID })?.isActiveCLI == true
                 ? .completed
@@ -4347,12 +6116,75 @@ final class AppState: ObservableObject {
     /// Captures the just-completed login into its profile *without* changing the
     /// active account, then restores the previously-active account into the live
     /// session so the app's active-CLI belief and the on-disk session agree.
+    private struct DeferredNonActivatingLoginError {
+        var message: String
+        var details: String
+    }
+
+    private struct NonActivatingLoginCompletion {
+        var completed: Bool
+        var deferredError: DeferredNonActivatingLoginError? = nil
+    }
+
     private func handleNonActivatingLoginCompletion(
         current: LiveCredentialObservation,
         profileID: UUID,
         previousActiveID: UUID?
-    ) async -> Bool {
+    ) async -> NonActivatingLoginCompletion {
         let provider = current.provider
+        if provider == .claude, ClaudeOAuthMutationLeaseContext.current == nil {
+            do {
+                let completion = try await claudeRefreshCoordinator.withLease { _ in
+                    await self.handleNonActivatingLoginCompletion(
+                        current: current,
+                        profileID: profileID,
+                        previousActiveID: previousActiveID
+                    )
+                }
+                if completion.completed {
+                    await CredentialAccess.nonInteractive { await refreshAll() }
+                }
+                return completion
+            } catch let error as ClaudeOAuthRefreshCoordinatorError {
+                refreshStates[profileID] = .rotationDeferred(
+                    reason: error.localizedDescription
+                )
+                statusMessage = "Login was saved, but restoring the previous Claude account was deferred: \(error.localizedDescription)"
+                return NonActivatingLoginCompletion(completed: false)
+            } catch {
+                refreshStates[profileID] = .credentialRepairRequired(
+                    reason: error.localizedDescription
+                )
+                statusMessage = "Login was saved, but restoring the previous Claude account needs repair: \(error.localizedDescription)"
+                return NonActivatingLoginCompletion(completed: false)
+            }
+        }
+        let effectiveCurrent: LiveCredentialObservation
+        if provider == .claude {
+            guard let pinnedItem = current.claudeKeychainItemLocation else {
+                refreshStates[profileID] = .rotationDeferred(
+                    reason: "The completed Claude login no longer has a pinned Keychain generation."
+                )
+                return NonActivatingLoginCompletion(completed: false)
+            }
+            do {
+                // The watcher observation predates lock acquisition. Re-read
+                // that exact item while leased; a newer generation wins, and a
+                // replaced item is left for the watcher to settle again.
+                effectiveCurrent = try cliSwitcher.liveClaudeObservation(
+                    at: pinnedItem,
+                    accessMode: .nonInteractive
+                )
+            } catch {
+                refreshStates[profileID] = .rotationDeferred(
+                    reason: "Claude changed the completed login before it could be restored safely."
+                )
+                statusMessage = "Login restoration deferred because Claude changed its Keychain generation."
+                return NonActivatingLoginCompletion(completed: false)
+            }
+        } else {
+            effectiveCurrent = current
+        }
         let storedCredentialWorkflow: SwitchStoredCredentialWorkflow
         do {
             storedCredentialWorkflow = try loadSwitchStoredCredentialWorkflow(
@@ -4360,53 +6192,136 @@ final class AppState: ObservableObject {
             )
         } catch {
             statusMessage = "Login finished, but saved account credentials could not be inspected safely: \(error.localizedDescription)"
-            return false
+            return NonActivatingLoginCompletion(completed: false)
         }
         let resolved: AccountProfile?
         do {
             resolved = try captureLoginIntoProfile(
-                observation: current,
+                observation: effectiveCurrent,
                 provider: provider,
                 targetProfileID: profileID,
                 storedCredentialWorkflow: storedCredentialWorkflow
             )
         } catch {
             statusMessage = "Login finished, but the account could not be saved: \(error.localizedDescription)"
-            return false
+            return NonActivatingLoginCompletion(completed: false)
         }
         // No stable identity yet — keep polling.
         guard let resolved else {
-            return false
+            return NonActivatingLoginCompletion(completed: false)
         }
         refreshStates[resolved.id] = .ok
+        if provider == .claude {
+            do {
+                try reconcileClaudeRecoveryAfterLoginHoldingLease(
+                    profileID: resolved.id
+                )
+            } catch let error where loginRecoveryCleanupIsTransient(error) {
+                AppLog.credentials.error(
+                    "Post-login recovery cleanup deferred for \(resolved.id.uuidString, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+            } catch {
+                refreshStates[resolved.id] = .credentialRepairRequired(
+                    reason: error.localizedDescription
+                )
+            }
+        }
 
-        // Without a previous account to return to (or one we can restore), the
-        // freshly logged-in account simply becomes active.
-        guard let previousActiveID,
-              let previous = profiles.first(where: { $0.id == previousActiveID }),
-              let previousStoredRecord = storedCredentialWorkflow.record(for: previous.id),
-              previousStoredRecord.summary.isRestorable else {
+        // The terminal login may stay open long enough for the previous
+        // account's fixed login expiry or stored revision to change. For
+        // Claude, re-read it under the still-held OAuth lease and apply the
+        // same current-clock switch policy used by every other restore path.
+        var previousRestoreFailureReason = "the previous account no longer has restorable credentials"
+        var previousRestoreCandidate: (AccountProfile, StoredCredentialRecord)?
+        if let previousActiveID,
+           let previous = profiles.first(where: { $0.id == previousActiveID }) {
+            do {
+                let latestRecord = provider == .claude
+                    ? try cliSwitcher.storedCredentialRecord(
+                        for: previous,
+                        accessMode: .nonInteractive
+                    )
+                    : storedCredentialWorkflow.record(for: previous.id)
+                storedCredentialWorkflow.markLoaded(
+                    latestRecord,
+                    for: previous.id
+                )
+                cacheStoredCredentialSummary(latestRecord, for: previous)
+                if let latestRecord, latestRecord.summary.isRestorable {
+                    let evaluation = AccountSessionPolicy.evaluate(
+                        provider: provider,
+                        isActiveCLI: previous.isActiveCLI,
+                        wasPreviouslyLinked: true,
+                        storedCredentials: .available,
+                        refreshState: refreshStates[previous.id] ?? .idle,
+                        loginExpiresAt: latestRecord.summary
+                            .claudeRefreshTokenExpiresAt,
+                        now: Date()
+                    )
+                    if evaluation.manualSwitchEligibility.isEligible {
+                        previousRestoreCandidate = (previous, latestRecord)
+                    } else {
+                        previousRestoreFailureReason = evaluation
+                            .manualSwitchEligibility.blockerReason
+                            ?? "the previous account is not eligible to be restored"
+                        if provider == .claude,
+                           latestRecord.summary.claudeRefreshTokenExpiresAt
+                            .map({ Date() >= $0 }) == true {
+                            refreshStates[previous.id] = .needsLogin(
+                                reason: previousRestoreFailureReason
+                            )
+                        }
+                    }
+                }
+            } catch let error as CredentialStoreError
+                where error.isKeychainAccessDenied {
+                storedSnapshotStatuses[previous.id] = .locked
+                refreshStates[previous.id] = .authorizationRequired(
+                    source: .savedAccount,
+                    reason: error.localizedDescription
+                )
+                previousRestoreFailureReason = "the previous account's saved credentials require Keychain authorization"
+            } catch {
+                storedSnapshotStatuses[previous.id] = .unreadable(
+                    reason: error.localizedDescription
+                )
+                storedCredentialSummaries[previous.id] = nil
+                claudeLoginExpirations[previous.id] = nil
+                refreshStates[previous.id] = .credentialAccessBlocked(
+                    source: .savedAccount,
+                    disposition: .other(errSecDecode),
+                    reason: error.localizedDescription
+                )
+                previousRestoreFailureReason = "the previous account's saved credentials are unreadable"
+            }
+        }
+
+        // Without a previous account that remains eligible to restore, the
+        // freshly logged-in account becomes active.
+        guard let (previous, previousStoredRecord) = previousRestoreCandidate else {
             do {
                 _ = try reconcileLiveCredentials(
                     provider: provider,
                     origin: .login,
-                    observation: current,
+                    observation: effectiveCurrent,
                     preferredLoginProfileID: profileID,
                     storedCredentialWorkflow: storedCredentialWorkflow
                 )
             } catch {
                 AppLog.credentials.error("Post-login reconcile failed for \(provider.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
-            statusMessage = "Logged into \(resolved.label). Could not restore the previous account, so it is now active."
-            await CredentialAccess.nonInteractive { await refreshAll() }
-            return true
+            statusMessage = "Logged into \(resolved.label). Could not restore the previous account because \(previousRestoreFailureReason), so \(resolved.label) is now active."
+            if provider != .claude {
+                await CredentialAccess.nonInteractive { await refreshAll() }
+            }
+            return NonActivatingLoginCompletion(completed: true)
         }
 
         do {
             let result = try cliSwitcher.restoreSnapshot(
                 for: previous,
                 storedRecord: previousStoredRecord,
-                expectedLiveFingerprint: current.credentialFingerprint,
+                expectedLiveFingerprint: effectiveCurrent.credentialFingerprint,
                 enforceExpectedLiveState: true
             )
             _ = try reconcileLiveCredentials(
@@ -4420,8 +6335,10 @@ final class AppState: ObservableObject {
                 message += " The login matched an existing account."
             }
             statusMessage = message
-            await CredentialAccess.nonInteractive { await refreshAll() }
-            return true
+            if provider != .claude {
+                await CredentialAccess.nonInteractive { await refreshAll() }
+            }
+            return NonActivatingLoginCompletion(completed: true)
         } catch {
             // Restore-back failed — the live session still belongs to the new
             // account. Reconcile to that reality so the app never claims an
@@ -4431,19 +6348,107 @@ final class AppState: ObservableObject {
                 _ = try reconcileLiveCredentials(
                     provider: provider,
                     origin: .login,
-                    observation: current,
+                    observation: effectiveCurrent,
                     preferredLoginProfileID: profileID,
                     storedCredentialWorkflow: storedCredentialWorkflow
                 )
             } catch {
                 AppLog.credentials.error("Post-login reconcile failed for \(provider.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
-            showError(
+            let deferredError = DeferredNonActivatingLoginError(
                 message: "Logged into \(resolved.label), but could not switch back to \(previous.label)",
                 details: "\(resolved.label) is now the active \(provider.displayName) account. \(error.localizedDescription)"
             )
-            await CredentialAccess.nonInteractive { await refreshAll() }
-            return true
+            statusMessage = deferredError.details
+            if provider != .claude {
+                await CredentialAccess.nonInteractive { await refreshAll() }
+            }
+            return NonActivatingLoginCompletion(
+                completed: true,
+                deferredError: deferredError
+            )
+        }
+    }
+
+    private func reconcileClaudeRecoveryAfterLogin(profileID: UUID) async {
+        do {
+            if ClaudeOAuthMutationLeaseContext.current != nil {
+                try reconcileClaudeRecoveryAfterLoginHoldingLease(
+                    profileID: profileID
+                )
+            } else {
+                try await claudeRefreshCoordinator.withLease { _ in
+                    try self.reconcileClaudeRecoveryAfterLoginHoldingLease(
+                        profileID: profileID
+                    )
+                }
+            }
+        } catch let error where loginRecoveryCleanupIsTransient(error) {
+            // The login already succeeded; a busy shared lock or a transient
+            // Keychain denial during best-effort journal cleanup must not read
+            // as "needs repair". The deferred refresh reconciles it.
+            AppLog.credentials.error(
+                "Post-login recovery cleanup deferred for \(profileID.uuidString, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+        } catch {
+            refreshStates[profileID] = .credentialRepairRequired(
+                reason: "Claude login recovery cleanup is pending: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    /// A newly observed login supersedes stale journal generations. Remove
+    /// only destinations proven committed or on a different chain; never
+    /// replay an older journal record over the new login.
+    private func reconcileClaudeRecoveryAfterLoginHoldingLease(
+        profileID: UUID
+    ) throws {
+        _ = try ClaudeOAuthMutationLeaseContext.requireCurrent()
+        let live = try cliSwitcher.liveClaudeOAuthCredentialRecord(
+            accessMode: .nonInteractive
+        )?.credentials
+        let profile = profiles.first(where: { $0.id == profileID })
+        let stored = try profile.flatMap {
+            try cliSwitcher.storedCredentialRecord(
+                for: $0,
+                accessMode: .nonInteractive
+            )?.claudeOAuthCredentials
+        }
+        let storedDestination = ClaudeRotationRecoveryDestination.storedProfile(
+            profileID
+        )
+
+        for var record in try claudeRotationRecoveryStore.loadAll(
+            accessMode: .nonInteractive
+        ) {
+            guard let fresh = record.credentials else { continue }
+            if record.pendingDestinations.contains(.liveClaudeCode),
+               let live,
+               (ClaudeRefreshChainFingerprint.make(credentials: live)
+                    != record.staleChainFingerprint
+                    || (!record.isPrepared
+                        && claudeRotatedFieldsMatch(live, fresh))) {
+                record.pendingDestinations.remove(.liveClaudeCode)
+            }
+            if record.pendingDestinations.contains(storedDestination),
+               let stored,
+               (ClaudeRefreshChainFingerprint.make(credentials: stored)
+                    != record.staleChainFingerprint
+                    || (!record.isPrepared
+                        && claudeRotatedFieldsMatch(stored, fresh))) {
+                record.pendingDestinations.remove(storedDestination)
+            }
+            if record.pendingDestinations.isEmpty {
+                try claudeRotationRecoveryStore.delete(
+                    id: record.id,
+                    accessMode: .nonInteractive
+                )
+            } else {
+                try claudeRotationRecoveryStore.save(
+                    record,
+                    accessMode: .nonInteractive
+                )
+            }
         }
     }
 

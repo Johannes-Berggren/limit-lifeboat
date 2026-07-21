@@ -8,13 +8,15 @@ final class NotificationSwitchResolverTests: XCTestCase {
         id: UUID = UUID(),
         label: String,
         isActiveCLI: Bool = false,
-        hasStoredCredentials: Bool = true
+        manualSwitchEligibility: AccountSwitchEligibility = .eligible,
+        automaticSwitchEligibility: AccountSwitchEligibility? = nil
     ) -> SwitchCandidate {
         SwitchCandidate(
             profileID: id,
             label: label,
             isActiveCLI: isActiveCLI,
-            hasStoredCredentials: hasStoredCredentials,
+            manualSwitchEligibility: manualSwitchEligibility,
+            automaticSwitchEligibility: automaticSwitchEligibility ?? manualSwitchEligibility,
             snapshot: nil
         )
     }
@@ -65,7 +67,10 @@ final class NotificationSwitchResolverTests: XCTestCase {
     }
 
     func testEmbeddedTargetWithoutCredentialsAndNoAdviceHasNoTarget() {
-        let embedded = candidate(label: "Target", hasStoredCredentials: false)
+        let embedded = candidate(
+            label: "Target",
+            manualSwitchEligibility: .blocked(reason: "Login expired")
+        )
         let active = candidate(label: "Active", isActiveCLI: true)
 
         let resolution = resolver.resolve(
@@ -112,7 +117,10 @@ final class NotificationSwitchResolverTests: XCTestCase {
     /// The advised target losing its credentials mid-flight falls back to the
     /// embedded target rather than giving up.
     func testAdvisedWithoutCredentialsFallsBackToEmbedded() {
-        let advised = candidate(label: "Advised", hasStoredCredentials: false)
+        let advised = candidate(
+            label: "Advised",
+            manualSwitchEligibility: .blocked(reason: "Login expired")
+        )
         let embedded = candidate(label: "Embedded")
 
         let resolution = resolver.resolve(
@@ -122,5 +130,42 @@ final class NotificationSwitchResolverTests: XCTestCase {
         )
 
         XCTAssertEqual(resolution, .switchTo(profileID: embedded.profileID, label: "Embedded"))
+    }
+
+    func testNotificationClickUsesManualEligibilityWhenAutomaticSwitchIsBlocked() {
+        let embedded = candidate(
+            label: "Needs Rotation",
+            manualSwitchEligibility: .eligible,
+            automaticSwitchEligibility: .blocked(reason: "Rotation required")
+        )
+
+        let resolution = resolver.resolve(
+            embeddedTargetID: embedded.profileID,
+            advice: nil,
+            candidates: [embedded]
+        )
+
+        XCTAssertEqual(
+            resolution,
+            .switchTo(profileID: embedded.profileID, label: "Needs Rotation")
+        )
+    }
+
+    func testBlockedEmbeddedTargetReturnsCurrentPolicyReason() {
+        let embedded = candidate(
+            label: "Expired",
+            manualSwitchEligibility: .blocked(reason: "Log in again before switching.")
+        )
+
+        let resolution = resolver.resolve(
+            embeddedTargetID: embedded.profileID,
+            advice: nil,
+            candidates: [embedded]
+        )
+
+        XCTAssertEqual(
+            resolution,
+            .noEligibleTarget(reason: "Log in again before switching.")
+        )
     }
 }

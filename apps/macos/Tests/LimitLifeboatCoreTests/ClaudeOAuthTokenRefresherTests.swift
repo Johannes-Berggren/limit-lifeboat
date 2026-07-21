@@ -83,6 +83,114 @@ final class ClaudeOAuthTokenRefresherTests: XCTestCase {
         XCTAssertEqual(raw["refreshToken"] as? String, "old-refresh")
     }
 
+    func testMissingAccessLifetimeRemovesStaleExpiryAndPreservesFixedLoginExpiry() async throws {
+        let fixedExpiry = now.addingTimeInterval(604_800)
+        let httpClient = MockHTTPClient()
+        httpClient.stub(status: 200, bodyText: #"{"access_token":"new-access"}"#)
+        let refresher = ClaudeOAuthTokenRefresher(httpClient: httpClient)
+        let credentials = try makeCredentials(extraFields: [
+            "refreshTokenExpiresAt": Int64((fixedExpiry.timeIntervalSince1970 * 1000).rounded())
+        ])
+
+        let refreshed = try await refresher.refresh(credentials, now: now)
+
+        XCTAssertNil(refreshed.expiresAt)
+        XCTAssertEqual(refreshed.refreshTokenExpiresAt, fixedExpiry)
+        let raw = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: refreshed.rawClaudeAiOauth) as? [String: Any]
+        )
+        XCTAssertNil(raw["expiresAt"])
+        XCTAssertEqual(
+            (raw["refreshTokenExpiresAt"] as? NSNumber)?.int64Value,
+            Int64((fixedExpiry.timeIntervalSince1970 * 1000).rounded())
+        )
+    }
+
+    func testKeepsOldRefreshTokenWhenRotationIsExplicitNull() async throws {
+        let httpClient = MockHTTPClient()
+        httpClient.stub(
+            status: 200,
+            bodyText: #"{"access_token":"new-access","refresh_token":null,"expires_in":3600}"#
+        )
+        let refresher = ClaudeOAuthTokenRefresher(httpClient: httpClient)
+
+        let refreshed = try await refresher.refresh(try makeCredentials(), now: now)
+
+        // An explicit null refresh_token means "not rotating", exactly like an
+        // omitted key: keep the fresh access token instead of discarding the
+        // exchange as malformed (which would loop forever, never updating it).
+        XCTAssertEqual(refreshed.accessToken, "new-access")
+        XCTAssertEqual(refreshed.refreshToken, "old-refresh")
+        XCTAssertEqual(refreshed.expiresAt, now.addingTimeInterval(3600))
+    }
+
+    func testExplicitNullAccessLifetimeIsUnknownNotMalformed() async throws {
+        let fixedExpiry = now.addingTimeInterval(604_800)
+        let httpClient = MockHTTPClient()
+        httpClient.stub(
+            status: 200,
+            bodyText: #"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":null}"#
+        )
+        let refresher = ClaudeOAuthTokenRefresher(httpClient: httpClient)
+        let credentials = try makeCredentials(extraFields: [
+            "refreshTokenExpiresAt": Int64((fixedExpiry.timeIntervalSince1970 * 1000).rounded())
+        ])
+
+        let refreshed = try await refresher.refresh(credentials, now: now)
+
+        XCTAssertEqual(refreshed.accessToken, "new-access")
+        XCTAssertEqual(refreshed.refreshToken, "new-refresh")
+        XCTAssertNil(refreshed.expiresAt)
+        XCTAssertEqual(refreshed.refreshTokenExpiresAt, fixedExpiry)
+    }
+
+    func testExplicitNullRefreshTokenExpiryPreservesFixedLoginExpiry() async throws {
+        let fixedExpiry = now.addingTimeInterval(604_800)
+        let httpClient = MockHTTPClient()
+        httpClient.stub(
+            status: 200,
+            bodyText: #"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600,"refresh_token_expires_in":null}"#
+        )
+        let refresher = ClaudeOAuthTokenRefresher(httpClient: httpClient)
+        let credentials = try makeCredentials(extraFields: [
+            "refreshTokenExpiresAt": Int64((fixedExpiry.timeIntervalSince1970 * 1000).rounded())
+        ])
+
+        let refreshed = try await refresher.refresh(credentials, now: now)
+
+        XCTAssertEqual(refreshed.refreshToken, "new-refresh")
+        XCTAssertEqual(refreshed.expiresAt, now.addingTimeInterval(3600))
+        // An explicit null behaves like an omitted key: keep the fixed login
+        // expiry rather than throwing a rotated exchange away and forcing an
+        // avoidable re-login.
+        XCTAssertEqual(refreshed.refreshTokenExpiresAt, fixedExpiry)
+    }
+
+    func testRejectsExplicitlyEmptyRotatedRefreshToken() async throws {
+        let httpClient = MockHTTPClient()
+        httpClient.stub(
+            status: 200,
+            bodyText: #"{"access_token":"new-access","refresh_token":"   ","expires_in":3600}"#
+        )
+
+        await assertMalformedResponse(from: httpClient)
+    }
+
+    func testRejectsNonpositiveOrNonnumericDurations() async throws {
+        for body in [
+            #"{"access_token":"new-access","expires_in":0}"#,
+            #"{"access_token":"new-access","expires_in":-1}"#,
+            #"{"access_token":"new-access","expires_in":true}"#,
+            #"{"access_token":"new-access","expires_in":"3600"}"#,
+            #"{"access_token":"new-access","expires_in":1e308}"#,
+            #"{"access_token":"new-access","expires_in":3600,"refresh_token_expires_in":0}"#
+        ] {
+            let httpClient = MockHTTPClient()
+            httpClient.stub(status: 200, bodyText: body)
+            await assertMalformedResponse(from: httpClient)
+        }
+    }
+
     func testThrowsRefreshRejectedWithStatusAndBody() async throws {
         let httpClient = MockHTTPClient()
         httpClient.stub(status: 400, bodyText: #"{"error": "invalid_grant"}"#)
@@ -110,9 +218,40 @@ final class ClaudeOAuthTokenRefresherTests: XCTestCase {
         )
 
         XCTAssertFalse(error.localizedDescription.contains(secretMarker))
+        XCTAssertFalse(String(describing: error).contains(secretMarker))
+        XCTAssertFalse(String(reflecting: error).contains(secretMarker))
         XCTAssertTrue(error.localizedDescription.contains("400"))
         XCTAssertTrue(error.localizedDescription.contains("response bytes"))
         XCTAssertTrue(error.requiresLogin)
+    }
+
+    func testOnlyExactStructuredTerminalCodesRequireLogin() {
+        let exact = ClaudeOAuthError.refreshRejected(
+            status: 400,
+            body: #"{"error":" INVALID_GRANT ","error_description":"token rotated"}"#
+        )
+        XCTAssertEqual(exact.rejectionCode, "invalid_grant")
+        XCTAssertTrue(exact.requiresLogin)
+
+        let proseOnly = ClaudeOAuthError.refreshRejected(
+            status: 400,
+            body: #"{"error":"invalid_request","error_description":"refresh token expired; sign in again"}"#
+        )
+        XCTAssertEqual(proseOnly.rejectionCode, "invalid_request")
+        XCTAssertFalse(proseOnly.requiresLogin)
+
+        XCTAssertFalse(
+            ClaudeOAuthError.refreshRejected(
+                status: 401,
+                body: #"{"message":"invalid_grant"}"#
+            ).requiresLogin
+        )
+        XCTAssertFalse(
+            ClaudeOAuthError.refreshRejected(
+                status: 400,
+                body: #"{"error":"invalid_grant_extra"}"#
+            ).requiresLogin
+        )
     }
 
     func testThrowsMissingRefreshTokenWithoutTouchingTheNetwork() async throws {
@@ -122,6 +261,24 @@ final class ClaudeOAuthTokenRefresherTests: XCTestCase {
         let credentials = try XCTUnwrap(
             ClaudeOAuthCredentials(claudeAiOauthJSON: Data(#"{"accessToken": "old-access"}"#.utf8))
         )
+
+        do {
+            _ = try await refresher.refresh(credentials, now: now)
+            XCTFail("Expected missingRefreshToken")
+        } catch let error as ClaudeOAuthError {
+            guard case .missingRefreshToken = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        XCTAssertTrue(httpClient.requests.isEmpty)
+    }
+
+    func testWhitespaceRefreshTokenIsMissingWithoutTouchingTheNetwork() async throws {
+        let httpClient = MockHTTPClient()
+        let refresher = ClaudeOAuthTokenRefresher(httpClient: httpClient)
+        let credentials = try makeCredentials(extraFields: ["refreshToken": "  \n "])
 
         do {
             _ = try await refresher.refresh(credentials, now: now)
@@ -180,8 +337,8 @@ final class ClaudeOAuthTokenRefresherTests: XCTestCase {
                 body: #"{"error":"invalid_grant"}"#
             ).requiresLogin
         )
-        XCTAssertTrue(ClaudeOAuthError.refreshRejected(status: 401, body: "").requiresLogin)
-        XCTAssertTrue(ClaudeOAuthError.refreshSuppressed(reason: "Sign in again.").requiresLogin)
+        XCTAssertFalse(ClaudeOAuthError.refreshRejected(status: 401, body: "").requiresLogin)
+        XCTAssertFalse(ClaudeOAuthError.refreshSuppressed(reason: "Sign in again.").requiresLogin)
         XCTAssertFalse(ClaudeOAuthError.refreshRejected(status: 408, body: "timeout").requiresLogin)
         XCTAssertFalse(ClaudeOAuthError.refreshRejected(status: 429, body: "rate limited").requiresLogin)
         XCTAssertFalse(ClaudeOAuthError.refreshRejected(status: 500, body: "server error").requiresLogin)
@@ -202,5 +359,23 @@ final class ClaudeOAuthTokenRefresherTests: XCTestCase {
         }
         let json = try JSONSerialization.data(withJSONObject: object)
         return try XCTUnwrap(ClaudeOAuthCredentials(claudeAiOauthJSON: json))
+    }
+
+    private func assertMalformedResponse(
+        from httpClient: MockHTTPClient,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        do {
+            _ = try await ClaudeOAuthTokenRefresher(httpClient: httpClient)
+                .refresh(try makeCredentials(), now: now)
+            XCTFail("Expected malformedResponse", file: file, line: line)
+        } catch let error as ClaudeOAuthError {
+            guard case .malformedResponse = error else {
+                return XCTFail("Unexpected error: \(error)", file: file, line: line)
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)", file: file, line: line)
+        }
     }
 }

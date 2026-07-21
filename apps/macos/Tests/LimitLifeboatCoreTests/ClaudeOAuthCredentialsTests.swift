@@ -127,6 +127,99 @@ final class ClaudeOAuthCredentialsTests: XCTestCase {
         XCTAssertTrue(newerAccess.isFresher(than: renewedLogin))
     }
 
+    func testGenericFreshnessDoesNotGuessThatUnknownExpiryBeatsFutureExpiry() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let refreshedWithoutDuration = try makeCredentials(fields: [
+            "accessToken": "fresh",
+            "refreshToken": "rotated",
+            "refreshTokenExpiresAt": 1_900_000_000_000
+        ])
+        let rejectedButFutureDated = try makeCredentials(fields: [
+            "accessToken": "stale",
+            "refreshToken": "old",
+            "expiresAt": 1_800_003_600_000,
+            "refreshTokenExpiresAt": 1_900_000_000_000
+        ])
+
+        XCTAssertFalse(
+            refreshedWithoutDuration.isFresher(
+                than: rejectedButFutureDated,
+                asOf: now
+            )
+        )
+        XCTAssertTrue(
+            rejectedButFutureDated.isFresher(
+                than: refreshedWithoutDuration,
+                asOf: now
+            )
+        )
+    }
+
+    func testPreparedRecoveryProofProtectsUnknownExpiryStoredSurvivorOnlyFromPinnedStaleLiveOwner() throws {
+        let profileID = UUID()
+        let stale = try makeCredentials(fields: [
+            "accessToken": "stale",
+            "refreshToken": "old",
+            "expiresAt": 1_800_003_600_000,
+            "refreshTokenExpiresAt": 1_900_000_000_000
+        ])
+        let freshStored = try makeCredentials(fields: [
+            "accessToken": "fresh",
+            "refreshToken": "rotated",
+            "refreshTokenExpiresAt": 1_900_000_000_000
+        ])
+        let externalLive = try makeCredentials(fields: [
+            "accessToken": "external",
+            "refreshToken": "external-chain",
+            "expiresAt": 1_800_007_200_000,
+            "refreshTokenExpiresAt": 1_900_000_000_000
+        ])
+        let storedDestination = ClaudeRotationRecoveryDestination.storedProfile(
+            profileID
+        )
+        let record = ClaudeRotationRecoveryRecord(
+            staleChainFingerprint: try XCTUnwrap(
+                ClaudeRefreshChainFingerprint.make(credentials: stale)
+            ),
+            freshChainFingerprint: nil,
+            oauthJSON: stale.rawClaudeAiOauth,
+            pendingDestinations: [.liveClaudeCode, storedDestination],
+            ownerGenerationBaselines: [
+                .liveClaudeCode: ClaudeOAuthGenerationFingerprint.make(stale),
+                storedDestination: ClaudeOAuthGenerationFingerprint.make(stale)
+            ],
+            phase: .prepared
+        )
+
+        XCTAssertTrue(
+            record.protectsStoredOwnerFromStaleLiveCapture(
+                profileID: profileID,
+                stored: freshStored,
+                live: stale
+            )
+        )
+        XCTAssertFalse(
+            record.protectsStoredOwnerFromStaleLiveCapture(
+                profileID: profileID,
+                stored: freshStored,
+                live: externalLive
+            )
+        )
+
+        var absentAtBaseline = record
+        absentAtBaseline.ownerGenerationBaselines = [
+            .liveClaudeCode: ClaudeOAuthGenerationFingerprint.make(stale)
+        ]
+        XCTAssertTrue(
+            absentAtBaseline.protectsStoredOwnerFromStaleLiveCapture(
+                profileID: profileID,
+                stored: freshStored,
+                live: stale
+            ),
+            "A newly created stored owner must survive stale live capture even when it had no baseline entry"
+        )
+    }
+
     func testMergeClaudeAiOauthPreservesSiblingKeys() throws {
         let existing = Data("""
         {
@@ -297,6 +390,52 @@ final class ClaudeCodeCredentialsKeychainTests: XCTestCase {
 
         XCTAssertTrue(error.localizedDescription.contains("-67068"))
         XCTAssertTrue(error.localizedDescription.localizedCaseInsensitiveContains("relaunch"))
+    }
+
+    func testRefreshChainFingerprintIgnoresAccessAndMetadataDifferences() throws {
+        let first = try XCTUnwrap(ClaudeOAuthCredentials(claudeAiOauthJSON: Data(
+            #"{"accessToken":"access-a","refreshToken":"shared-refresh","subscriptionType":"max"}"#.utf8
+        )))
+        let second = try XCTUnwrap(ClaudeOAuthCredentials(claudeAiOauthJSON: Data(
+            #"{"accessToken":"access-b","refreshToken":"shared-refresh","subscriptionType":"team","unknown":"keep"}"#.utf8
+        )))
+
+        XCTAssertEqual(
+            ClaudeRefreshChainFingerprint.make(credentials: first),
+            ClaudeRefreshChainFingerprint.make(credentials: second)
+        )
+        XCTAssertNotEqual(first.rawClaudeAiOauth, second.rawClaudeAiOauth)
+    }
+
+    func testMergingRotatedFieldsPreservesDestinationOwnedMetadata() throws {
+        let destination = try XCTUnwrap(ClaudeOAuthCredentials(claudeAiOauthJSON: Data(
+            #"{"accessToken":"old","refreshToken":"old-refresh","expiresAt":1000,"subscriptionType":"team","unknown":{"organization":"keep"}}"#.utf8
+        )))
+        let fresh = try XCTUnwrap(ClaudeOAuthCredentials(claudeAiOauthJSON: Data(
+            #"{"accessToken":"fresh","refreshToken":"fresh-refresh","refreshTokenExpiresAt":1785000000000,"subscriptionType":"max"}"#.utf8
+        )))
+
+        let merged = try XCTUnwrap(destination.mergingRotatedTokenFields(from: fresh))
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: merged.rawClaudeAiOauth) as? [String: Any]
+        )
+        XCTAssertEqual(object["accessToken"] as? String, "fresh")
+        XCTAssertEqual(object["refreshToken"] as? String, "fresh-refresh")
+        XCTAssertNil(object["expiresAt"], "Unknown access expiry removes a stale destination value")
+        XCTAssertEqual(object["subscriptionType"] as? String, "team")
+        XCTAssertNotNil(object["unknown"])
+    }
+
+    func testMergingRotatedFieldsPreservesFixedExpiryWhenSourceOmitsIt() throws {
+        let destination = try XCTUnwrap(ClaudeOAuthCredentials(claudeAiOauthJSON: Data(
+            #"{"accessToken":"old","refreshToken":"old-refresh","refreshTokenExpiresAt":1786000000000}"#.utf8
+        )))
+        let fresh = try XCTUnwrap(ClaudeOAuthCredentials(claudeAiOauthJSON: Data(
+            #"{"accessToken":"fresh","refreshToken":"fresh-refresh"}"#.utf8
+        )))
+
+        let merged = try XCTUnwrap(destination.mergingRotatedTokenFields(from: fresh))
+        XCTAssertEqual(merged.refreshTokenExpiresAt, destination.refreshTokenExpiresAt)
     }
 
 }
