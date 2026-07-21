@@ -272,7 +272,7 @@ final class AccountRowPresentationTests: XCTestCase {
         )
 
         XCTAssertFalse(presentation.highlightsSwitch)
-        XCTAssertTrue(presentation.switchHelp.contains("Log into this account"))
+        XCTAssertTrue(presentation.switchHelp.contains("Log in to this account"))
         XCTAssertTrue(presentation.footerNote?.text.contains("terminal") == true)
     }
 
@@ -376,6 +376,63 @@ final class AccountRowPresentationTests: XCTestCase {
 
         XCTAssertEqual(presentation.refreshProblem?.action, .renew)
         XCTAssertFalse(presentation.renewalActivatesAccount)
+    }
+
+    func testExpiringLoginAndPausedUsageExposeRenewThenRetry() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let profile = AccountProfile(provider: .claude, label: "Claude", isActiveCLI: true)
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: nil,
+            hasStoredSnapshot: true,
+            refreshState: .rotationDeferred(reason: "Scheduled refresh cannot rotate."),
+            adviceReason: nil,
+            loginExpiresAt: now.addingTimeInterval(4 * 24 * 60 * 60),
+            now: now
+        )
+
+        XCTAssertEqual(presentation.rowMessages.map(\.action), [.renew, .retry])
+        XCTAssertEqual(presentation.refreshProblem?.action, .renew)
+        XCTAssertTrue(presentation.manualSwitchEligibility.isEligible)
+        XCTAssertFalse(presentation.automaticSwitchEligibility.isEligible)
+    }
+
+    func testSharedExpiringLoginOffersSwitchInsteadOfImpossibleRetry() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let profile = AccountProfile(provider: .claude, label: "Shared")
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: nil,
+            hasStoredSnapshot: true,
+            refreshState: .switchRequired(reason: "Shared with the active login."),
+            adviceReason: nil,
+            loginExpiresAt: now.addingTimeInterval(2 * 24 * 60 * 60),
+            now: now
+        )
+
+        XCTAssertEqual(presentation.rowMessages.count, 1)
+        XCTAssertEqual(presentation.refreshProblem?.action, .switchCLI)
+        XCTAssertTrue(presentation.manualSwitchEligibility.isEligible)
+        XCTAssertFalse(presentation.automaticSwitchEligibility.isEligible)
+    }
+
+    func testUnreadableCredentialSuppressesCachedExpiredLogin() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let profile = AccountProfile(provider: .claude, label: "Claude")
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: nil,
+            hasStoredSnapshot: true,
+            storedCredentialAvailability: .authorizationRequired(source: .claudeCode),
+            refreshState: .ok,
+            adviceReason: nil,
+            loginExpiresAt: now.addingTimeInterval(-60),
+            now: now
+        )
+
+        XCTAssertEqual(presentation.refreshProblem?.text, "Keychain access needed")
+        XCTAssertEqual(presentation.refreshProblem?.action, .authorize(source: .claudeCode))
+        XCTAssertFalse(presentation.highlightsSwitch)
     }
 
     func testClaudeLoginBeyondFiveDaysDoesNotShowRenewal() {

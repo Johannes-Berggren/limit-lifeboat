@@ -12,44 +12,28 @@ import Foundation
 /// rotated either. This pure policy detects that so the guard can protect the
 /// whole account, not just the one active profile.
 public enum RotationProtectionPolicy {
-    /// True when `profile` is not the active login itself but shares its
-    /// underlying Claude login with the active profile (same `accountID`) or
-    /// with another holder the app can see (a stored credential fingerprint
-    /// that also appears elsewhere — another profile's snapshot or the live
-    /// keychain item). Such a profile must never be background-rotated; the
-    /// safe way to refresh it is to switch the CLI to it first.
+    /// Uses the refresh-token chain itself as the authoritative signal. When
+    /// both digests are readable, different values prove that the grants are
+    /// independent even if they belong to the same Anthropic account. Account
+    /// identity is only a fail-closed fallback when a digest is unavailable.
     public static func accountIsLiveElsewhere(
         profile: AccountProfile,
         among profiles: [AccountProfile],
-        storedFingerprint: String?,
-        duplicatedStoredFingerprints: Set<String>
+        storedChainFingerprint: String?,
+        liveChainFingerprint: String?
     ) -> Bool {
-        // The active login owns the live item and heals it on an explicit
-        // Retry; it is never "live elsewhere".
-        if profile.isActiveCLI {
-            return false
+        guard !profile.isActiveCLI else { return false }
+
+        if let storedChainFingerprint, let liveChainFingerprint {
+            return storedChainFingerprint == liveChainFingerprint
         }
-        // A different, active same-provider profile shares this account.
-        if let accountID = profile.identity?.accountID {
-            let sharedWithActive = profiles.contains { other in
-                guard other.id != profile.id,
-                      other.provider == profile.provider,
-                      other.isActiveCLI else {
-                    return false
-                }
-                return other.identity?.accountID == accountID
-            }
-            if sharedWithActive {
-                return true
-            }
+
+        guard let accountID = profile.identity?.accountID else { return false }
+        return profiles.contains { other in
+            other.id != profile.id
+                && other.provider == profile.provider
+                && other.isActiveCLI
+                && other.identity?.accountID == accountID
         }
-        // The stored chain is byte-identical to another holder's (another
-        // profile's snapshot or the live keychain item). Rotating it would
-        // strand that holder even when the identities don't reveal the sharing.
-        if let storedFingerprint,
-           duplicatedStoredFingerprints.contains(storedFingerprint) {
-            return true
-        }
-        return false
     }
 }

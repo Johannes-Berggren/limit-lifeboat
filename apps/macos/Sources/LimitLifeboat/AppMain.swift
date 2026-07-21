@@ -79,16 +79,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 service: applicationVariant.credentialService,
                 validateAccess: validateCredentialAccess
             )
+            let claudeRotationRecoveryStore = KeychainClaudeRotationRecoveryStore(
+                service: "\(applicationVariant.credentialService).claude-rotation-recovery",
+                validateAccess: validateCredentialAccess
+            )
             let claudeCredentials = ClaudeCodeCredentialsKeychain(validateAccess: validateCredentialAccess)
             let switcher = CLISwitcher(
                 backupDirectory: repository.applicationSupportDirectory
                     .appendingPathComponent("Backups", isDirectory: true),
                 credentialStore: credentialStore,
-                claudeCLICredentialSource: claudeCredentials
+                claudeCLICredentialSource: claudeCredentials,
+                requiresClaudeOAuthLease: true
             )
             let state = try AppState(
                 repository: repository,
                 cliSwitcher: switcher,
+                claudeRotationRecoveryStore: claudeRotationRecoveryStore,
                 codeSignatureStatus: codeSignatureStatus
             )
             self.state = state

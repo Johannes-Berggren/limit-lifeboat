@@ -10,8 +10,8 @@ final class RotationProtectionPolicyTests: XCTestCase {
             RotationProtectionPolicy.accountIsLiveElsewhere(
                 profile: sibling,
                 among: [active, sibling],
-                storedFingerprint: "individual-fp",
-                duplicatedStoredFingerprints: []
+                storedChainFingerprint: nil,
+                liveChainFingerprint: nil
             )
         )
     }
@@ -24,13 +24,13 @@ final class RotationProtectionPolicyTests: XCTestCase {
             RotationProtectionPolicy.accountIsLiveElsewhere(
                 profile: active,
                 among: [active, sibling],
-                storedFingerprint: "team-fp",
-                duplicatedStoredFingerprints: ["team-fp"]
+                storedChainFingerprint: "shared-chain",
+                liveChainFingerprint: "shared-chain"
             )
         )
     }
 
-    func testDuplicatedStoredFingerprintIsProtected() {
+    func testMatchingRefreshChainDigestIsProtectedWithoutIdentity() {
         let a = profile(accountID: nil, organizationID: nil)
         let b = profile(accountID: nil, organizationID: nil)
 
@@ -38,22 +38,22 @@ final class RotationProtectionPolicyTests: XCTestCase {
             RotationProtectionPolicy.accountIsLiveElsewhere(
                 profile: a,
                 among: [a, b],
-                storedFingerprint: "shared-fp",
-                duplicatedStoredFingerprints: ["shared-fp"]
+                storedChainFingerprint: "shared-chain",
+                liveChainFingerprint: "shared-chain"
             )
         )
     }
 
-    func testDistinctInactiveAccountIsNotProtected() {
+    func testDistinctRefreshChainDigestOverridesSharedAccountIdentity() {
         let active = profile(accountID: "acct-1", organizationID: "org-1", isActiveCLI: true)
-        let other = profile(accountID: "acct-2", organizationID: "org-2")
+        let other = profile(accountID: "acct-1", organizationID: "org-2")
 
         XCTAssertFalse(
             RotationProtectionPolicy.accountIsLiveElsewhere(
                 profile: other,
                 among: [active, other],
-                storedFingerprint: "other-fp",
-                duplicatedStoredFingerprints: []
+                storedChainFingerprint: "independent-chain",
+                liveChainFingerprint: "active-chain"
             )
         )
     }
@@ -68,8 +68,8 @@ final class RotationProtectionPolicyTests: XCTestCase {
             RotationProtectionPolicy.accountIsLiveElsewhere(
                 profile: a,
                 among: [a, b],
-                storedFingerprint: "a-fp",
-                duplicatedStoredFingerprints: []
+                storedChainFingerprint: nil,
+                liveChainFingerprint: nil
             )
         )
     }

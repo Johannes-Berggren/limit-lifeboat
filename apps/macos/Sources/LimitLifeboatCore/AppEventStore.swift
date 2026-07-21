@@ -23,6 +23,13 @@ public struct AppEvent: Codable, Equatable, Sendable {
         /// Rotation was deliberately withheld (active login idle, or the account
         /// is live under another profile) — no token was spent.
         case rotationWithheld
+        case rotationDeferred
+        case switchRequired
+        case forbidden
+        case rotationBusy
+        case leaseLost
+        case repairRequired
+        case persistenceFailed
     }
 
     public var timestamp: Date

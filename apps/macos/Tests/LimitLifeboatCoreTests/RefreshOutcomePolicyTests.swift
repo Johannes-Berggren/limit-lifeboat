@@ -2,18 +2,21 @@ import XCTest
 @testable import LimitLifeboatCore
 
 final class RefreshOutcomePolicyTests: XCTestCase {
-    func testNoCredentialsAlwaysNeedsLoginNoFallback() {
+    func testNoCredentialsDefersLoginPresentationToStoredAvailability() {
         for active in [true, false] {
             let outcome = RefreshOutcomePolicy.outcome(for: .noCredentials, isActiveCLI: active)
-            XCTAssertTrue(outcome.state.requiresLogin)
+            XCTAssertEqual(outcome.state, .idle)
             XCTAssertFalse(outcome.attemptTUIFallback)
         }
     }
 
-    func testKeychainLockedSurfacesAndNeverFallsBack() {
+    func testKeychainLockedRequiresSourceSpecificAuthorizationAndNeverFallsBack() {
         for active in [true, false] {
             let outcome = RefreshOutcomePolicy.outcome(for: .keychainLocked, isActiveCLI: active)
-            XCTAssertEqual(outcome.state, .keychainLocked)
+            guard case .authorizationRequired(let source, _) = outcome.state else {
+                return XCTFail("Expected authorizationRequired, got \(outcome.state)")
+            }
+            XCTAssertEqual(source, active ? .claudeCode : .savedAccount)
             XCTAssertFalse(outcome.attemptTUIFallback)
         }
     }
@@ -34,7 +37,10 @@ final class RefreshOutcomePolicyTests: XCTestCase {
 
         for active in [true, false] {
             let outcome = RefreshOutcomePolicy.outcome(for: error, isActiveCLI: active)
-            XCTAssertEqual(outcome.state, .keychainLocked)
+            guard case .authorizationRequired(let source, _) = outcome.state else {
+                return XCTFail("Expected authorizationRequired, got \(outcome.state)")
+            }
+            XCTAssertEqual(source, .claudeCode)
             XCTAssertFalse(outcome.attemptTUIFallback)
         }
     }
@@ -47,28 +53,70 @@ final class RefreshOutcomePolicyTests: XCTestCase {
         }
     }
 
-    func testInteractiveRefreshRequiredMapsToUsagePaused() {
+    func testForbiddenIsNonterminalAndNeverFallsBack() {
+        for active in [true, false] {
+            let outcome = RefreshOutcomePolicy.outcome(for: .forbidden, isActiveCLI: active)
+            guard case .providerAccessForbidden(let reason) = outcome.state else {
+                return XCTFail("Expected providerAccessForbidden, got \(outcome.state)")
+            }
+            XCTAssertTrue(reason.lowercased().contains("administrator"))
+            XCTAssertFalse(outcome.state.requiresLogin)
+            XCTAssertFalse(outcome.attemptTUIFallback)
+        }
+    }
+
+    func testInteractiveRefreshRequiredMapsToRotationDeferred() {
         let outcome = RefreshOutcomePolicy.outcome(
             for: .interactiveRefreshRequired,
             isActiveCLI: true
         )
-        XCTAssertEqual(outcome.state, .usagePaused)
+        guard case .rotationDeferred = outcome.state else {
+            return XCTFail("Expected rotationDeferred, got \(outcome.state)")
+        }
         XCTAssertFalse(outcome.attemptTUIFallback)
         // A paused login is not expired: it keeps its healthy switch affordance.
         XCTAssertFalse(outcome.state.requiresLogin)
         XCTAssertTrue(outcome.state.isProblem)
     }
 
-    func testAccountActiveElsewhereIsCalmReadFailureWithoutFallback() {
+    func testCoordinatorDeferralMapsToRotationDeferredWithoutFallback() {
+        let outcome = RefreshOutcomePolicy.outcome(
+            for: .rotationDeferred(URLError(.resourceUnavailable)),
+            isActiveCLI: true
+        )
+
+        guard case .rotationDeferred(let reason) = outcome.state else {
+            return XCTFail("Expected rotationDeferred, got \(outcome.state)")
+        }
+        XCTAssertFalse(reason.isEmpty)
+        XCTAssertFalse(outcome.state.requiresLogin)
+        XCTAssertFalse(outcome.attemptTUIFallback)
+    }
+
+    func testAccountActiveElsewhereRequiresSwitchWithoutFallback() {
         for active in [true, false] {
             let outcome = RefreshOutcomePolicy.outcome(for: .accountActiveElsewhere, isActiveCLI: active)
-            guard case .readFailed(let reason) = outcome.state else {
-                return XCTFail("Expected a calm read failure, got \(outcome.state)")
+            guard case .switchRequired(let reason) = outcome.state else {
+                return XCTFail("Expected switchRequired, got \(outcome.state)")
             }
             XCTAssertTrue(reason.lowercased().contains("switch"))
             XCTAssertFalse(outcome.attemptTUIFallback)
             XCTAssertFalse(outcome.state.requiresLogin)
         }
+    }
+
+    func testCredentialRepairFailureStaysRetryableAndNeverRequiresLogin() {
+        let error = ClaudeAccountUsageFetchError.credentialRepairRequired(
+            ClaudeCredentialRepairRequiredError(reason: "Fresh credentials are safely journaled.")
+        )
+        let outcome = RefreshOutcomePolicy.outcome(for: error, isActiveCLI: true)
+
+        guard case .credentialRepairRequired(let reason) = outcome.state else {
+            return XCTFail("Expected credentialRepairRequired, got \(outcome.state)")
+        }
+        XCTAssertFalse(reason.isEmpty)
+        XCTAssertFalse(outcome.state.requiresLogin)
+        XCTAssertFalse(outcome.attemptTUIFallback)
     }
 
     func testTransportFailureIsReadFailedAndActiveFallsBack() {

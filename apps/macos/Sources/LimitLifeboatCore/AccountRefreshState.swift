@@ -11,6 +11,33 @@ public enum AccountRefreshState: Equatable, Sendable {
     case ok
     /// A transient read failure (network, server, malformed) — retryable.
     case readFailed(reason: String)
+    /// The provider accepted the login but denied the usage endpoint (scope,
+    /// organization, or administrator policy). Renewal may repair stale scope;
+    /// unlike `needsLogin`, this never claims the credential has expired.
+    case providerAccessForbidden(reason: String)
+    /// The credentials are still recoverable, but this operation was not
+    /// allowed to rotate them (for example a scheduled read or an automatic
+    /// switch). A deliberate Retry or manual switch may continue.
+    case rotationDeferred(reason: String)
+    /// This profile shares the active Claude refresh-token chain. Refreshing
+    /// the inactive copy would strand the live CLI login, so the user must
+    /// switch the CLI to this profile before its credentials can be renewed.
+    case switchRequired(reason: String)
+    /// A fresh credential generation survived in the recovery journal or one
+    /// owner, but not every intended owner was durably reconciled. A Retry
+    /// repairs the local copies without consuming another refresh token.
+    case credentialRepairRequired(reason: String)
+    /// macOS can grant access through a deliberate, source-specific user
+    /// action. This is not an expired login.
+    case authorizationRequired(source: CredentialAuthorizationSource, reason: String)
+    /// Credential access cannot be fixed by retrying the read in place (for
+    /// example a replaced development build or unavailable Keychain). Keep
+    /// the typed disposition so the app can offer accurate remediation.
+    case credentialAccessBlocked(
+        source: CredentialAuthorizationSource,
+        disposition: CredentialAccessDisposition,
+        reason: String
+    )
     /// A valid login whose active access token expired while the CLI was idle,
     /// so a background cycle declined to rotate it (rotating the active login
     /// out from under Claude Code is what causes real logouts). Nothing is
@@ -31,7 +58,16 @@ public enum AccountRefreshState: Equatable, Sendable {
         switch self {
         case .idle, .refreshing, .ok:
             return false
-        case .readFailed, .usagePaused, .needsLogin, .keychainLocked:
+        case .readFailed,
+             .providerAccessForbidden,
+             .rotationDeferred,
+             .switchRequired,
+             .credentialRepairRequired,
+             .authorizationRequired,
+             .credentialAccessBlocked,
+             .usagePaused,
+             .needsLogin,
+             .keychainLocked:
             return true
         }
     }
@@ -65,31 +101,85 @@ public enum RefreshOutcomePolicy {
         switch error {
         case .noCredentials:
             // Expected until the account has been the active login once. No CLI
-            // fallback — there is nothing to read.
+            // fallback — there is nothing to read. Stored availability drives
+            // the row's Log In action; `needsLogin` is reserved for a locally
+            // expired or provider-terminal credential.
             return RefreshOutcome(
-                state: .needsLogin(reason: "No captured OAuth credentials are available for this account."),
+                state: .idle,
                 attemptTUIFallback: false
             )
-        case .keychainLocked, .liveCredentialAccessDenied:
-            return RefreshOutcome(state: .keychainLocked, attemptTUIFallback: false)
+        case .keychainLocked:
+            let source: CredentialAuthorizationSource = isActiveCLI
+                ? .claudeCode
+                : .savedAccount
+            let owner = source == .claudeCode ? "Claude Code" : "the saved account"
+            return RefreshOutcome(
+                state: .authorizationRequired(
+                    source: source,
+                    reason: "macOS denied access to \(owner)'s credentials."
+                ),
+                attemptTUIFallback: false
+            )
+        case .liveCredentialAccessDenied(let error, _):
+            let disposition = error.credentialAccessDisposition ?? .interactionRequired
+            let state: AccountRefreshState
+            if disposition == .interactionRequired || disposition == .userCancelled {
+                state = .authorizationRequired(source: .claudeCode, reason: reason(error))
+            } else {
+                state = .credentialAccessBlocked(
+                    source: .claudeCode,
+                    disposition: disposition,
+                    reason: reason(error)
+                )
+            }
+            return RefreshOutcome(state: state, attemptTUIFallback: false)
         case .interactiveRefreshRequired:
             // The login is fine; a background cycle just declined to rotate it.
             // A calm "paused" affordance, not an error — an explicit Retry
             // refreshes it.
-            return RefreshOutcome(state: .usagePaused, attemptTUIFallback: false)
+            return RefreshOutcome(
+                state: .rotationDeferred(
+                    reason: "Scheduled refresh paused before rotating this Claude login."
+                ),
+                attemptTUIFallback: false
+            )
         case .accountActiveElsewhere:
             // Another profile is the live CLI login for this same Claude
             // account. Rotating this copy would strand that login, so it stays
             // on its last reading until the user switches the CLI to it.
             return RefreshOutcome(
-                state: .readFailed(
+                state: .switchRequired(
                     reason: "This account shares its Claude login with the active account. Switch the CLI to it to refresh its usage."
                 ),
+                attemptTUIFallback: false
+            )
+        case .rotationDeferred(let underlying):
+            return RefreshOutcome(
+                state: .rotationDeferred(reason: reason(underlying)),
                 attemptTUIFallback: false
             )
         case .credentialUnavailable(let underlying):
             return RefreshOutcome(
                 state: .readFailed(reason: reason(underlying)),
+                attemptTUIFallback: false
+            )
+        case .credentialRepairRequired(let underlying):
+            return RefreshOutcome(
+                state: .credentialRepairRequired(reason: reason(underlying)),
+                attemptTUIFallback: false
+            )
+        case .credentialRecoveryFailed(let underlying):
+            return RefreshOutcome(
+                state: .needsLogin(
+                    reason: "Claude issued a fresh credential, but it could not be preserved in any encrypted local owner. Log in again. \(reason(underlying))"
+                ),
+                attemptTUIFallback: false
+            )
+        case .forbidden:
+            return RefreshOutcome(
+                state: .providerAccessForbidden(
+                    reason: "Anthropic accepted this login but denied usage access. Renew the login, or ask your organization administrator to allow usage access."
+                ),
                 attemptTUIFallback: false
             )
         case .unauthorized:

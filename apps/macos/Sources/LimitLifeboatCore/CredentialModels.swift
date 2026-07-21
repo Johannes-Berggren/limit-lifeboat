@@ -75,17 +75,24 @@ public struct StoredCredentialSummary: Equatable, Sendable {
     public var fingerprint: String
     public var isRestorable: Bool
     public var claudeRefreshTokenExpiresAt: Date?
+    /// Privacy-safe identity of Claude's single-use refresh-token chain.
+    /// This is retained in memory only and must never be logged. Unlike the
+    /// whole-snapshot fingerprint it is stable across organization/config
+    /// metadata differences, so shared holders can be protected correctly.
+    public var claudeRefreshChainFingerprint: String?
 
     public init(
         provider: Provider,
         fingerprint: String,
         isRestorable: Bool,
-        claudeRefreshTokenExpiresAt: Date? = nil
+        claudeRefreshTokenExpiresAt: Date? = nil,
+        claudeRefreshChainFingerprint: String? = nil
     ) {
         self.provider = provider
         self.fingerprint = fingerprint
         self.isRestorable = isRestorable
         self.claudeRefreshTokenExpiresAt = claudeRefreshTokenExpiresAt
+        self.claudeRefreshChainFingerprint = claudeRefreshChainFingerprint
     }
 }
 
@@ -171,6 +178,10 @@ public struct LiveCredentialObservation: Equatable, Sendable {
     /// and can prove that an in-place item update occurred even when the
     /// legacy Keychain modification date collides within the same second.
     public var claudeKeychainPayloadFingerprint: String?
+    /// SHA-256 of the Claude refresh token only. Kept in memory and never
+    /// logged; used to recognize multiple snapshots that share one rotating
+    /// OAuth chain even when their surrounding account metadata differs.
+    public var claudeRefreshChainFingerprint: String?
     public var snapshot: CredentialSnapshot?
     /// Exact provider-owned Claude item that supplied the secret data for this
     /// observation. Nil for Codex, logged-out Claude, and lightweight sources
@@ -184,7 +195,8 @@ public struct LiveCredentialObservation: Equatable, Sendable {
         credentialFingerprint: String?,
         snapshot: CredentialSnapshot?,
         claudeKeychainItemLocation: ClaudeKeychainItemLocation? = nil,
-        claudeKeychainPayloadFingerprint: String? = nil
+        claudeKeychainPayloadFingerprint: String? = nil,
+        claudeRefreshChainFingerprint: String? = nil
     ) {
         self.provider = provider
         self.isLoggedIn = isLoggedIn
@@ -193,6 +205,7 @@ public struct LiveCredentialObservation: Equatable, Sendable {
         self.snapshot = snapshot
         self.claudeKeychainItemLocation = claudeKeychainItemLocation
         self.claudeKeychainPayloadFingerprint = claudeKeychainPayloadFingerprint
+        self.claudeRefreshChainFingerprint = claudeRefreshChainFingerprint
     }
 
     public var stabilityKey: String {

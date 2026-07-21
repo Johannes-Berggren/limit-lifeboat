@@ -8,6 +8,7 @@ let package = Package(
     ],
     products: [
         .library(name: "LimitLifeboatCore", targets: ["LimitLifeboatCore"]),
+        .library(name: "LimitLifeboatAppWorkflows", targets: ["LimitLifeboatAppWorkflows"]),
         .executable(name: "LimitLifeboat", targets: ["LimitLifeboat"])
     ],
     dependencies: [
@@ -15,10 +16,15 @@ let package = Package(
     ],
     targets: [
         .target(name: "LimitLifeboatCore"),
+        .target(
+            name: "LimitLifeboatAppWorkflows",
+            dependencies: ["LimitLifeboatCore"]
+        ),
         .executableTarget(
             name: "LimitLifeboat",
             dependencies: [
                 "LimitLifeboatCore",
+                "LimitLifeboatAppWorkflows",
                 .product(name: "Sparkle", package: "Sparkle")
             ],
             linkerSettings: [
@@ -31,6 +37,13 @@ let package = Package(
         .testTarget(
             name: "LimitLifeboatCoreTests",
             dependencies: ["LimitLifeboatCore"]
+        ),
+        .testTarget(
+            name: "LimitLifeboatAppTests",
+            dependencies: [
+                "LimitLifeboatAppWorkflows",
+                "LimitLifeboatCore"
+            ]
         )
     ]
 )

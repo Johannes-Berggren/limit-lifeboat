@@ -2,6 +2,7 @@ import Foundation
 
 public enum ClaudeUsageAPIError: Error, LocalizedError {
     case unauthorized
+    case forbidden
     case http(status: Int)
     case network(Error)
     case malformedResponse
@@ -10,6 +11,8 @@ public enum ClaudeUsageAPIError: Error, LocalizedError {
         switch self {
         case .unauthorized:
             return "The Anthropic usage API rejected the access token; it needs a refresh or a new login."
+        case .forbidden:
+            return "The Anthropic usage API denied access to usage data. Renew the login or ask an organization administrator to allow usage access."
         case .http(let status):
             return "The Anthropic usage API responded with status \(status)."
         case .network(let underlying):
@@ -120,8 +123,9 @@ public struct ClaudeUsageAPIClient: Sendable {
     }
 
     /// Shared GET plumbing for the OAuth endpoints: same header set and the
-    /// same error mapping everywhere (401/403 -> unauthorized, other non-2xx
-    /// -> http, transport failures -> network, non-object JSON -> malformed).
+    /// same error mapping everywhere (401 -> unauthorized, 403 -> forbidden,
+    /// other non-2xx -> http, transport failures -> network, non-object JSON
+    /// -> malformed). A forbidden response must not consume a refresh token.
     private func fetchJSONObject(from url: URL, accessToken: String) async throws -> [String: Any] {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
@@ -141,8 +145,16 @@ public struct ClaudeUsageAPIClient: Sendable {
         switch response.statusCode {
         case 200..<300:
             break
-        case 401, 403:
+        case 401:
+            // Some OAuth resource servers report insufficient_scope with a
+            // 401 even though RFC 6750 recommends 403. Never spend a rotating
+            // refresh token on that exact structured policy response.
+            if Self.oauthErrorCode(in: data) == "insufficient_scope" {
+                throw ClaudeUsageAPIError.forbidden
+            }
             throw ClaudeUsageAPIError.unauthorized
+        case 403:
+            throw ClaudeUsageAPIError.forbidden
         default:
             throw ClaudeUsageAPIError.http(status: response.statusCode)
         }
@@ -151,6 +163,15 @@ public struct ClaudeUsageAPIClient: Sendable {
             throw ClaudeUsageAPIError.malformedResponse
         }
         return object
+    }
+
+    private static func oauthErrorCode(in data: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rawCode = object["error"] as? String else {
+            return nil
+        }
+        let code = rawCode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return code.isEmpty ? nil : code
     }
 
     public func makeSnapshot(for profile: AccountProfile, usage: ClaudeAPIUsage, now: Date = Date()) -> UsageSnapshot {

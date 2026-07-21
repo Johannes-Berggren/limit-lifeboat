@@ -81,6 +81,65 @@ final class KeychainCredentialStoreTests: XCTestCase {
         XCTAssertEqual(calls, ["update", "add"])
     }
 
+    func testInsertIfAbsentUsesOneAtomicAdd() throws {
+        var calls: [String] = []
+        let store = KeychainCredentialStore(
+            service: "unused",
+            operations: KeychainCredentialStoreOperations(
+                update: { _, _ in
+                    calls.append("update")
+                    return errSecSuccess
+                },
+                add: { _ in
+                    calls.append("add")
+                    return errSecSuccess
+                }
+            )
+        )
+        let counter = CredentialKeychainIOCounter()
+
+        let inserted = try CredentialAccess.counting(counter) {
+            try store.insertSnapshotIfAbsent(
+                testSnapshot(),
+                for: UUID(),
+                accessMode: .nonInteractive
+            )
+        }
+
+        XCTAssertTrue(inserted)
+        XCTAssertEqual(calls, ["add"])
+        XCTAssertEqual(
+            counter.snapshot,
+            CredentialKeychainIOCounts(metadataReads: 0, dataReads: 0, writes: 1)
+        )
+    }
+
+    func testInsertIfAbsentReportsDuplicateWithoutOverwriting() throws {
+        var calls: [String] = []
+        let store = KeychainCredentialStore(
+            service: "unused",
+            operations: KeychainCredentialStoreOperations(
+                update: { _, _ in
+                    calls.append("update")
+                    return errSecSuccess
+                },
+                add: { _ in
+                    calls.append("add")
+                    return errSecDuplicateItem
+                }
+            )
+        )
+
+        XCTAssertFalse(
+            try store.insertSnapshotIfAbsent(
+                testSnapshot(),
+                for: UUID(),
+                accessMode: .nonInteractive
+            )
+        )
+        XCTAssertEqual(calls, ["add"])
+    }
+
     func testRevisionCASMatchesOpaqueAttributeWithoutReadingSecretData() throws {
         let expected = CredentialStoreRevision(rawValue: Data("expected-revision".utf8))
         var capturedQuery: [String: Any] = [:]
@@ -299,6 +358,45 @@ final class KeychainCredentialStoreTests: XCTestCase {
             )
         )
         XCTAssertEqual(try store.loadSnapshot(for: accountID), second)
+    }
+
+    func testDisposableKeychainInsertIfAbsentPreservesExistingSnapshot() throws {
+        let disposable = try DisposableKeychainTestSupport()
+        let store = KeychainCredentialStore(
+            service: "com.limitlifeboat.app.tests.\(UUID().uuidString)",
+            keychain: disposable.keychain
+        )
+        let accountID = UUID()
+        let first = CredentialSnapshot(
+            provider: .codex,
+            capturedAt: Date(timeIntervalSince1970: 1),
+            items: [
+                CredentialSnapshotItem(
+                    relativePath: ".codex/auth.json",
+                    kind: .fullFile,
+                    contents: Data("first".utf8),
+                    posixPermissions: 0o600
+                )
+            ]
+        )
+        let conflicting = CredentialSnapshot(
+            provider: .codex,
+            capturedAt: Date(timeIntervalSince1970: 2),
+            items: [
+                CredentialSnapshotItem(
+                    relativePath: ".codex/auth.json",
+                    kind: .fullFile,
+                    contents: Data("conflicting".utf8),
+                    posixPermissions: 0o600
+                )
+            ]
+        )
+
+        XCTAssertTrue(try store.insertSnapshotIfAbsent(first, for: accountID))
+        XCTAssertFalse(
+            try store.insertSnapshotIfAbsent(conflicting, for: accountID)
+        )
+        XCTAssertEqual(try store.loadSnapshot(for: accountID), first)
     }
 
     func testLoadSnapshotThrowsDecodeFailedForUnreadableData() throws {
