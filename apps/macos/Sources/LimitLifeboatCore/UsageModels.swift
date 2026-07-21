@@ -77,6 +77,50 @@ public struct UsageWindow: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+/// One backend-issued Codex reset entitlement. The string-valued type and
+/// status fields are intentionally forward compatible: a newer Codex backend
+/// must not make an otherwise useful usage snapshot undecodable.
+public struct CodexRateLimitResetCredit: Codable, Equatable, Sendable, Identifiable {
+    public var id: String
+    public var resetType: String
+    public var status: String
+    public var grantedAt: Date
+    public var expiresAt: Date?
+    public var title: String?
+    public var description: String?
+
+    public init(
+        id: String,
+        resetType: String,
+        status: String,
+        grantedAt: Date,
+        expiresAt: Date? = nil,
+        title: String? = nil,
+        description: String? = nil
+    ) {
+        self.id = id
+        self.resetType = resetType
+        self.status = status
+        self.grantedAt = grantedAt
+        self.expiresAt = expiresAt
+        self.title = title
+        self.description = description
+    }
+}
+
+/// Snapshot of earned Codex reset availability. `availableCount` is the
+/// authoritative total; `credits` is nil when the backend returned only the
+/// count and may contain fewer rows than that count.
+public struct CodexRateLimitResetAvailability: Codable, Equatable, Sendable {
+    public var availableCount: Int
+    public var credits: [CodexRateLimitResetCredit]?
+
+    public init(availableCount: Int, credits: [CodexRateLimitResetCredit]? = nil) {
+        self.availableCount = max(0, availableCount)
+        self.credits = credits
+    }
+}
+
 public struct UsageSnapshot: Codable, Equatable, Sendable {
     public var accountID: UUID
     public var provider: Provider
@@ -88,6 +132,13 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
     public var resetDate: Date?
     public var resetDescription: String?
     public var creditStatus: String?
+    /// Earned reset entitlements reported by the Codex app server. Nil means
+    /// unsupported or unavailable; a non-nil value with count zero is a known
+    /// "no resets available" reading.
+    public var codexRateLimitResetAvailability: CodexRateLimitResetAvailability?
+    /// Exact backend classification used to distinguish a resettable Codex
+    /// quota exhaustion from workspace billing or spend-control failures.
+    public var codexRateLimitReachedType: String?
     public var riskLevel: RiskLevel
     public var source: String
     public var lastRefreshed: Date
@@ -110,6 +161,8 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         resetDate: Date? = nil,
         resetDescription: String? = nil,
         creditStatus: String? = nil,
+        codexRateLimitResetAvailability: CodexRateLimitResetAvailability? = nil,
+        codexRateLimitReachedType: String? = nil,
         riskLevel: RiskLevel = .unknown,
         source: String,
         lastRefreshed: Date = Date(),
@@ -126,6 +179,8 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         self.resetDate = resetDate
         self.resetDescription = resetDescription
         self.creditStatus = creditStatus
+        self.codexRateLimitResetAvailability = codexRateLimitResetAvailability
+        self.codexRateLimitReachedType = codexRateLimitReachedType
         self.riskLevel = riskLevel
         self.source = source
         self.lastRefreshed = lastRefreshed
@@ -358,6 +413,8 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         case resetDate
         case resetDescription
         case creditStatus
+        case codexRateLimitResetAvailability
+        case codexRateLimitReachedType
         case riskLevel
         case source
         case lastRefreshed
@@ -382,6 +439,11 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         self.resetDate = try container.decodeIfPresent(Date.self, forKey: .resetDate)
         self.resetDescription = try container.decodeIfPresent(String.self, forKey: .resetDescription)
         self.creditStatus = try container.decodeIfPresent(String.self, forKey: .creditStatus)
+        self.codexRateLimitResetAvailability = try container.decodeIfPresent(
+            CodexRateLimitResetAvailability.self,
+            forKey: .codexRateLimitResetAvailability
+        )
+        self.codexRateLimitReachedType = try container.decodeIfPresent(String.self, forKey: .codexRateLimitReachedType)
         self.riskLevel = try container.decode(RiskLevel.self, forKey: .riskLevel)
         self.source = try container.decode(String.self, forKey: .source)
         self.lastRefreshed = try container.decode(Date.self, forKey: .lastRefreshed)
@@ -401,6 +463,8 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         try container.encodeIfPresent(resetDate, forKey: .resetDate)
         try container.encodeIfPresent(resetDescription, forKey: .resetDescription)
         try container.encodeIfPresent(creditStatus, forKey: .creditStatus)
+        try container.encodeIfPresent(codexRateLimitResetAvailability, forKey: .codexRateLimitResetAvailability)
+        try container.encodeIfPresent(codexRateLimitReachedType, forKey: .codexRateLimitReachedType)
         try container.encode(riskLevel, forKey: .riskLevel)
         try container.encode(source, forKey: .source)
         try container.encode(lastRefreshed, forKey: .lastRefreshed)

@@ -139,6 +139,17 @@ final class UsageAlertController {
         )
     }
 
+    func handleAutomaticCodexReset(profileLabel: String, remainingCount: Int?) {
+        let remaining = remainingCount.map {
+            "\($0) earned \($0 == 1 ? "reset" : "resets") remain."
+        } ?? "Refresh Limit Lifeboat to confirm the remaining reset count."
+        postNotification(
+            identifier: "codex-auto-reset-\(Int(Date().timeIntervalSince1970))",
+            title: "Used an earned Codex reset for \(profileLabel)",
+            body: "The eligible Codex limit windows were reset before switching accounts. \(remaining)"
+        )
+    }
+
     /// Drops every persisted and in-memory dedupe key for a removed profile
     /// so UserDefaults does not accumulate dead entries forever.
     func forgetProfile(_ profileID: UUID) {

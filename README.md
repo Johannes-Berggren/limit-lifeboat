@@ -4,7 +4,8 @@
 account switcher for Mac, with usage for every work and personal account. The
 native menu-bar app shows each account's remaining usage and can switch Claude
 Code or the Codex CLI to another saved account without replacing unrelated CLI
-or MCP settings.
+or MCP settings. When OpenAI supplies earned Codex rate-limit resets, the app
+also shows the authoritative available count for each Codex account.
 
 Switching is manual by default; optional switching from a depleted account is
 off until you explicitly enable it. Both paths change only the selected CLI
@@ -58,6 +59,12 @@ direct-download source for release artifacts.
   silently. Rejected logins retain their last reading and show a **Log In**
   action without opening a background dialog; Retry and Switch can offer to
   authenticate again.
+- **Earned Codex resets stay explicit.** A reset badge appears only when the
+  installed Codex app server exposes OpenAI's earned-reset capability. You can
+  inspect backend-provided details and expirations, then confirm use of one
+  reset for any saved Codex account. Per-account automatic use is off by
+  default; when enabled for the active account, it runs only after a fresh hard
+  `rate_limit_reached` reading and before optional depleted-account switching.
 - **Switching is transactional and user-controlled.** Manual switching is the
   default, and switching from a depleted account is off until you enable it.
   Every switch captures the current login, stages private rollback material,
@@ -74,7 +81,8 @@ direct-download source for release artifacts.
 
 Add, rename, or remove accounts from the popover. Settings cover refresh
 frequency, launch at login, automatic update checks, organization-name
-visibility, and notifications.
+visibility, and notifications. Automatic reset use is configured separately
+on each Codex account's reset panel.
 Browser, Claude Desktop, ChatGPT Desktop, and CLI sessions are separate:
 switching affects only the corresponding CLI login.
 
@@ -94,17 +102,19 @@ are encrypted by macOS Keychain under the service
 The app reads Claude Code's provider-owned `Claude Code-credentials` Keychain
 item when necessary, but it does not create or take ownership of that item.
 Background refreshes do not display a Keychain authorization prompt or switch
-the live CLI account. If Codex rotates the active account's token during an
-isolated usage check, the app merges it back only when the live credential
-fingerprint is unchanged. If macOS requires authorization, the app keeps the
-last reading and waits for an explicit retry, capture, removal, or account
-switch.
+the live CLI account. Codex usage checks and reset redemptions run from private
+temporary copies of the selected saved account. If Codex rotates a token, the
+app merges it back only when the stored and live credential fingerprints still
+match; a newer external CLI login always wins. If macOS requires authorization,
+the app keeps the last reading and waits for an explicit retry, capture,
+removal, or account switch.
 
 Network access is limited to the services needed for the selected features:
 
 - Anthropic endpoints for Claude account identity, token refresh, and usage
 - OpenAI endpoints through the locally installed Codex app server for isolated
-  account verification, token refresh, and current usage readings
+  account verification, token refresh, current usage readings, and earned-reset
+  redemption after confirmation or per-account opt-in
 - GitHub Releases for the signed update feed and update downloads
 - Claude or ChatGPT web dashboards when you explicitly open one in the app
 
@@ -118,6 +128,12 @@ official login commands in Terminal.
 The website uses no analytics, cookies, forms, or external fonts. Vercel may
 retain ordinary infrastructure request logs as part of hosting the static
 site; those logs are not Limit Lifeboat product analytics.
+
+Earned resets are an OpenAI-provided subscription feature reported and
+enforced by the Codex backend. Limit Lifeboat does not fabricate quota, bypass
+rate limits, or turn paid usage credits into resets. Older Codex versions and
+the local session-log fallback cannot expose or redeem them, so the reset badge
+is hidden in those cases.
 
 Please report security issues through
 [GitHub private vulnerability reporting](SECURITY.md), not a public issue.

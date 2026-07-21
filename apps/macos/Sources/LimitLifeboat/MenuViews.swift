@@ -254,6 +254,7 @@ struct MenuRootView: View {
                         refreshState: storedStatus == .locked
                             ? .keychainLocked
                             : (state.refreshStates[profile.id] ?? .idle),
+                        codexResetState: state.codexResetStates[profile.id] ?? .idle,
                         loginExpiresAt: state.loginExpiresAt(for: profile),
                         estimates: state.burnRateEstimates[profile.id] ?? [:],
                         adviceReason: advisedID == profile.id ? state.switchAdvice[provider]?.reason : nil,
@@ -267,6 +268,10 @@ struct MenuRootView: View {
                         beginCLILogin: { state.beginCLILogin(for: profile, activateAfterLogin: true) },
                         beginCLILoginWithoutSwitching: { state.beginCLILogin(for: profile, activateAfterLogin: false) },
                         captureCLI: { state.captureCLISnapshot(for: profile) },
+                        useCodexReset: { state.confirmAndUseCodexRateLimitReset(for: profile) },
+                        setAutoUseCodexResets: {
+                            state.setAutoUseCodexRateLimitResets(for: profile.id, enabled: $0)
+                        },
                         rename: { state.renameProfile(profile.id, to: $0) },
                         remove: { state.removeProfile(profile.id) },
                         retry: { state.retryRefresh(for: profile) }
@@ -369,6 +374,7 @@ struct AccountRowView: View {
     let snapshot: UsageSnapshot?
     let hasStoredSnapshot: Bool
     var refreshState: AccountRefreshState = .idle
+    var codexResetState: CodexResetRedemptionState = .idle
     var loginExpiresAt: Date? = nil
     let estimates: [String: BurnRateEstimate]
     /// Non-nil exactly when this account is the advised switch target.
@@ -383,6 +389,8 @@ struct AccountRowView: View {
     /// meaningful for non-active rows; the plain `beginCLILogin` activates.
     var beginCLILoginWithoutSwitching: () -> Void = {}
     let captureCLI: () -> Void
+    var useCodexReset: () -> Void = {}
+    var setAutoUseCodexResets: (Bool) -> Void = { _ in }
     let rename: (String) -> Void
     let remove: () -> Void
     var retry: () -> Void = {}
@@ -390,6 +398,7 @@ struct AccountRowView: View {
     @State private var showsRenameAlert = false
     @State private var renameText = ""
     @State private var showsBillingDetails = false
+    @State private var showsCodexResetDetails = false
     @State private var showsHistory = false
     @State private var isHovered = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -482,6 +491,35 @@ struct AccountRowView: View {
                     }
                     .buttonStyle(.plain)
                     .help(billingBadge.help)
+                }
+
+                let resetPresentation = CodexResetPresentation(
+                    snapshot: snapshot,
+                    redemptionState: codexResetState
+                )
+                if let resetBadge = resetPresentation.badgeText,
+                   let availableCount = resetPresentation.availableCount {
+                    Button {
+                        showsCodexResetDetails = true
+                    } label: {
+                        Badge(
+                            text: resetBadge,
+                            color: availableCount > 0 ? DS.accent : .secondary
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .help("View and use earned Codex rate-limit resets")
+                    .popover(isPresented: $showsCodexResetDetails, arrowEdge: .bottom) {
+                        CodexResetStatusView(
+                            profile: profile,
+                            snapshot: snapshot,
+                            redemptionState: codexResetState,
+                            useReset: useCodexReset,
+                            setAutomatic: setAutoUseCodexResets
+                        )
+                        .padding(DS.Spacing.md)
+                        .frame(width: 340)
+                    }
                 }
 
                 Spacer(minLength: 0)
@@ -707,6 +745,143 @@ struct AccountRowView: View {
             return forecast.depletesAt.formatted(date: .omitted, time: .shortened)
         }
         return forecast.depletesAt.formatted(date: .abbreviated, time: .shortened)
+    }
+}
+
+/// Earned-reset details and controls live behind the compact count badge so
+/// every Codex account keeps its normal two-gauge layout.
+private struct CodexResetStatusView: View {
+    let profile: AccountProfile
+    let snapshot: UsageSnapshot?
+    let redemptionState: CodexResetRedemptionState
+    let useReset: () -> Void
+    let setAutomatic: (Bool) -> Void
+
+    private var availability: CodexRateLimitResetAvailability? {
+        snapshot?.codexRateLimitResetAvailability
+    }
+
+    private var presentation: CodexResetPresentation {
+        CodexResetPresentation(snapshot: snapshot, redemptionState: redemptionState)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DS.Spacing.md) {
+            Label(title, systemImage: "arrow.counterclockwise.circle.fill")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle((availability?.availableCount ?? 0) > 0 ? DS.accent : .secondary)
+                .symbolRenderingMode(.hierarchical)
+
+            Text("Earned resets restore the Codex rate-limit windows OpenAI marks as eligible. They are separate from paid usage credits.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let credits = availability?.credits {
+                if !credits.isEmpty {
+                    VStack(alignment: .leading, spacing: DS.Spacing.sm) {
+                        ForEach(credits) { credit in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(credit.title.flatMap { $0.isEmpty ? nil : $0 } ?? "Rate-limit reset")
+                                    .font(.caption.weight(.medium))
+                                if let description = credit.description, !description.isEmpty {
+                                    Text(description)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                if let expiry = credit.expiresAt {
+                                    Text("Expires \(expiry.formatted(date: .abbreviated, time: .shortened))")
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                }
+                            }
+                        }
+                        if let availability, availability.availableCount > credits.count {
+                            Text("\(availability.availableCount - credits.count) additional reset details were not returned by OpenAI.")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+            } else if (availability?.availableCount ?? 0) > 0 {
+                Text("OpenAI returned the available count without individual reset details.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+
+            Divider()
+
+            Toggle(
+                "Use automatically at a hard limit",
+                isOn: Binding(
+                    get: { profile.autoUseCodexRateLimitResets },
+                    set: setAutomatic
+                )
+            )
+            .toggleStyle(.switch)
+            .controlSize(.small)
+
+            Text("Off by default for each account. When enabled, Limit Lifeboat uses a reset before considering an automatic account switch.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            presentationMessage
+
+            stateMessage
+
+            Button(action: useReset) {
+                if redemptionState.isBusy {
+                    HStack(spacing: DS.Spacing.sm) {
+                        ProgressView().controlSize(.small)
+                        Text("Using Reset…")
+                    }
+                } else {
+                    Text("Use One Reset…")
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!presentation.canRedeem)
+            .help("Requires confirmation and asks OpenAI to select one available reset")
+        }
+        .padding(DS.Spacing.lg)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var title: String {
+        let count = availability?.availableCount ?? 0
+        return "\(count) earned \(count == 1 ? "reset" : "resets") available"
+    }
+
+    @ViewBuilder
+    private var presentationMessage: some View {
+        if case .stale = presentation.state {
+            Label("Refresh this account before using a reset.", systemImage: "clock.arrow.circlepath")
+                .font(.caption)
+                .foregroundStyle(DS.presentationColor(.warning))
+        }
+    }
+
+    @ViewBuilder
+    private var stateMessage: some View {
+        switch redemptionState {
+        case .idle:
+            EmptyView()
+        case .redeeming:
+            Label("OpenAI is processing this reset…", systemImage: "clock")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .refreshRequired(let reason):
+            Label(reason, systemImage: "arrow.clockwise.circle")
+                .font(.caption)
+                .foregroundStyle(DS.presentationColor(.warning))
+                .fixedSize(horizontal: false, vertical: true)
+        case .failed(let reason):
+            Label(reason, systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(DS.presentationColor(.warning))
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 

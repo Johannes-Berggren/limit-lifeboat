@@ -24,6 +24,9 @@ final class AppState: ObservableObject {
     /// retryable affordance in the row instead of silently aging into
     /// staleness. Absent = never refreshed / nothing to say.
     @Published private(set) var refreshStates: [UUID: AccountRefreshState] = [:]
+    /// Reset spending has its own state so a redemption failure never hides a
+    /// still-valid usage reading behind the ordinary refresh error UI.
+    @Published private(set) var codexResetStates: [UUID: CodexResetRedemptionState] = [:]
     /// Cached so SwiftUI body evaluation and switch-advice projection never
     /// perform a Keychain query. The cache is populated non-interactively at
     /// launch and updated at every credential mutation boundary.
@@ -51,6 +54,8 @@ final class AppState: ObservableObject {
     private let syncPlanner = CLIAccountSyncPlanner()
     private let codexLocalUsageReader = CodexLocalUsageReader()
     private let codexUsageService = CodexAccountUsageService()
+    private let codexResetAttemptStore = CodexResetAttemptStore()
+    private let codexResetAutomationPolicy = CodexResetAutomationPolicy()
     private let claudeCodeUsageReader = ClaudeCodeUsageReader()
     private let claudeUsageService: ClaudeAccountUsageService
     private let codexAuthPreflightService = CodexAuthPreflightService()
@@ -99,6 +104,9 @@ final class AppState: ObservableObject {
     /// switch onto a constrained account must not be immediately reverted.
     private var lastAutoSwitchAttempt: [Provider: Date] = [:]
     private var lastManualSwitchAt: [Provider: Date] = [:]
+    /// Per-account backoff for automatic reset attempts. Manual redemption is
+    /// never throttled and reuses any persisted unresolved idempotency key.
+    private var lastAutomaticCodexResetAttempt: [UUID: Date] = [:]
     /// When each Codex account last became the active CLI login — the freshness
     /// gate for the account-blind Codex session-log fallback.
     /// In-memory: after a relaunch the worst case is one stale attribution for
@@ -1681,12 +1689,18 @@ final class AppState: ObservableObject {
                 }
                 let fingerprint = record.summary.fingerprint
 
-                let result = try await codexUsageService.fetchSnapshot(
+                let initialResult = try await codexUsageService.fetchSnapshot(
                     for: profile,
                     authJSON: authJSON,
                     executableURL: executableURL,
                     expectedIdentity: profile.identity
                 )
+                let automaticReset = await automaticallyRedeemCodexResetIfNeeded(
+                    for: profile,
+                    usageResult: initialResult,
+                    executableURL: executableURL
+                )
+                let result = automaticReset.usageResult
 
                 if result.updatedAuthJSON != authJSON {
                     guard let updatedRecord = try cliSwitcher.replaceStoredCodexAuthJSON(
@@ -1721,6 +1735,9 @@ final class AppState: ObservableObject {
 
                 applyCodexAccountInfo(result.accountInfo, for: profile)
                 applySnapshot(result.snapshot, for: profile)
+                if let resetState = automaticReset.stateAfterApply {
+                    codexResetStates[profile.id] = resetState
+                }
                 return
             } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
                 refreshStates[profile.id] = .keychainLocked
@@ -1729,7 +1746,7 @@ final class AppState: ObservableObject {
                 switch error {
                 case .requiresLogin(let reason):
                     refreshStates[profile.id] = .needsLogin(reason: reason)
-                case .unavailable(let reason):
+                case .unsupported(let reason), .unavailable(let reason):
                     failCodexUsageRefresh(for: profile, reason: reason)
                 }
                 return
@@ -1743,6 +1760,130 @@ final class AppState: ObservableObject {
             for: profile,
             reason: "Saved Codex credentials changed during the usage check. Try again."
         )
+    }
+
+    private struct AutomaticCodexResetResolution {
+        var usageResult: CodexAccountUsageResult
+        var stateAfterApply: CodexResetRedemptionState?
+    }
+
+    /// Runs inside the existing Codex mutation gate and before the fetched
+    /// depleted snapshot is applied, so a successful reset prevents both a
+    /// transient depleted alert and the later auto-switch decision.
+    private func automaticallyRedeemCodexResetIfNeeded(
+        for profile: AccountProfile,
+        usageResult: CodexAccountUsageResult,
+        executableURL: URL,
+        now: Date = Date()
+    ) async -> AutomaticCodexResetResolution {
+        let currentProfile = profiles.first(where: { $0.id == profile.id }) ?? profile
+        let currentState = codexResetStates[profile.id] ?? .idle
+        guard codexResetAutomationPolicy.recoverySteps(
+            profile: currentProfile,
+            snapshot: usageResult.snapshot,
+            redemptionState: currentState,
+            lastAttempt: lastAutomaticCodexResetAttempt[profile.id],
+            now: now
+        ).first == .redeemReset else {
+            return AutomaticCodexResetResolution(usageResult: usageResult, stateAfterApply: nil)
+        }
+
+        lastAutomaticCodexResetAttempt[profile.id] = now
+        codexResetStates[profile.id] = .redeeming
+        let idempotencyKey = codexResetAttemptStore.idempotencyKey(for: profile.id)
+        do {
+            let redemption = try await codexUsageService.redeemReset(
+                for: currentProfile,
+                authJSON: usageResult.updatedAuthJSON,
+                executableURL: executableURL,
+                expectedIdentity: currentProfile.identity,
+                idempotencyKey: idempotencyKey,
+                now: now
+            )
+            codexResetAttemptStore.completeAttempt(for: profile.id)
+
+            if redemption.outcome.consumedReset {
+                usageAlertController.handleAutomaticCodexReset(
+                    profileLabel: currentProfile.label,
+                    remainingCount: redemption.refreshedUsage?.snapshot
+                        .codexRateLimitResetAvailability?.availableCount
+                )
+            }
+
+            if let refreshed = redemption.refreshedUsage {
+                let message: String
+                switch redemption.outcome {
+                case .reset, .alreadyRedeemed:
+                    message = "Used an earned reset for \(currentProfile.label)."
+                case .nothingToReset:
+                    message = "\(currentProfile.label) has no eligible Codex limit to reset yet."
+                case .noCredit:
+                    message = "\(currentProfile.label) has no earned resets available."
+                }
+                statusMessage = message
+                return AutomaticCodexResetResolution(
+                    usageResult: refreshed,
+                    stateAfterApply: .idle
+                )
+            }
+
+            if redemption.outcome.consumedReset {
+                let reason = redemption.refreshFailureReason
+                    ?? "Refresh usage before another reset can be used."
+                statusMessage = "Used an earned reset for \(currentProfile.label). Refresh is required to confirm its new limits."
+                return AutomaticCodexResetResolution(
+                    usageResult: usageResult,
+                    stateAfterApply: .refreshRequired(reason: reason)
+                )
+            }
+
+            let reason = redemption.refreshFailureReason
+                ?? "Codex did not return refreshed reset availability."
+            statusMessage = reason
+            return AutomaticCodexResetResolution(
+                usageResult: usageResult,
+                stateAfterApply: .failed(reason: reason)
+            )
+        } catch let error as CodexResetRedemptionError {
+            switch error.failure {
+            case .requiresLogin, .unsupported:
+                codexResetAttemptStore.completeAttempt(for: profile.id)
+            case .unavailable:
+                break
+            }
+            var retainedUsage = usageResult
+            if let updatedAuthJSON = error.updatedAuthJSON {
+                retainedUsage.updatedAuthJSON = updatedAuthJSON
+            }
+            let reason = error.localizedDescription
+            statusMessage = "Could not automatically use a Codex reset for \(currentProfile.label): \(reason)"
+            return AutomaticCodexResetResolution(
+                usageResult: retainedUsage,
+                stateAfterApply: .failed(reason: reason)
+            )
+        } catch let error as CodexAccountUsageError {
+            switch error {
+            case .requiresLogin, .unsupported:
+                // These failures happen before a reset can be accepted.
+                codexResetAttemptStore.completeAttempt(for: profile.id)
+            case .unavailable:
+                // Ambiguous transport failures retain the key for a safe retry.
+                break
+            }
+            let reason = error.localizedDescription
+            statusMessage = "Could not automatically use a Codex reset for \(currentProfile.label): \(reason)"
+            return AutomaticCodexResetResolution(
+                usageResult: usageResult,
+                stateAfterApply: .failed(reason: reason)
+            )
+        } catch {
+            let reason = error.localizedDescription
+            statusMessage = "Could not automatically use a Codex reset for \(currentProfile.label): \(reason)"
+            return AutomaticCodexResetResolution(
+                usageResult: usageResult,
+                stateAfterApply: .failed(reason: reason)
+            )
+        }
     }
 
     private func failCodexUsageRefresh(for profile: AccountProfile, reason: String) {
@@ -1818,6 +1959,11 @@ final class AppState: ObservableObject {
     private func applySnapshot(_ snapshot: UsageSnapshot, for profile: AccountProfile) {
         snapshots[profile.id] = snapshot
         refreshStates[profile.id] = .ok
+        if profile.provider == .codex,
+           snapshot.source == "Codex app server",
+           codexResetStates[profile.id]?.isBusy != true {
+            codexResetStates[profile.id] = .idle
+        }
         do {
             _ = try historyStore?.append(snapshot)
         } catch {
@@ -1959,6 +2105,225 @@ final class AppState: ObservableObject {
         persistProfiles()
     }
 
+    func setAutoUseCodexRateLimitResets(for profileID: UUID, enabled: Bool) {
+        guard let index = profiles.firstIndex(where: { $0.id == profileID }),
+              profiles[index].provider == .codex,
+              profiles[index].autoUseCodexRateLimitResets != enabled else {
+            return
+        }
+        profiles[index].autoUseCodexRateLimitResets = enabled
+        profiles[index].updatedAt = Date()
+        persistProfiles()
+        statusMessage = enabled
+            ? "Automatic earned resets enabled for \(profiles[index].label)."
+            : "Automatic earned resets disabled for \(profiles[index].label)."
+    }
+
+    func confirmAndUseCodexRateLimitReset(for profile: AccountProfile) {
+        guard let current = profiles.first(where: { $0.id == profile.id }),
+              current.provider == .codex,
+              let snapshot = snapshots[current.id],
+              let availability = snapshot.codexRateLimitResetAvailability,
+              availability.availableCount > 0 else {
+            statusMessage = "No earned Codex reset is currently available for \(profile.label)."
+            return
+        }
+        guard !snapshot.isStale() else {
+            statusMessage = "Refresh \(current.label) before using an earned Codex reset."
+            return
+        }
+        guard codexResetStates[current.id]?.blocksRedemption != true else {
+            statusMessage = "Wait for \(current.label)'s reset status to refresh before using another reset."
+            return
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Use one earned reset for \(current.label)?"
+        var details = [
+            "This asks OpenAI to reset the eligible Codex rate-limit windows and cannot be undone."
+        ]
+        if let window = snapshots[current.id]?.mostConstrainedWindow {
+            details.append("Current \(window.label.lowercased()) usage is \(Int(window.usedPercent.rounded()))%.")
+        }
+        if let expiry = availability.credits?
+            .filter({ $0.status == "available" })
+            .compactMap(\.expiresAt)
+            .min() {
+            details.append("The earliest listed reset expires \(expiry.formatted(date: .abbreviated, time: .shortened)).")
+        }
+        details.append("OpenAI will select which available reset to use.")
+        alert.informativeText = details.joined(separator: " ")
+        alert.addButton(withTitle: "Use Reset")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModalActivating() == .alertFirstButtonReturn else { return }
+
+        codexResetStates[current.id] = .redeeming
+        Task { [weak self] in
+            await self?.redeemCodexRateLimitResetManually(for: current)
+        }
+    }
+
+    private func redeemCodexRateLimitResetManually(for profile: AccountProfile) async {
+        guard let mutationOwner = beginCredentialMutation(for: .codex) else {
+            let reason = "Another Codex credential operation is already in progress."
+            codexResetStates[profile.id] = .failed(reason: reason)
+            statusMessage = reason
+            return
+        }
+        defer { finishCredentialMutation(for: .codex, owner: mutationOwner) }
+
+        guard let executablePath = cliSwitcher.resolveExecutablePath(command: Provider.codex.commandName) else {
+            let reason = "The Codex executable could not be found."
+            codexResetStates[profile.id] = .failed(reason: reason)
+            statusMessage = reason
+            return
+        }
+
+        do {
+            guard let record = try cliSwitcher.storedCredentialRecord(for: profile),
+                  record.summary.isRestorable,
+                  let authJSON = record.codexAuthJSON else {
+                throw CodexAccountUsageError.requiresLogin(
+                    reason: "No saved Codex credentials are available for reset redemption."
+                )
+            }
+            let fingerprint = record.summary.fingerprint
+            let idempotencyKey = codexResetAttemptStore.idempotencyKey(for: profile.id)
+            let redemption: CodexResetRedemptionResult
+            do {
+                redemption = try await codexUsageService.redeemReset(
+                    for: profile,
+                    authJSON: authJSON,
+                    executableURL: URL(fileURLWithPath: executablePath),
+                    expectedIdentity: profile.identity,
+                    idempotencyKey: idempotencyKey
+                )
+            } catch let error as CodexResetRedemptionError {
+                let credentialCollision = try persistRotatedCodexResetAuth(
+                    error.updatedAuthJSON,
+                    originalAuthJSON: authJSON,
+                    storedRecord: record,
+                    fingerprint: fingerprint,
+                    profile: profile
+                )
+                switch error.failure {
+                case .requiresLogin(let reason):
+                    codexResetAttemptStore.completeAttempt(for: profile.id)
+                    refreshStates[profile.id] = .needsLogin(reason: reason)
+                case .unsupported:
+                    codexResetAttemptStore.completeAttempt(for: profile.id)
+                case .unavailable:
+                    // Keep the pending key: a retry is the same logical attempt.
+                    break
+                }
+                let collisionSuffix = credentialCollision
+                    ? " A newer external Codex login was preserved."
+                    : ""
+                codexResetStates[profile.id] = .failed(reason: error.localizedDescription)
+                statusMessage = "Could not use a Codex reset for \(profile.label): \(error.localizedDescription)\(collisionSuffix)"
+                updateSwitchAdvice()
+                updateMenuBarSummary()
+                return
+            }
+            codexResetAttemptStore.completeAttempt(for: profile.id)
+
+            let credentialCollision = try persistRotatedCodexResetAuth(
+                redemption.updatedAuthJSON,
+                originalAuthJSON: authJSON,
+                storedRecord: record,
+                fingerprint: fingerprint,
+                profile: profile
+            )
+
+            if let refreshed = redemption.refreshedUsage {
+                applyCodexAccountInfo(refreshed.accountInfo, for: profile)
+                applySnapshot(refreshed.snapshot, for: profile)
+                codexResetStates[profile.id] = .idle
+            } else if redemption.outcome.consumedReset {
+                codexResetStates[profile.id] = .refreshRequired(
+                    reason: redemption.refreshFailureReason
+                        ?? "Refresh usage before another reset can be used."
+                )
+            } else {
+                codexResetStates[profile.id] = .failed(
+                    reason: redemption.refreshFailureReason
+                        ?? "Codex did not return refreshed reset availability."
+                )
+            }
+
+            let collisionSuffix = credentialCollision
+                ? " A newer external Codex login was preserved."
+                : ""
+            switch redemption.outcome {
+            case .reset:
+                statusMessage = "Used one earned reset for \(profile.label).\(collisionSuffix)"
+            case .alreadyRedeemed:
+                statusMessage = "The pending reset for \(profile.label) had already completed.\(collisionSuffix)"
+            case .nothingToReset:
+                statusMessage = "No eligible Codex limit was reset for \(profile.label); no reset was spent."
+            case .noCredit:
+                statusMessage = "No earned reset is currently available for \(profile.label)."
+            }
+        } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
+            let reason = "Saved credentials are not accessible."
+            codexResetStates[profile.id] = .failed(reason: reason)
+            refreshStates[profile.id] = .keychainLocked
+            statusMessage = reason
+        } catch let error as CodexAccountUsageError {
+            switch error {
+            case .requiresLogin(let reason):
+                codexResetAttemptStore.completeAttempt(for: profile.id)
+                refreshStates[profile.id] = .needsLogin(reason: reason)
+            case .unsupported:
+                codexResetAttemptStore.completeAttempt(for: profile.id)
+            case .unavailable:
+                // Keep the pending key: a retry is the same logical attempt.
+                break
+            }
+            codexResetStates[profile.id] = .failed(reason: error.localizedDescription)
+            statusMessage = "Could not use a Codex reset for \(profile.label): \(error.localizedDescription)"
+        } catch {
+            codexResetStates[profile.id] = .failed(reason: error.localizedDescription)
+            statusMessage = "Could not use a Codex reset for \(profile.label): \(error.localizedDescription)"
+        }
+        updateSwitchAdvice()
+        updateMenuBarSummary()
+    }
+
+    /// Merges a token rotation only into the exact stored/live generation that
+    /// started redemption. A nil return from the stored CAS means another
+    /// capture or CLI login won and must remain untouched.
+    private func persistRotatedCodexResetAuth(
+        _ updatedAuthJSON: Data?,
+        originalAuthJSON: Data,
+        storedRecord: StoredCredentialRecord,
+        fingerprint: String,
+        profile: AccountProfile
+    ) throws -> Bool {
+        guard let updatedAuthJSON, updatedAuthJSON != originalAuthJSON else {
+            return false
+        }
+        guard let updatedRecord = try cliSwitcher.replaceStoredCodexAuthJSON(
+            updatedAuthJSON,
+            for: profile.id,
+            using: storedRecord,
+            ifSnapshotFingerprintMatches: fingerprint
+        ) else {
+            return true
+        }
+        cacheStoredCredentialSummary(updatedRecord, for: profile)
+        if let current = profiles.first(where: { $0.id == profile.id }),
+           current.isActiveCLI,
+           try cliSwitcher.replaceLiveCodexAuthJSON(
+               updatedAuthJSON,
+               ifCredentialFingerprintMatches: fingerprint
+           ) {
+            _ = try reconcileLiveCredentials(provider: .codex, origin: .manualCapture)
+        }
+        return false
+    }
+
     func removeProfile(_ profileID: UUID) {
         guard let index = profiles.firstIndex(where: { $0.id == profileID }) else {
             return
@@ -2015,6 +2380,9 @@ final class AppState: ObservableObject {
         profiles.remove(at: index)
         snapshots[profile.id] = nil
         refreshStates[profile.id] = nil
+        codexResetStates[profile.id] = nil
+        lastAutomaticCodexResetAttempt[profile.id] = nil
+        codexResetAttemptStore.removeAccount(profile.id)
         storedSnapshotStatuses[profile.id] = nil
         claudeLoginExpirations[profile.id] = nil
         do {

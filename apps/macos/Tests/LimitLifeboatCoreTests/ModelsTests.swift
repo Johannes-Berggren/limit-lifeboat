@@ -143,6 +143,7 @@ final class ModelsTests: XCTestCase {
             provider: .claude,
             label: "Personal",
             planLabel: "Max 20x",
+            autoUseCodexRateLimitResets: true,
             createdAt: stamp,
             updatedAt: stamp
         )
@@ -152,6 +153,7 @@ final class ModelsTests: XCTestCase {
 
         XCTAssertEqual(decoded, profile)
         XCTAssertEqual(decoded.planLabel, "Max 20x")
+        XCTAssertTrue(decoded.autoUseCodexRateLimitResets)
     }
 
     /// Profiles persisted before `planLabel` existed must still decode (with
@@ -178,6 +180,53 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(profile.id, id)
         XCTAssertEqual(profile.label, "Personal")
         XCTAssertEqual(profile.webDataStoreID, storeID)
+        XCTAssertFalse(profile.autoUseCodexRateLimitResets)
+    }
+
+    func testSnapshotRoundTripsCodexResetAvailabilityAndLegacySnapshotDefaultsNil() throws {
+        let stamp = Date(timeIntervalSince1970: 1_783_000_000)
+        let snapshot = UsageSnapshot(
+            accountID: UUID(),
+            provider: .codex,
+            codexRateLimitResetAvailability: CodexRateLimitResetAvailability(
+                availableCount: 2,
+                credits: [
+                    CodexRateLimitResetCredit(
+                        id: "reset-1",
+                        resetType: "futureResetType",
+                        status: "futureStatus",
+                        grantedAt: stamp,
+                        expiresAt: stamp.addingTimeInterval(3600),
+                        title: "Reset",
+                        description: "Ready"
+                    )
+                ]
+            ),
+            codexRateLimitReachedType: "rate_limit_reached",
+            source: "Codex app server",
+            lastRefreshed: stamp
+        )
+
+        let data = try JSONEncoder.appEncoder.encode(snapshot)
+        let decoded = try JSONDecoder.appDecoder.decode(UsageSnapshot.self, from: data)
+        XCTAssertEqual(decoded, snapshot)
+        XCTAssertEqual(decoded.codexRateLimitResetAvailability?.credits?.first?.status, "futureStatus")
+
+        let legacyJSON = """
+        {
+          "accountID": "\(UUID().uuidString)",
+          "provider": "codex",
+          "windows": [],
+          "riskLevel": "unknown",
+          "source": "legacy",
+          "lastRefreshed": "2026-07-07T00:00:00Z",
+          "parseConfidence": "none",
+          "message": ""
+        }
+        """
+        let legacy = try JSONDecoder.appDecoder.decode(UsageSnapshot.self, from: Data(legacyJSON.utf8))
+        XCTAssertNil(legacy.codexRateLimitResetAvailability)
+        XCTAssertNil(legacy.codexRateLimitReachedType)
     }
 
     func testSnapshotStaleness() {
