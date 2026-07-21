@@ -20,6 +20,11 @@ const faqs = [
     answer:
       "No coding prompt or model turn is submitted. Codex readings use the locally installed Codex app server's rate-limit request, while Claude uses provider usage services with a local Claude Code usage fallback.",
   },
+  {
+    question: "Do earned Codex resets bypass OpenAI rate limits?",
+    answer:
+      "No. They are provider-issued reset entitlements reported and enforced by OpenAI. Limit Lifeboat can display and redeem them, but it cannot create resets or bypass a limit.",
+  },
 ] as const;
 ---
 
@@ -49,7 +54,7 @@ const faqs = [
 
 # Inside Codex CLI
 /usage</code></pre>
-    <p>OpenAI also directs users approaching a Codex limit to the Codex usage page or in-product limit banner. The amount consumed varies with task size, complexity, model, and where the task runs. See <a href="https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan">Using Codex with your ChatGPT plan</a>.</p>
+    <p>OpenAI also directs users approaching a Codex limit to the Codex usage page or in-product limit banner. The amount consumed varies with task size, complexity, model, and where the task runs. See <a href="https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan">Using Codex with your ChatGPT plan</a> and the app-server documentation for <a href="https://learn.chatgpt.com/docs/app-server#8-earned-rate-limit-resets-chatgpt">earned rate-limit resets</a>.</p>
   </section>
 
   <section id="what-to-watch">
@@ -59,6 +64,7 @@ const faqs = [
       <li><strong>The active CLI identity</strong>, especially before work involving managed company or client accounts.</li>
       <li><strong>Each available usage window</strong>, such as the current session and weekly allowance.</li>
       <li><strong>The reset time</strong>, so you can decide whether a longer task fits now or should wait.</li>
+      <li><strong>Earned Codex resets</strong>, when OpenAI reports them for that ChatGPT-authenticated account.</li>
       <li><strong>The reading age</strong>, because a last-known value from an inactive or expired login is not live data.</li>
       <li><strong>Recent pace</strong>, which shows whether current consumption is moving faster than the remaining time.</li>
     </ul>
@@ -68,13 +74,16 @@ const faqs = [
   <section id="menu-bar">
     <h2>Put all authorized accounts in one quiet view</h2>
     <p>Limit Lifeboat is a native macOS menu-bar app for Claude Code and Codex CLI accounts. It shows the active identity, session and weekly readings, reset timing, and reading age for every saved account. Local history and pace warnings help make the number actionable without turning the app into another large dashboard.</p>
+    <p>When the installed Codex app server exposes earned resets, each Codex account shows OpenAI’s authoritative available count. The reset panel includes any titles, descriptions, and expirations OpenAI returned. Manual use always asks for confirmation and works with active or inactive saved accounts.</p>
+    <p>Automatic reset use is off by default and enabled separately for each account. It applies only to the active Codex account after a fresh <code>rate_limit_reached</code> response—not near a limit or for workspace billing states—and it runs before optional automatic account switching.</p>
     <p>Warnings are optional. You can be notified when an account approaches a configured limit or when a previously depleted account is likely available again. Manual switching is the default; an optional depleted-account switch remains off until you explicitly enable it.</p>
     <p>If you do choose another account, the same menu-bar app performs a verified, reversible CLI authentication switch while leaving unrelated settings alone. Read the focused setup guides for <a href="/guides/switch-claude-code-accounts-mac">Claude Code accounts</a> and <a href="/guides/manage-multiple-codex-accounts-mac">Codex CLI accounts</a>.</p>
   </section>
 
   <section id="privacy">
     <h2>Know where usage and credentials come from</h2>
-    <p>Claude usage is fetched with the saved account’s OAuth credentials, with Claude Code’s local usage view as a fallback. Codex usage is fetched for each saved account through the locally installed Codex app server, using an isolated temporary credential copy; recent local session data remains an active-account fallback. Failed accounts keep their last successful reading and display its age.</p>
+    <p>Claude usage is fetched with the saved account’s OAuth credentials, with Claude Code’s local usage view as a fallback. Codex usage and earned-reset redemption use the locally installed Codex app server with an isolated temporary credential copy for the selected account; token updates are saved only if no newer external CLI login replaced them. Recent local session data remains an active-account fallback, but it cannot expose or redeem resets. Failed accounts keep their last successful reading and display its age.</p>
+    <p>Earned resets are provider-supported subscription entitlements, not a rate-limit bypass or paid usage credit. If the backend or installed Codex version does not expose the capability, Limit Lifeboat hides the reset control.</p>
     <p>Profiles and history stay under your user Library. App-managed credential snapshots are encrypted by macOS Keychain. Limit Lifeboat has no product analytics, advertising, or telemetry, and the website has no analytics scripts or cookies set by the project.</p>
     <p>Review the exact storage locations, network destinations, permissions, and recovery behavior in the <a href="/privacy">privacy documentation</a>. The source and release process are also public on GitHub.</p>
   </section>
