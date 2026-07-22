@@ -107,14 +107,17 @@ rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$FRAMEWORKS_DIR" "$RESOURCES_DIR/ThirdPartyLicenses"
 cp "$BUILD_BIN" "$APP_EXECUTABLE"
 # SPM emits bundled resources (the provider marks) as a .bundle next to the
-# executable; Bundle.module resolves it relative to the binary, so it must sit
-# beside the executable inside the app.
+# build binary. Inside an .app, Bundle.module resolves it via
+# Bundle.main.resourceURL (Contents/Resources), which is also the only codesign
+# valid home for a code-free resource bundle — placing it under Contents/MacOS
+# makes codesign reject the app.
 RESOURCE_BUNDLE="$BUILD_DIR/LimitLifeboat_LimitLifeboat.bundle"
 if [[ ! -d "$RESOURCE_BUNDLE" ]]; then
   echo "Expected the SPM resource bundle at $RESOURCE_BUNDLE" >&2
   exit 1
 fi
-ditto "$RESOURCE_BUNDLE" "$MACOS_DIR/LimitLifeboat_LimitLifeboat.bundle"
+mkdir -p "$RESOURCES_DIR"
+ditto "$RESOURCE_BUNDLE" "$RESOURCES_DIR/LimitLifeboat_LimitLifeboat.bundle"
 ditto "$SPARKLE_SOURCE" "$SPARKLE_FRAMEWORK"
 # Limit Lifeboat is not sandboxed, so Sparkle's sandbox-only XPC services are
 # unnecessary. Removing both the real directory and top-level symlink also
