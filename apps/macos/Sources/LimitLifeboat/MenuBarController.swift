@@ -110,10 +110,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
             if providerIndex > 0 {
                 title.append(NSAttributedString(string: "  ·  ", attributes: separatorAttributes))
             }
-            title.append(NSAttributedString(
-                string: " \(group.provider.displayName.uppercased()) ",
-                attributes: providerAttributes
-            ))
+            title.append(providerMark(for: group.provider, textAttributes: providerAttributes))
 
             if group.limits.isEmpty {
                 title.append(valueString("?", riskLevel: .unknown))
@@ -132,6 +129,47 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
             }
         }
         return title
+    }
+
+    /// The provider's brand mark as an inline image, wrapped in the same spacing
+    /// the provider text used. Falls back to the uppercased name when the asset
+    /// is unavailable so the bar never renders blank.
+    private func providerMark(
+        for provider: Provider,
+        textAttributes: [NSAttributedString.Key: Any]
+    ) -> NSAttributedString {
+        guard let image = DS.providerMarkImage(provider) else {
+            return NSAttributedString(
+                string: " \(provider.displayName.uppercased()) ",
+                attributes: textAttributes
+            )
+        }
+
+        let markHeight: CGFloat = 13
+        // Center the square mark on the cap band of the adjacent percentages.
+        let referenceFont = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        let attachment = NSTextAttachment()
+        attachment.image = image
+        attachment.bounds = CGRect(
+            x: 0,
+            y: referenceFont.capHeight / 2 - markHeight / 2,
+            width: markHeight,
+            height: markHeight
+        )
+
+        let markColor = (textAttributes[.foregroundColor] as? NSColor) ?? .labelColor
+        let result = NSMutableAttributedString(string: " ")
+        let markString = NSMutableAttributedString(attachment: attachment)
+        // Tint the template mark to match the muted provider label it replaces;
+        // labelColor variants resolve per menu-bar appearance (light/dark).
+        markString.addAttribute(
+            .foregroundColor,
+            value: markColor,
+            range: NSRange(location: 0, length: markString.length)
+        )
+        result.append(markString)
+        result.append(NSAttributedString(string: " "))
+        return result
     }
 
     private func valueString(_ value: String, riskLevel: RiskLevel) -> NSAttributedString {

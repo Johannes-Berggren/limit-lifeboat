@@ -165,11 +165,16 @@ public enum MenuBarSummaryProjector {
         case .weekly:
             return "W"
         case .weeklyScoped:
+            // Collapse the scoped window to a single-letter tag (e.g.
+            // "Weekly (Fable)" -> "F") so the menu bar stays compact.
             let label = window.label
             if let opening = label.firstIndex(of: "("),
                label.last == ")",
                opening < label.index(before: label.endIndex) {
-                return String(label[label.index(after: opening)..<label.index(before: label.endIndex)])
+                let scope = label[label.index(after: opening)..<label.index(before: label.endIndex)]
+                if let first = scope.first {
+                    return String(first)
+                }
             }
             return label
         case .other:
