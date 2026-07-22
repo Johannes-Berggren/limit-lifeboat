@@ -80,7 +80,9 @@ final class MenuBarSummaryTests: XCTestCase {
         XCTAssertEqual(summary.claudeValue, "S 25% W –")
         XCTAssertEqual(summary.compactValue, "100%")
         XCTAssertEqual(summary.riskLevel, .depleted)
-        XCTAssertEqual(summary.activeProviderLimits[0].limits.map(\.label), ["S", "Fable"])
+        // The scoped weekly window collapses to its single-letter tag in the
+        // menu bar while accessibility keeps the full "Weekly (Fable)" label.
+        XCTAssertEqual(summary.activeProviderLimits[0].limits.map(\.label), ["S", "F"])
         XCTAssertTrue(summary.accessibilityText.contains("Fable"))
         XCTAssertTrue(summary.accessibilityText.contains("100 percent"))
     }
