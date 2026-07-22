@@ -163,6 +163,58 @@ public extension ClaudeRotationRecoveryStoring {
     }
 }
 
+/// Security.framework rejects legacy-Keychain queries that combine
+/// `kSecReturnData` with `kSecMatchLimitAll` (`errSecParam`). Keep inventory
+/// and secret reads separate so listing can never become a multi-item
+/// credential read.
+enum ClaudeRotationRecoveryKeychainQuery {
+    static func inventory(
+        service: String,
+        accessMode: CredentialAccessMode
+    ) -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecReturnAttributes as String: true,
+            kSecReturnPersistentRef as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+            kSecUseAuthenticationContext as String:
+                CredentialAccess.authenticationContext(for: accessMode)
+        ]
+    }
+
+    static func pinnedRead(
+        service: String,
+        account: String,
+        persistentReference: Data,
+        accessMode: CredentialAccessMode
+    ) -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecMatchItemList as String: [persistentReference],
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationContext as String:
+                CredentialAccess.authenticationContext(for: accessMode)
+        ]
+    }
+}
+
+struct KeychainClaudeRotationRecoveryStoreOperations {
+    let copyMatching: (
+        CFDictionary,
+        UnsafeMutablePointer<CFTypeRef?>?
+    ) -> OSStatus
+
+    static let live = KeychainClaudeRotationRecoveryStoreOperations(
+        copyMatching: { query, result in
+            SecItemCopyMatching(query, result)
+        }
+    )
+}
+
 /// Keychain-backed recovery journal. Items are additive/updateable by
 /// transaction UUID and device-local, matching the protection of saved
 /// credential snapshots. Listing is required so launch recovery does not rely
@@ -171,6 +223,8 @@ public final class KeychainClaudeRotationRecoveryStore: ClaudeRotationRecoverySt
     @unchecked Sendable {
     private let service: String
     private let validateAccess: @Sendable () throws -> Void
+    private let keychain: SecKeychain?
+    private let operations: KeychainClaudeRotationRecoveryStoreOperations
     private let encoder = JSONEncoder.appEncoder
     private let decoder = JSONDecoder.appDecoder
 
@@ -180,6 +234,34 @@ public final class KeychainClaudeRotationRecoveryStore: ClaudeRotationRecoverySt
     ) {
         self.service = service
         self.validateAccess = validateAccess
+        self.keychain = nil
+        self.operations = .live
+    }
+
+    /// Integration-test initializer for a disposable legacy Keychain. It is
+    /// internal so production recovery records always use the configured user
+    /// search list and existing service identity.
+    init(
+        service: String,
+        validateAccess: @escaping @Sendable () throws -> Void = {},
+        keychain: SecKeychain
+    ) {
+        self.service = service
+        self.validateAccess = validateAccess
+        self.keychain = keychain
+        self.operations = .live
+    }
+
+    init(
+        service: String,
+        validateAccess: @escaping @Sendable () throws -> Void = {},
+        keychain: SecKeychain,
+        operations: KeychainClaudeRotationRecoveryStoreOperations
+    ) {
+        self.service = service
+        self.validateAccess = validateAccess
+        self.keychain = keychain
+        self.operations = operations
     }
 
     public func save(
@@ -206,6 +288,10 @@ public final class KeychainClaudeRotationRecoveryStore: ClaudeRotationRecoverySt
         }
 
         var add = query
+        add.removeValue(forKey: kSecMatchSearchList as String)
+        if let keychain {
+            add[kSecUseKeychain as String] = keychain
+        }
         add[kSecValueData as String] = data
         add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         CredentialAccess.recordKeychainWrite()
@@ -229,13 +315,16 @@ public final class KeychainClaudeRotationRecoveryStore: ClaudeRotationRecoverySt
         accessMode: CredentialAccessMode
     ) throws -> [ClaudeRotationRecoveryRecord] {
         try validateCredentialAccess()
-        var query = baseQuery(account: nil, accessMode: accessMode)
-        query[kSecReturnData as String] = true
-        query[kSecReturnAttributes as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitAll
-        CredentialAccess.recordKeychainDataRead()
+        var query = ClaudeRotationRecoveryKeychainQuery.inventory(
+            service: service,
+            accessMode: accessMode
+        )
+        if let keychain {
+            query[kSecMatchSearchList as String] = [keychain]
+        }
+        CredentialAccess.recordKeychainMetadataRead()
         var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        let status = operations.copyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound { return [] }
         guard status == errSecSuccess else {
             throw CredentialStoreError.keychainError(status)
@@ -250,36 +339,71 @@ public final class KeychainClaudeRotationRecoveryStore: ClaudeRotationRecoverySt
             throw CredentialStoreError.decodeFailed(underlying: nil)
         }
 
-        // A single undecodable row must not sink the whole journal: the store's
-        // purpose is best-effort recovery of independent pending rotations, and
-        // every caller escalates a load failure to a terminal, account-wide
-        // repair state with no way to remove the offending record (deletion
-        // needs its decoded id). Skip poison rows so healthy ones still load.
-        return rows.compactMap { row -> ClaudeRotationRecoveryRecord? in
-            let account = row[kSecAttrAccount as String] as? String
-            guard let data = row[kSecValueData as String] as? Data else {
+        // Inventory contains no secret bytes. Read each exact persistent item
+        // separately so every credential query remains match-one. A malformed
+        // or concurrently removed row must not sink independent recovery work.
+        var records: [ClaudeRotationRecoveryRecord] = []
+        for row in rows {
+            guard let account = row[kSecAttrAccount as String] as? String,
+                  !account.isEmpty else {
                 AppLog.credentials.error(
-                    "Skipping rotation-recovery row with no value data (account \(account ?? "unknown", privacy: .public))."
+                    "Skipping rotation-recovery row with no account metadata."
                 )
-                return nil
+                continue
+            }
+            guard let persistentReference = row[kSecValuePersistentRef as String] as? Data,
+                  !persistentReference.isEmpty else {
+                AppLog.credentials.error(
+                    "Skipping rotation-recovery row with no persistent reference (account \(account, privacy: .public))."
+                )
+                continue
+            }
+
+            var readQuery = ClaudeRotationRecoveryKeychainQuery.pinnedRead(
+                service: service,
+                account: account,
+                persistentReference: persistentReference,
+                accessMode: accessMode
+            )
+            if let keychain {
+                readQuery[kSecMatchSearchList as String] = [keychain]
+            }
+            CredentialAccess.recordKeychainDataRead()
+            var dataResult: CFTypeRef?
+            let readStatus = operations.copyMatching(
+                readQuery as CFDictionary,
+                &dataResult
+            )
+            if readStatus == errSecItemNotFound {
+                // The item was deleted or replaced after inventory. A later
+                // load observes the replacement without broadening this read.
+                continue
+            }
+            guard readStatus == errSecSuccess else {
+                throw CredentialStoreError.keychainError(readStatus)
+            }
+            guard let data = dataResult as? Data else {
+                AppLog.credentials.error(
+                    "Skipping rotation-recovery row with no value data (account \(account, privacy: .public))."
+                )
+                continue
             }
             do {
                 let record = try decoder.decode(ClaudeRotationRecoveryRecord.self, from: data)
-                if let account, account != record.id.uuidString {
+                if account != record.id.uuidString {
                     AppLog.credentials.error(
                         "Skipping rotation-recovery row whose keychain account \(account, privacy: .public) does not match its record id."
                     )
-                    return nil
+                    continue
                 }
-                return record
+                records.append(record)
             } catch {
                 AppLog.credentials.error(
-                    "Skipping undecodable rotation-recovery row (account \(account ?? "unknown", privacy: .public)): \(error.localizedDescription, privacy: .public)"
+                    "Skipping undecodable rotation-recovery row (account \(account, privacy: .public)): \(error.localizedDescription, privacy: .public)"
                 )
-                return nil
             }
         }
-        .sorted { $0.createdAt < $1.createdAt }
+        return records.sorted { $0.createdAt < $1.createdAt }
     }
 
     public func delete(id: UUID, accessMode: CredentialAccessMode) throws {
@@ -305,6 +429,9 @@ public final class KeychainClaudeRotationRecoveryStore: ClaudeRotationRecoverySt
         ]
         if let account {
             query[kSecAttrAccount as String] = account
+        }
+        if let keychain {
+            query[kSecMatchSearchList as String] = [keychain]
         }
         return query
     }

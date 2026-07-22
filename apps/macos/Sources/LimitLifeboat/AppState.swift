@@ -4328,10 +4328,21 @@ final class AppState: ObservableObject {
                 watcherOwnsMutation = loginFollowUpTasks[.claude] != nil
             } catch {
                 recordClaudeKeychainFailure(error)
-                statusMessage = "Could not resume the Claude login watcher: \(error.localizedDescription)"
+                if isKeychainAccessDenied(error) {
+                    statusMessage = "The Claude credential changed again. Authorize the new item before linking it."
+                } else {
+                    pendingClaudeLoginCompletion = nil
+                    statusMessage = "Could not resume the Claude login watcher: \(error.localizedDescription)"
+                }
             }
-        case .authorizationRequired:
-            statusMessage = "The Claude credential changed again. Authorize the new item before linking it."
+        case .authorizationRequired(let source):
+            if source == .claudeCode {
+                statusMessage = "The Claude credential changed again. Authorize the new item before linking it."
+            } else {
+                pendingClaudeLoginCompletion = nil
+            }
+        case .failed:
+            pendingClaudeLoginCompletion = nil
         }
     }
 
@@ -5766,12 +5777,6 @@ final class AppState: ObservableObject {
         )
     }
 
-    private enum LoginCompletionPollResult {
-        case pending
-        case completed
-        case authorizationRequired
-    }
-
     private func watchForCompletedLogin(
         profileID: UUID,
         provider: Provider,
@@ -5823,10 +5828,24 @@ final class AppState: ObservableObject {
                         if provider == .claude {
                             self.recordClaudeKeychainFailure(error)
                         }
-                        workflowStatus = provider == .claude
+                        let authorizationRequired = provider == .claude
                             && self.isKeychainAccessDenied(error)
+                        workflowStatus = authorizationRequired
                             ? "authorization_required"
                             : "metadata_failed"
+                        if provider == .claude {
+                            if authorizationRequired {
+                                self.pendingClaudeLoginCompletion = PendingClaudeLoginCompletion(
+                                    profileID: profileID,
+                                    initialBaseline: initialBaseline,
+                                    activateAfterLogin: activateAfterLogin,
+                                    previousActiveID: previousActiveID
+                                )
+                                self.statusMessage = "Login finished. Authorize Keychain access once from the More menu to link it."
+                            } else {
+                                self.pendingClaudeLoginCompletion = nil
+                            }
+                        }
                         return
                     }
                     let observation: LiveCredentialObservation?
@@ -5906,6 +5925,7 @@ final class AppState: ObservableObject {
                                     self.statusMessage = "Login finished. Authorize Keychain access once from the More menu to link it."
                                 } else {
                                     workflowStatus = "read_failed"
+                                    self.pendingClaudeLoginCompletion = nil
                                     self.statusMessage = "Login finished, but its exact Keychain item could not be read safely: \(error.localizedDescription)"
                                 }
                                 return
@@ -5944,6 +5964,7 @@ final class AppState: ObservableObject {
                                     self.statusMessage = "Login finished. Authorize Keychain access once from the More menu to link it."
                                 } else {
                                     workflowStatus = "metadata_failed"
+                                    self.pendingClaudeLoginCompletion = nil
                                     self.statusMessage = "Login finished, but its exact Keychain item could not be verified safely: \(error.localizedDescription)"
                                 }
                                 return
@@ -5979,6 +6000,9 @@ final class AppState: ObservableObject {
                         previousActiveID: previousActiveID,
                         observation: observation
                     )
+                    guard LoginCompletionWatchDecision(outcome: result) == .stopPolling else {
+                        continue
+                    }
                     switch result {
                     case .pending:
                         continue
@@ -5988,19 +6012,33 @@ final class AppState: ObservableObject {
                             self.pendingClaudeLoginCompletion = nil
                         }
                         return
-                    case .authorizationRequired:
+                    case .authorizationRequired(let source):
                         workflowStatus = "authorization_required"
                         if provider == .claude {
-                            self.pendingClaudeLoginCompletion = PendingClaudeLoginCompletion(
-                                profileID: profileID,
-                                initialBaseline: initialBaseline,
-                                activateAfterLogin: activateAfterLogin,
-                                previousActiveID: previousActiveID
-                            )
+                            self.pendingClaudeLoginCompletion = result
+                                .retainsPendingClaudeLoginCompletion
+                                ? PendingClaudeLoginCompletion(
+                                    profileID: profileID,
+                                    initialBaseline: initialBaseline,
+                                    activateAfterLogin: activateAfterLogin,
+                                    previousActiveID: previousActiveID
+                                )
+                                : nil
                         }
-                        self.statusMessage = "Login finished. Authorize Keychain access once from the More menu to link it."
+                        if source == .claudeCode {
+                            self.statusMessage = "Login finished. Authorize Keychain access once from the More menu to link it."
+                        }
+                        return
+                    case .failed:
+                        workflowStatus = "failed"
+                        if provider == .claude {
+                            self.pendingClaudeLoginCompletion = nil
+                        }
                         return
                     }
+                }
+                if provider == .claude {
+                    self.pendingClaudeLoginCompletion = nil
                 }
             }
             self.logCredentialWorkflow(
@@ -6022,7 +6060,7 @@ final class AppState: ObservableObject {
         activateAfterLogin: Bool,
         previousActiveID: UUID?,
         observation suppliedObservation: LiveCredentialObservation? = nil
-    ) async -> LoginCompletionPollResult {
+    ) async -> LoginCompletionOutcome {
         let current: LiveCredentialObservation
         if let suppliedObservation {
             current = suppliedObservation
@@ -6033,12 +6071,19 @@ final class AppState: ObservableObject {
                     accessMode: .nonInteractive
                 )
             } catch {
-                if provider == .claude,
-                   error is ClaudeCodeCredentialsKeychainError,
-                   isKeychainAccessDenied(error) {
-                    recordClaudeKeychainFailure(error)
-                    return .authorizationRequired
+                if provider == .claude {
+                    if isKeychainAccessDenied(error) {
+                        if error is ClaudeCodeCredentialsKeychainError {
+                            recordClaudeKeychainFailure(error)
+                        }
+                        return .authorizationRequired(source: .claudeCode)
+                    }
+                    statusMessage = "Login finished, but its credentials could not be read safely: \(error.localizedDescription)"
+                    return .failed
                 }
+                // Codex writes auth.json non-atomically on some releases. A
+                // metadata change followed by a transient parse failure is
+                // still an unsettled login, so preserve the existing retry.
                 return .pending
             }
         }
@@ -6084,32 +6129,43 @@ final class AppState: ObservableObject {
                     details: deferredError.details
                 )
             }
-            return completion.completed ? .completed : .pending
+            switch completion.outcome {
+            case .pending:
+                return .pending
+            case .completed:
+                return .completed
+            case .authorizationRequired(let source):
+                return .authorizationRequired(source: source)
+            case .failed:
+                return .failed
+            }
         }
         do {
-            _ = try reconcileLiveCredentials(
+            let resolved = try reconcileLiveCredentials(
                 provider: provider,
                 origin: .login,
                 observation: current,
                 preferredLoginProfileID: profileID
             )
-            refreshStates[profileID] = .ok
+            guard let resolved else {
+                return .pending
+            }
+            refreshStates[resolved.id] = .ok
             if provider == .claude {
-                await reconcileClaudeRecoveryAfterLogin(profileID: profileID)
+                await reconcileClaudeRecoveryAfterLogin(profileID: resolved.id)
             }
             await CredentialAccess.nonInteractive { await refreshAll() }
-            return profiles.first(where: { $0.id == profileID })?.isActiveCLI == true
-                ? .completed
-                : .pending
+            return .completed
         } catch {
-            if provider == .claude,
-               error is ClaudeCodeCredentialsKeychainError,
-               isKeychainAccessDenied(error) {
-                recordClaudeKeychainFailure(error)
-                return .authorizationRequired
+            // The live provider item was already read into `current`; any
+            // authorization failure below comes from the app-owned snapshots
+            // or Claude recovery journal used by reconciliation.
+            if isKeychainAccessDenied(error) {
+                statusMessage = "Login finished, but saved login access requires authorization: \(error.localizedDescription)"
+                return .authorizationRequired(source: .savedAccount)
             }
             statusMessage = "Login finished, but the account could not be saved: \(error.localizedDescription)"
-            return .pending
+            return .failed
         }
     }
 
@@ -6122,7 +6178,7 @@ final class AppState: ObservableObject {
     }
 
     private struct NonActivatingLoginCompletion {
-        var completed: Bool
+        var outcome: LoginCompletionOutcome
         var deferredError: DeferredNonActivatingLoginError? = nil
     }
 
@@ -6141,22 +6197,32 @@ final class AppState: ObservableObject {
                         previousActiveID: previousActiveID
                     )
                 }
-                if completion.completed {
+                if completion.outcome == .completed {
                     await CredentialAccess.nonInteractive { await refreshAll() }
                 }
                 return completion
             } catch let error as ClaudeOAuthRefreshCoordinatorError {
+                let outcome = LoginCompletionOutcome(
+                    leaseAcquisitionError: error
+                )
                 refreshStates[profileID] = .rotationDeferred(
                     reason: error.localizedDescription
                 )
-                statusMessage = "Login was saved, but restoring the previous Claude account was deferred: \(error.localizedDescription)"
-                return NonActivatingLoginCompletion(completed: false)
+                statusMessage = outcome == .pending
+                    ? "Login completion is waiting for the Claude credential lock: \(error.localizedDescription)"
+                    : "Login finished, but the Claude credential lock is unavailable: \(error.localizedDescription)"
+                return NonActivatingLoginCompletion(outcome: outcome)
             } catch {
+                if isKeychainAccessDenied(error) {
+                    return NonActivatingLoginCompletion(
+                        outcome: .authorizationRequired(source: .savedAccount)
+                    )
+                }
                 refreshStates[profileID] = .credentialRepairRequired(
                     reason: error.localizedDescription
                 )
                 statusMessage = "Login was saved, but restoring the previous Claude account needs repair: \(error.localizedDescription)"
-                return NonActivatingLoginCompletion(completed: false)
+                return NonActivatingLoginCompletion(outcome: .failed)
             }
         }
         let effectiveCurrent: LiveCredentialObservation
@@ -6165,7 +6231,7 @@ final class AppState: ObservableObject {
                 refreshStates[profileID] = .rotationDeferred(
                     reason: "The completed Claude login no longer has a pinned Keychain generation."
                 )
-                return NonActivatingLoginCompletion(completed: false)
+                return NonActivatingLoginCompletion(outcome: .pending)
             }
             do {
                 // The watcher observation predates lock acquisition. Re-read
@@ -6175,12 +6241,23 @@ final class AppState: ObservableObject {
                     at: pinnedItem,
                     accessMode: .nonInteractive
                 )
-            } catch {
+            } catch ClaudeCodeCredentialsKeychainError.missingLiveItem {
                 refreshStates[profileID] = .rotationDeferred(
                     reason: "Claude changed the completed login before it could be restored safely."
                 )
                 statusMessage = "Login restoration deferred because Claude changed its Keychain generation."
-                return NonActivatingLoginCompletion(completed: false)
+                return NonActivatingLoginCompletion(outcome: .pending)
+            } catch {
+                recordClaudeKeychainFailure(error, item: pinnedItem)
+                if isKeychainAccessDenied(error) {
+                    return NonActivatingLoginCompletion(
+                        outcome: .authorizationRequired(source: .claudeCode)
+                    )
+                }
+                let reason = "The completed Claude login could not be read safely: \(error.localizedDescription)"
+                refreshStates[profileID] = .readFailed(reason: reason)
+                statusMessage = reason
+                return NonActivatingLoginCompletion(outcome: .failed)
             }
         } else {
             effectiveCurrent = current
@@ -6192,7 +6269,11 @@ final class AppState: ObservableObject {
             )
         } catch {
             statusMessage = "Login finished, but saved account credentials could not be inspected safely: \(error.localizedDescription)"
-            return NonActivatingLoginCompletion(completed: false)
+            return NonActivatingLoginCompletion(
+                outcome: isKeychainAccessDenied(error)
+                    ? .authorizationRequired(source: .savedAccount)
+                    : .failed
+            )
         }
         let resolved: AccountProfile?
         do {
@@ -6204,11 +6285,15 @@ final class AppState: ObservableObject {
             )
         } catch {
             statusMessage = "Login finished, but the account could not be saved: \(error.localizedDescription)"
-            return NonActivatingLoginCompletion(completed: false)
+            return NonActivatingLoginCompletion(
+                outcome: isKeychainAccessDenied(error)
+                    ? .authorizationRequired(source: .savedAccount)
+                    : .failed
+            )
         }
         // No stable identity yet — keep polling.
         guard let resolved else {
-            return NonActivatingLoginCompletion(completed: false)
+            return NonActivatingLoginCompletion(outcome: .pending)
         }
         refreshStates[resolved.id] = .ok
         if provider == .claude {
@@ -6309,12 +6394,18 @@ final class AppState: ObservableObject {
                 )
             } catch {
                 AppLog.credentials.error("Post-login reconcile failed for \(provider.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                statusMessage = "Login was saved, but the active \(provider.displayName) account could not be reconciled: \(error.localizedDescription)"
+                return NonActivatingLoginCompletion(
+                    outcome: isKeychainAccessDenied(error)
+                        ? .authorizationRequired(source: .savedAccount)
+                        : .failed
+                )
             }
             statusMessage = "Logged into \(resolved.label). Could not restore the previous account because \(previousRestoreFailureReason), so \(resolved.label) is now active."
             if provider != .claude {
                 await CredentialAccess.nonInteractive { await refreshAll() }
             }
-            return NonActivatingLoginCompletion(completed: true)
+            return NonActivatingLoginCompletion(outcome: .completed)
         }
 
         do {
@@ -6338,12 +6429,12 @@ final class AppState: ObservableObject {
             if provider != .claude {
                 await CredentialAccess.nonInteractive { await refreshAll() }
             }
-            return NonActivatingLoginCompletion(completed: true)
-        } catch {
+            return NonActivatingLoginCompletion(outcome: .completed)
+        } catch let restoreError {
             // Restore-back failed — the live session still belongs to the new
             // account. Reconcile to that reality so the app never claims an
             // active account that isn't live, then tell the user plainly.
-            AppLog.switching.error("Restore-back to account \(previous.id, privacy: .public) after a non-activating login failed: \(error.localizedDescription, privacy: .public)")
+            AppLog.switching.error("Restore-back to account \(previous.id, privacy: .public) after a non-activating login failed: \(restoreError.localizedDescription, privacy: .public)")
             do {
                 _ = try reconcileLiveCredentials(
                     provider: provider,
@@ -6352,19 +6443,25 @@ final class AppState: ObservableObject {
                     preferredLoginProfileID: profileID,
                     storedCredentialWorkflow: storedCredentialWorkflow
                 )
-            } catch {
-                AppLog.credentials.error("Post-login reconcile failed for \(provider.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            } catch let reconcileError {
+                AppLog.credentials.error("Post-login reconcile failed for \(provider.displayName, privacy: .public): \(reconcileError.localizedDescription, privacy: .public)")
+                statusMessage = "Login finished, but neither the previous nor new \(provider.displayName) account could be reconciled safely: \(reconcileError.localizedDescription)"
+                return NonActivatingLoginCompletion(
+                    outcome: isKeychainAccessDenied(reconcileError)
+                        ? .authorizationRequired(source: .savedAccount)
+                        : .failed
+                )
             }
             let deferredError = DeferredNonActivatingLoginError(
                 message: "Logged into \(resolved.label), but could not switch back to \(previous.label)",
-                details: "\(resolved.label) is now the active \(provider.displayName) account. \(error.localizedDescription)"
+                details: "\(resolved.label) is now the active \(provider.displayName) account. \(restoreError.localizedDescription)"
             )
             statusMessage = deferredError.details
             if provider != .claude {
                 await CredentialAccess.nonInteractive { await refreshAll() }
             }
             return NonActivatingLoginCompletion(
-                completed: true,
+                outcome: .completed,
                 deferredError: deferredError
             )
         }
