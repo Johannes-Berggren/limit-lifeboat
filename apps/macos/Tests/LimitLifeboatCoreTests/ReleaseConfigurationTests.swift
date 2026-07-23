@@ -90,6 +90,38 @@ final class ReleaseConfigurationTests: XCTestCase {
         XCTAssertTrue(packaging.contains("ThirdPartyLicenses/Sparkle.txt"))
     }
 
+    func testManuallyAssembledAppDoesNotUseGeneratedSwiftPMResourceAccessor() throws {
+        let appSources = macOSRoot.appendingPathComponent(
+            "Sources/LimitLifeboat",
+            isDirectory: true
+        )
+        guard let enumerator = FileManager.default.enumerator(
+            at: appSources,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
+            XCTFail("Could not enumerate the manually assembled app target")
+            return
+        }
+
+        var swiftSources: [URL] = []
+        for case let url as URL in enumerator where url.pathExtension == "swift" {
+            swiftSources.append(url)
+        }
+        XCTAssertFalse(swiftSources.isEmpty)
+
+        for sourceURL in swiftSources.sorted(by: { $0.path < $1.path }) {
+            let source = try String(contentsOf: sourceURL, encoding: .utf8)
+            XCTAssertNil(
+                source.range(
+                    of: #"\bBundle\s*\.\s*module\b"#,
+                    options: .regularExpression
+                ),
+                "\(sourceURL.lastPathComponent) uses the fatal generated resource accessor"
+            )
+        }
+    }
+
     func testReleaseGeneratesOneFullSignedUpdateWithoutDeltas() throws {
         let release = try contents("scripts/release.sh")
         XCTAssertTrue(release.contains("--maximum-versions 1"))

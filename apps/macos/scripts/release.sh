@@ -49,6 +49,9 @@ LICENSE_FILE="$REPO_ROOT/LICENSE"
 APP_LICENSE="$APP_DIR/Contents/Resources/LICENSE.txt"
 SPARKLE_LICENSE_FILE="$APP_ROOT/Packaging/Sparkle-LICENSE.txt"
 APP_SPARKLE_LICENSE="$APP_DIR/Contents/Resources/ThirdPartyLicenses/Sparkle.txt"
+PROVIDER_MARKS_SOURCE_DIR="$APP_ROOT/Sources/LimitLifeboat/Resources/ProviderMarks"
+RESOURCE_BUNDLE_NAME="LimitLifeboat_LimitLifeboat.bundle"
+APP_PROVIDER_MARKS="$APP_DIR/Contents/Resources/$RESOURCE_BUNDLE_NAME/ProviderMarks"
 SPARKLE_TOOLS="$APP_ROOT/.build/artifacts/sparkle/Sparkle/bin"
 GENERATE_APPCAST="$SPARKLE_TOOLS/generate_appcast"
 GENERATE_KEYS="$SPARKLE_TOOLS/generate_keys"
@@ -102,6 +105,21 @@ assert_release_entitlements() {
     || fail "Could not read entitlements from $plist"
   [[ "$actual_json" == "$expected_json" ]] \
     || fail "Release entitlements in $plist must contain only the Apple Events automation entitlement"
+}
+
+assert_provider_marks() {
+  local provider_marks_dir="$1"
+  local label="$2"
+  local provider_mark
+
+  for provider_mark in claude.pdf codex.pdf; do
+    [[ -s "$PROVIDER_MARKS_SOURCE_DIR/$provider_mark" ]] \
+      || fail "Source provider mark is missing or empty: $PROVIDER_MARKS_SOURCE_DIR/$provider_mark"
+    [[ -s "$provider_marks_dir/$provider_mark" ]] \
+      || fail "$label is missing nonempty ProviderMarks/$provider_mark"
+    cmp -s "$PROVIDER_MARKS_SOURCE_DIR/$provider_mark" "$provider_marks_dir/$provider_mark" \
+      || fail "$label ProviderMarks/$provider_mark does not match its source asset"
+  done
 }
 
 assert_developer_id_signature() {
@@ -259,6 +277,7 @@ cmp -s "$LICENSE_FILE" "$APP_LICENSE" \
   || fail "The app does not contain an exact copy of the repository license"
 cmp -s "$SPARKLE_LICENSE_FILE" "$APP_SPARKLE_LICENSE" \
   || fail "The app does not contain an exact copy of the Sparkle license notice"
+assert_provider_marks "$APP_PROVIDER_MARKS" "The packaged release app"
 [[ -d "$APP_FRAMEWORK" ]] || fail "The app does not contain Sparkle.framework"
 [[ ! -e "$APP_FRAMEWORK/Versions/B/XPCServices" ]] \
   || fail "The non-sandboxed app must not include Sparkle's unused XPC services"
@@ -362,6 +381,7 @@ MOUNTED_EXECUTABLE="$MOUNTED_APP/Contents/MacOS/$EXECUTABLE_NAME"
 MOUNTED_INFO="$MOUNTED_APP/Contents/Info.plist"
 MOUNTED_LICENSE="$MOUNTED_APP/Contents/Resources/LICENSE.txt"
 MOUNTED_SPARKLE_LICENSE="$MOUNTED_APP/Contents/Resources/ThirdPartyLicenses/Sparkle.txt"
+MOUNTED_PROVIDER_MARKS="$MOUNTED_APP/Contents/Resources/$RESOURCE_BUNDLE_NAME/ProviderMarks"
 MOUNTED_FRAMEWORK="$MOUNTED_APP/Contents/Frameworks/Sparkle.framework"
 MOUNTED_AUTOUPDATE="$MOUNTED_FRAMEWORK/Versions/B/Autoupdate"
 MOUNTED_UPDATER="$MOUNTED_FRAMEWORK/Versions/B/Updater.app"
@@ -383,6 +403,7 @@ cmp -s "$LICENSE_FILE" "$MOUNTED_LICENSE" \
   || fail "The app inside the DMG does not contain the repository license"
 cmp -s "$SPARKLE_LICENSE_FILE" "$MOUNTED_SPARKLE_LICENSE" \
   || fail "The app inside the DMG does not contain the Sparkle license notice"
+assert_provider_marks "$MOUNTED_PROVIDER_MARKS" "The app inside the DMG"
 [[ -d "$MOUNTED_FRAMEWORK" ]] || fail "The app inside the DMG does not contain Sparkle.framework"
 [[ ! -e "$MOUNTED_FRAMEWORK/Versions/B/XPCServices" ]] \
   || fail "The app inside the DMG contains unused Sparkle XPC services"

@@ -109,11 +109,7 @@ enum DS {
             return cached
         }
         let resourceName = provider == .claude ? "claude" : "codex"
-        guard let url = Bundle.module.url(
-            forResource: resourceName,
-            withExtension: "pdf",
-            subdirectory: "ProviderMarks"
-        ), let image = NSImage(contentsOf: url) else {
+        guard let image = ProviderMarkResourceResolver().image(named: resourceName) else {
             return nil
         }
         // Template = the menu bar tints it to its own foreground color and adapts

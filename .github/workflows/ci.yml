@@ -44,13 +44,132 @@ jobs:
       - name: Validate development isolation
         run: |
           set -euo pipefail
-          info="apps/macos/dist/Limit Lifeboat.app/Contents/Info.plist"
+          app="apps/macos/dist/Limit Lifeboat.app"
+          info="$app/Contents/Info.plist"
+          source_provider_marks="apps/macos/Sources/LimitLifeboat/Resources/ProviderMarks"
+          packaged_provider_marks="$app/Contents/Resources/LimitLifeboat_LimitLifeboat.bundle/ProviderMarks"
+
           test "$(plutil -extract CFBundleDisplayName raw -o - "$info")" = "Limit Lifeboat Dev"
           test "$(plutil -extract CFBundleIdentifier raw -o - "$info")" = "com.limitlifeboat.app.dev"
           test "$(plutil -extract LimitLifeboatAppVariant raw -o - "$info")" = "development"
           test "$(plutil -extract LimitLifeboatApplicationSupportDirectoryName raw -o - "$info")" = "LimitLifeboat-Dev"
           test "$(plutil -extract LimitLifeboatCredentialService raw -o - "$info")" = "com.limitlifeboat.app.dev.credentials"
           test "$(plutil -extract SUEnableAutomaticChecks raw -o - "$info")" = "false"
+          test "$(find "$packaged_provider_marks" -type f | wc -l | tr -d '[:space:]')" = "2"
+          for provider in claude codex; do
+            test -s "$source_provider_marks/$provider.pdf"
+            test -s "$packaged_provider_marks/$provider.pdf"
+            cmp -s \
+              "$source_provider_marks/$provider.pdf" \
+              "$packaged_provider_marks/$provider.pdf"
+          done
+      - name: Cold-launch packaged development app without build resource fallback
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="apps/macos/dist/Limit Lifeboat.app"
+          executable="$app/Contents/MacOS/LimitLifeboat"
+          build_directory="$(
+            swift build \
+              --package-path apps/macos \
+              --disable-keychain \
+              -c release \
+              --arch arm64 \
+              --show-bin-path
+          )"
+          build_resource_bundle="$build_directory/LimitLifeboat_LimitLifeboat.bundle"
+          hidden_resource_bundle="${build_resource_bundle}.ci-hidden"
+          isolated_root="$(mktemp -d "${RUNNER_TEMP}/limit-lifeboat-cold-launch.XXXXXX")"
+          launch_log="$isolated_root/launch.log"
+          app_pid=""
+
+          cleanup() {
+            local status=$?
+            trap - EXIT INT TERM
+            set +e
+
+            if [[ -n "$app_pid" ]] && kill -0 "$app_pid" 2>/dev/null; then
+              kill "$app_pid" 2>/dev/null
+              for _ in {1..50}; do
+                kill -0 "$app_pid" 2>/dev/null || break
+                sleep 0.1
+              done
+              if kill -0 "$app_pid" 2>/dev/null; then
+                kill -KILL "$app_pid" 2>/dev/null
+              fi
+            fi
+            if [[ -n "$app_pid" ]]; then
+              wait "$app_pid" 2>/dev/null
+            fi
+
+            if [[ -e "$hidden_resource_bundle" ]]; then
+              if [[ -e "$build_resource_bundle" ]]; then
+                echo "Refusing to overwrite a replacement build resource bundle." >&2
+                status=1
+              elif ! mv "$hidden_resource_bundle" "$build_resource_bundle"; then
+                echo "Could not restore the hidden build resource bundle." >&2
+                status=1
+              fi
+            fi
+
+            if (( status != 0 )) && [[ -s "$launch_log" ]]; then
+              echo "Packaged app launch output:" >&2
+              sed -n '1,200p' "$launch_log" >&2
+            fi
+            rm -rf "$isolated_root"
+            exit "$status"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          test -x "$executable"
+          test -d "$build_resource_bundle"
+          test ! -e "$hidden_resource_bundle"
+          mkdir -p \
+            "$isolated_root/home/Library/Application Support" \
+            "$isolated_root/home/Library/Preferences" \
+            "$isolated_root/tmp"
+          mv "$build_resource_bundle" "$hidden_resource_bundle"
+
+          env \
+            CFFIXED_USER_HOME="$isolated_root/home" \
+            TMPDIR="$isolated_root/tmp" \
+            "$executable" >"$launch_log" 2>&1 &
+          app_pid=$!
+
+          for _ in {1..50}; do
+            sleep 0.1
+            if ! kill -0 "$app_pid" 2>/dev/null; then
+              set +e
+              wait "$app_pid"
+              launch_status=$?
+              set -e
+              app_pid=""
+              echo "Packaged development app exited during initialization (status $launch_status)." >&2
+              exit 1
+            fi
+          done
+
+          kill "$app_pid"
+          for _ in {1..50}; do
+            kill -0 "$app_pid" 2>/dev/null || break
+            sleep 0.1
+          done
+          if kill -0 "$app_pid" 2>/dev/null; then
+            echo "Packaged development app did not terminate after SIGTERM." >&2
+            exit 1
+          fi
+
+          set +e
+          wait "$app_pid"
+          termination_status=$?
+          set -e
+          app_pid=""
+          if [[ "$termination_status" -ne 0 && "$termination_status" -ne 143 ]]; then
+            echo "Packaged development app terminated with unexpected status $termination_status." >&2
+            exit 1
+          fi
       - name: Package distribution arm64 app
         env:
           APP_VARIANT: distribution
@@ -65,6 +184,8 @@ jobs:
           bundled_license="$app/Contents/Resources/LICENSE.txt"
           sparkle_license="$app/Contents/Resources/ThirdPartyLicenses/Sparkle.txt"
           sparkle_framework="$app/Contents/Frameworks/Sparkle.framework"
+          source_provider_marks="apps/macos/Sources/LimitLifeboat/Resources/ProviderMarks"
+          packaged_provider_marks="$app/Contents/Resources/LimitLifeboat_LimitLifeboat.bundle/ProviderMarks"
           source_entitlements="apps/macos/Packaging/LimitLifeboat.entitlements"
           signed_entitlements="$(mktemp)"
           trap 'rm -f "$signed_entitlements"' EXIT
@@ -95,6 +216,14 @@ jobs:
             apps/macos/Sources/LimitLifeboat/DistributionIdentity.swift
           cmp -s LICENSE "$bundled_license"
           cmp -s apps/macos/Packaging/Sparkle-LICENSE.txt "$sparkle_license"
+          test "$(find "$packaged_provider_marks" -type f | wc -l | tr -d '[:space:]')" = "2"
+          for provider in claude codex; do
+            test -s "$source_provider_marks/$provider.pdf"
+            test -s "$packaged_provider_marks/$provider.pdf"
+            cmp -s \
+              "$source_provider_marks/$provider.pdf" \
+              "$packaged_provider_marks/$provider.pdf"
+          done
           test -d "$sparkle_framework"
           test ! -e "$sparkle_framework/Versions/B/XPCServices"
           test ! -e "$sparkle_framework/XPCServices"
