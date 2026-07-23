@@ -268,6 +268,112 @@ final class SwitchAdvisorTests: XCTestCase {
         XCTAssertEqual(advice.bestCandidateLabel, "Claude B")
     }
 
+    // MARK: - Priority ordering
+
+    func testHintPrefersHigherPriorityDespiteLowerHeadroom() {
+        let active = candidate(label: "Claude A", isActiveCLI: true, snapshot: freshSnapshot(usedPercent: 85))
+        let preferred = candidate(label: "Claude B", snapshot: freshSnapshot(usedPercent: 60), priorityRank: 1)
+        let roomier = candidate(label: "Claude C", snapshot: freshSnapshot(usedPercent: 10), priorityRank: 2)
+
+        let advice = advisor.advise(candidates: [active, preferred, roomier], now: now)
+
+        XCTAssertEqual(advice.bestCandidateID, preferred.profileID)
+        XCTAssertFalse(advice.shouldAutoSwitch)
+    }
+
+    func testDepletedActiveFallsThroughToLowerPriorityWhenGateFails() {
+        // The preferred target's 25% headroom misses the 30% floor; the
+        // depleted active must not stay stuck on it when the next account in
+        // priority order qualifies.
+        let active = candidate(label: "Claude A", isActiveCLI: true, snapshot: freshSnapshot(usedPercent: 100))
+        let preferred = candidate(label: "Claude B", snapshot: freshSnapshot(usedPercent: 75), priorityRank: 1)
+        let fallback = candidate(label: "Claude C", snapshot: freshSnapshot(usedPercent: 15), priorityRank: 2)
+
+        let advice = advisor.advise(candidates: [active, preferred, fallback], now: now)
+
+        XCTAssertEqual(advice.bestCandidateID, fallback.profileID)
+        XCTAssertTrue(advice.shouldAutoSwitch)
+        XCTAssertFalse(advice.isRebalance)
+    }
+
+    func testDepletedActiveHintsHighestPriorityWhenNoTargetPassesGate() {
+        let active = candidate(label: "Claude A", isActiveCLI: true, snapshot: freshSnapshot(usedPercent: 100))
+        let preferred = candidate(label: "Claude B", snapshot: freshSnapshot(usedPercent: 75), priorityRank: 1)
+        let other = candidate(label: "Claude C", snapshot: freshSnapshot(usedPercent: 76), priorityRank: 2)
+
+        let advice = advisor.advise(candidates: [active, preferred, other], now: now)
+
+        XCTAssertEqual(advice.bestCandidateID, preferred.profileID)
+        XCTAssertFalse(advice.shouldAutoSwitch)
+    }
+
+    func testRebalancesToRecoveredHigherPriorityWhileActiveIsHealthy() {
+        let active = candidate(label: "Claude B", isActiveCLI: true, snapshot: freshSnapshot(usedPercent: 40), priorityRank: 1)
+        let preferred = candidate(
+            label: "Claude A",
+            snapshot: freshSnapshot(usedPercent: 92, resetDate: now.addingTimeInterval(-600)),
+            priorityRank: 0
+        )
+
+        let advice = advisor.advise(candidates: [active, preferred], now: now)
+
+        XCTAssertEqual(advice.bestCandidateID, preferred.profileID)
+        XCTAssertTrue(advice.shouldAutoSwitch)
+        XCTAssertTrue(advice.isRebalance)
+        XCTAssertEqual(advice.reason, "Claude A is higher priority and its limit window has reset")
+    }
+
+    func testRebalanceRequiresTheStricterRecoveryBar() {
+        let active = candidate(label: "Claude B", isActiveCLI: true, snapshot: freshSnapshot(usedPercent: 40), priorityRank: 1)
+        let belowBar = candidate(label: "Claude A", snapshot: freshSnapshot(usedPercent: 60), priorityRank: 0)
+
+        let hint = advisor.advise(candidates: [active, belowBar], now: now)
+
+        // 40% headroom misses the 50% rebalance bar: passive hint only.
+        XCTAssertEqual(hint.bestCandidateID, belowBar.profileID)
+        XCTAssertFalse(hint.shouldAutoSwitch)
+
+        let atBar = candidate(label: "Claude A", snapshot: freshSnapshot(usedPercent: 50), priorityRank: 0)
+        let rebalance = advisor.advise(candidates: [active, atBar], now: now)
+
+        XCTAssertEqual(rebalance.bestCandidateID, atBar.profileID)
+        XCTAssertTrue(rebalance.shouldAutoSwitch)
+        XCTAssertTrue(rebalance.isRebalance)
+    }
+
+    func testNoRebalanceTowardLowerPriority() {
+        // A recovered account below the active one in priority is never an
+        // automatic target while the active account still has quota.
+        let active = candidate(label: "Claude A", isActiveCLI: true, snapshot: freshSnapshot(usedPercent: 40), priorityRank: 0)
+        let lower = candidate(
+            label: "Claude B",
+            snapshot: freshSnapshot(usedPercent: 92, resetDate: now.addingTimeInterval(-600)),
+            priorityRank: 1
+        )
+
+        let advice = advisor.advise(candidates: [active, lower], now: now)
+
+        XCTAssertEqual(advice.bestCandidateID, lower.profileID)
+        XCTAssertFalse(advice.shouldAutoSwitch)
+        XCTAssertFalse(advice.isRebalance)
+    }
+
+    func testRebalanceRequiresAutomaticEligibility() {
+        let active = candidate(label: "Claude B", isActiveCLI: true, snapshot: freshSnapshot(usedPercent: 40), priorityRank: 1)
+        let manualOnly = candidate(
+            label: "Claude A",
+            manualSwitchEligibility: .eligible,
+            automaticSwitchEligibility: .blocked(reason: "Rotation required"),
+            snapshot: freshSnapshot(usedPercent: 92, resetDate: now.addingTimeInterval(-600)),
+            priorityRank: 0
+        )
+
+        let advice = advisor.advise(candidates: [active, manualOnly], now: now)
+
+        XCTAssertEqual(advice.bestCandidateID, manualOnly.profileID)
+        XCTAssertFalse(advice.shouldAutoSwitch)
+    }
+
     // MARK: - Fixtures
 
     private func depletedActive() -> SwitchCandidate {
@@ -279,7 +385,8 @@ final class SwitchAdvisorTests: XCTestCase {
         isActiveCLI: Bool = false,
         manualSwitchEligibility: AccountSwitchEligibility = .eligible,
         automaticSwitchEligibility: AccountSwitchEligibility? = nil,
-        snapshot: UsageSnapshot?
+        snapshot: UsageSnapshot?,
+        priorityRank: Int = 0
     ) -> SwitchCandidate {
         SwitchCandidate(
             profileID: UUID(),
@@ -287,7 +394,8 @@ final class SwitchAdvisorTests: XCTestCase {
             isActiveCLI: isActiveCLI,
             manualSwitchEligibility: manualSwitchEligibility,
             automaticSwitchEligibility: automaticSwitchEligibility ?? manualSwitchEligibility,
-            snapshot: snapshot
+            snapshot: snapshot,
+            priorityRank: priorityRank
         )
     }
 

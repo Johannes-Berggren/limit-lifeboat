@@ -280,6 +280,10 @@ struct MenuRootView: View {
                         estimates: state.burnRateEstimates[profile.id] ?? [:],
                         adviceReason: advisedID == profile.id ? state.switchAdvice[provider]?.reason : nil,
                         showOrganizationName: settings.showOrganizationNames,
+                        // Rank comes from repository order (providerProfiles),
+                        // not the active-first display order of this loop.
+                        priorityIndex: providerProfiles.firstIndex(where: { $0.id == profile.id }) ?? 0,
+                        priorityCount: providerProfiles.count,
                         isExpanded: expansionBinding(for: profile),
                         historyRecords: { state.historyRecords(for: profile) },
                         switchCLI: {
@@ -293,6 +297,8 @@ struct MenuRootView: View {
                         setAutoUseCodexResets: {
                             state.setAutoUseCodexRateLimitResets(for: profile.id, enabled: $0)
                         },
+                        movePriorityUp: { state.moveProfilePriority(profile.id, up: true) },
+                        movePriorityDown: { state.moveProfilePriority(profile.id, up: false) },
                         rename: { state.renameProfile(profile.id, to: $0) },
                         remove: { state.removeProfile(profile.id) },
                         retry: { state.retryRefresh(for: profile) },
@@ -418,6 +424,11 @@ struct AccountRowView: View {
     /// Non-nil exactly when this account is the advised switch target.
     var adviceReason: String? = nil
     var showOrganizationName: Bool = true
+    /// Position in the provider's switch-priority order (0 = switched to
+    /// first) and the provider's account count; the badge and reorder actions
+    /// only appear when there is more than one account to order.
+    var priorityIndex: Int = 0
+    var priorityCount: Int = 1
     @Binding var isExpanded: Bool
     let historyRecords: () -> [UsageHistoryRecord]
     let switchCLI: () -> Void
@@ -429,6 +440,8 @@ struct AccountRowView: View {
     let captureCLI: () -> Void
     var useCodexReset: () -> Void = {}
     var setAutoUseCodexResets: (Bool) -> Void = { _ in }
+    var movePriorityUp: () -> Void = {}
+    var movePriorityDown: () -> Void = {}
     let rename: (String) -> Void
     let remove: () -> Void
     var retry: () -> Void = {}
@@ -530,6 +543,11 @@ struct AccountRowView: View {
                         .help("This account is the current terminal login")
                 }
 
+                if priorityCount > 1 {
+                    Badge(text: "Priority \(priorityIndex + 1)", color: .secondary)
+                        .help("Automatic switching prefers lower priority numbers; priority \(priorityCount) is used last.")
+                }
+
                 if let billingBadge = presentation.billingBadge {
                     Button {
                         showsBillingDetails = true
@@ -628,6 +646,13 @@ struct AccountRowView: View {
             Divider()
             Button("Usage History…") { showsHistory = true }
             Button("Billing Details…") { showsBillingDetails = true }
+            if priorityCount > 1 {
+                Divider()
+                Button("Move Up in Priority", systemImage: "arrow.up") { movePriorityUp() }
+                    .disabled(priorityIndex == 0)
+                Button("Move Down in Priority", systemImage: "arrow.down") { movePriorityDown() }
+                    .disabled(priorityIndex == priorityCount - 1)
+            }
             Divider()
             Button("Rename…") {
                 renameText = profile.label
