@@ -105,6 +105,16 @@ final class AppState: ObservableObject {
         id: UUID,
         task: Task<RetryRefreshResult, Never>
     )] = [:]
+    /// Backoff ledger for automatic recovery of inactive Claude accounts whose
+    /// scheduled read was deferred pending rotation. Cleared on a successful
+    /// snapshot or an explicit user Retry, which re-arms the next episode.
+    private var scheduledClaudeRecoveryLedger:
+        [UUID: ScheduledRotationRecoveryPolicy.AttemptRecord] = [:]
+    /// Profiles the scheduled poll queued for automatic recovery. Drained by
+    /// `refreshAll` only after the provider gate is released — an inline
+    /// recovery would deadlock on the gate the poll itself holds.
+    private var pendingScheduledClaudeRecoveries: [UUID] = []
+    private let scheduledRotationRecoveryPolicy = ScheduledRotationRecoveryPolicy()
     /// A single read is enough when the provider-owned state has not changed
     /// since the last accepted observation. Only a newly observed key is
     /// followed by the delayed stability-confirmation read.
@@ -451,6 +461,7 @@ final class AppState: ObservableObject {
         }
         await refreshClaudeUsage()
         finishCredentialMutation(for: .claude, owner: claudeMutation)
+        await drainScheduledClaudeRecoveries()
 
         scheduledCredentialReadsInProgress.remove(.codex)
         guard let codexMutation = beginCredentialMutation(for: .codex) else {
@@ -839,6 +850,7 @@ final class AppState: ObservableObject {
                 }
                 applySnapshot(snapshot, for: profile)
                 clearUsagePaused(for: profile.id)
+                scheduledClaudeRecoveryLedger[profile.id] = nil
                 recordClaudeCredentialOutcome(.success, for: profile, codePath: "background")
                 await enrichAccountInfoIfMissing(
                     for: profile,
@@ -885,7 +897,48 @@ final class AppState: ObservableObject {
                     )
                 } else {
                     applyClaudeRefreshState(outcome.state, for: profile)
+                    if scheduledRotationRecoveryPolicy.shouldAttempt(
+                        after: fetchError,
+                        isActiveCLI: profile.isActiveCLI,
+                        accountIsLiveElsewhere: liveElsewhere,
+                        previous: scheduledClaudeRecoveryLedger[profile.id],
+                        now: Date()
+                    ) {
+                        pendingScheduledClaudeRecoveries.append(profile.id)
+                    }
                 }
+            }
+        }
+    }
+
+    /// Runs at most one queued automatic recovery per eligible profile, after
+    /// the scheduled read has released the provider gate (an inline recovery
+    /// would deadlock on the gate `refreshAll` holds). Reuses the Retry
+    /// workflow — same lease, journal, and sibling reconciliation — with the
+    /// scheduled-recovery intent; a concurrent user click coalesces onto the
+    /// same profile flight.
+    private func drainScheduledClaudeRecoveries() async {
+        let candidates = pendingScheduledClaudeRecoveries
+        pendingScheduledClaudeRecoveries = []
+        for profileID in candidates {
+            // Re-resolve: a switch while this recovery was queued may have
+            // made the profile the live login, which unattended work never
+            // rotates.
+            guard let profile = profiles.first(where: { $0.id == profileID }),
+                  !profile.isActiveCLI else {
+                continue
+            }
+            let attemptedAt = Date()
+            let result = await retryRefresh(profileID: profileID, source: .scheduledRecovery)
+            switch result {
+            case .completed, .noLongerAvailable:
+                scheduledClaudeRecoveryLedger[profileID] = nil
+            case .needsLogin, .authorizationRequired, .deferred, .failed:
+                let failures = (scheduledClaudeRecoveryLedger[profileID]?.consecutiveFailures ?? 0) + 1
+                scheduledClaudeRecoveryLedger[profileID] = .init(
+                    lastAttempt: attemptedAt,
+                    consecutiveFailures: failures
+                )
             }
         }
     }
@@ -4934,6 +4987,24 @@ final class AppState: ObservableObject {
     private enum RetryRefreshSource: Equatable {
         case row
         case notification
+        /// Policy-gated automatic recovery of an inactive Claude account,
+        /// queued by the scheduled poll. Same workflow as a user Retry, but
+        /// with the read-only-for-active rotation intent and no status text.
+        case scheduledRecovery
+
+        /// Diagnostics naming: rows and notifications are explicit user
+        /// intents; scheduled recovery is the unattended variant.
+        var credentialCodePath: String {
+            self == .scheduledRecovery ? "scheduledRecovery" : "userRetry"
+        }
+
+        var workflowOrigin: String {
+            switch self {
+            case .row: return "row"
+            case .notification: return "notification"
+            case .scheduledRecovery: return "scheduled_recovery"
+            }
+        }
     }
 
     private enum RetryRefreshResult: Sendable {
@@ -4987,6 +5058,11 @@ final class AppState: ObservableObject {
         guard var profile = profiles.first(where: { $0.id == profileID }) else {
             return .noLongerAvailable
         }
+        if source == .row {
+            // An explicit user Retry re-arms automatic recovery for this row
+            // even if this attempt fails again.
+            scheduledClaudeRecoveryLedger[profileID] = nil
+        }
         if profile.provider == .claude,
            !validateClaudeNativeConfiguration() {
             return .deferred(
@@ -5002,11 +5078,18 @@ final class AppState: ObservableObject {
         // notification clicks and avoids carrying a stale profile value.
         let provider = profile.provider
         var mutationOwner = beginCredentialMutation(for: provider)
+        // An automatic recovery never contends with a queued user action: if
+        // the provider gate is busy, yield now and let a later cycle retry.
+        if mutationOwner == nil, source == .scheduledRecovery {
+            return .deferred(
+                reason: "Another \(provider.displayName) credential operation is in progress."
+            )
+        }
         while mutationOwner == nil {
             if Task.isCancelled { return .deferred(reason: "Refresh was cancelled.") }
             try? await Task.sleep(nanoseconds: 100_000_000)
             switch source {
-            case .row:
+            case .row, .scheduledRecovery:
                 guard let current = profiles.first(where: { $0.id == profileID }) else {
                     return .noLongerAvailable
                 }
@@ -5059,7 +5142,12 @@ final class AppState: ObservableObject {
              (.row, .readFailed),
              (.row, .rotationDeferred),
              (.row, .usagePaused),
-             (.row, .credentialRepairRequired):
+             (.row, .credentialRepairRequired),
+             // Deliberately not `.readFailed`: automatic recovery heals only
+             // the rotation deferrals its queueing policy admits.
+             (.scheduledRecovery, .rotationDeferred),
+             (.scheduledRecovery, .usagePaused),
+             (.scheduledRecovery, .credentialRepairRequired):
             break
         default:
             return .noLongerAvailable
@@ -5114,7 +5202,7 @@ final class AppState: ObservableObject {
                 do {
                     try await claudeRefreshCoordinator.withLease { _ in
                         await CredentialAccess.nonInteractive {
-                            await retryRefreshInteractively(for: profile)
+                            await retryRefreshInteractively(for: profile, source: source)
                         }
                     }
                 } catch let error as ClaudeOAuthRefreshCoordinatorError {
@@ -5124,18 +5212,22 @@ final class AppState: ObservableObject {
                     recordClaudeCredentialOutcome(
                         Self.credentialOutcome(for: .rotationDeferred(error)),
                         for: profile,
-                        codePath: "userRetry"
+                        codePath: source.credentialCodePath
                     )
-                    statusMessage = "Retry deferred: \(error.localizedDescription)"
+                    if source != .scheduledRecovery {
+                        statusMessage = "Retry deferred: \(error.localizedDescription)"
+                    }
                 } catch {
                     refreshStates[profile.id] = .rotationDeferred(
                         reason: error.localizedDescription
                     )
-                    statusMessage = "Retry deferred: \(error.localizedDescription)"
+                    if source != .scheduledRecovery {
+                        statusMessage = "Retry deferred: \(error.localizedDescription)"
+                    }
                 }
             } else {
                 await CredentialAccess.nonInteractive {
-                    await retryRefreshInteractively(for: profile)
+                    await retryRefreshInteractively(for: profile, source: source)
                 }
             }
             switch refreshStates[profile.id] {
@@ -5175,7 +5267,7 @@ final class AppState: ObservableObject {
         logCredentialWorkflow(
             workflow: "usage_retry",
             provider: profile.provider,
-            origin: source == .row ? "row" : "notification",
+            origin: source.workflowOrigin,
             access: "noninteractive",
             status: workflowStatus,
             counts: counter.snapshot
@@ -5185,7 +5277,10 @@ final class AppState: ObservableObject {
         return result
     }
 
-    private func retryRefreshInteractively(for profile: AccountProfile) async {
+    private func retryRefreshInteractively(
+        for profile: AccountProfile,
+        source: RetryRefreshSource
+    ) async {
         // A user Retry can legitimately wait behind a scheduled refresh. It
         // owns the visible flag only when the flag is not already set by the
         // outer operation; never discard the queued explicit intent.
@@ -5272,7 +5367,9 @@ final class AppState: ObservableObject {
                     for: profile,
                     isActiveCLI: profile.isActiveCLI,
                     accountIsLiveElsewhere: liveElsewhere,
-                    rotationIntent: .userRetry,
+                    rotationIntent: source == .scheduledRecovery
+                        ? .scheduledRecovery
+                        : .userRetry,
                     additionalRecoveryDestinations: additionalDestinations,
                     liveCredentialReadPolicy: profile.isActiveCLI
                         ? .preloaded(retryLiveRecord)
@@ -5311,7 +5408,12 @@ final class AppState: ObservableObject {
                 }
                 applySnapshot(snapshot, for: profile)
                 clearUsagePaused(for: profile.id)
-                recordClaudeCredentialOutcome(.success, for: profile, codePath: "userRetry")
+                scheduledClaudeRecoveryLedger[profile.id] = nil
+                recordClaudeCredentialOutcome(
+                    .success,
+                    for: profile,
+                    codePath: source.credentialCodePath
+                )
                 await enrichAccountInfoIfMissing(
                     for: profile,
                     accountIsLiveElsewhere: liveElsewhere,
@@ -5332,7 +5434,7 @@ final class AppState: ObservableObject {
                 recordClaudeCredentialOutcome(
                     Self.credentialOutcome(for: fetchError),
                     for: profile,
-                    codePath: "userRetry"
+                    codePath: source.credentialCodePath
                 )
                 if case .credentialRepairRequired = fetchError {
                     // Sibling propagation can be the incomplete owner even

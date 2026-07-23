@@ -3732,6 +3732,185 @@ final class ClaudeAccountUsageServiceTests: XCTestCase {
         }
     }
 
+    // MARK: - Scheduled recovery
+
+    func testScheduledRecoveryRotatesAndPersistsExpiredInactiveCredential() async throws {
+        let store = FakeCredentialProvider()
+        store.stored[profile.id] = makeCredentials(
+            accessToken: "stale",
+            refreshToken: "refresh-1",
+            expiresAt: now.addingTimeInterval(-60)
+        )
+        let http = ScriptedHTTPClient(responses: [
+            (refreshJSON(accessToken: "fresh"), 200),
+            (usageJSON, 200)
+        ])
+
+        let service = makeService(http: http, credentials: store)
+        _ = try await service.fetchSnapshot(
+            for: profile,
+            isActiveCLI: false,
+            now: now,
+            accessMode: .nonInteractive,
+            rotationIntent: .scheduledRecovery
+        )
+
+        XCTAssertEqual(http.requests.count, 2)
+        XCTAssertEqual(http.requests[0].url, ClaudeOAuthConstants.tokenEndpoint)
+        XCTAssertEqual(http.requests[1].value(forHTTPHeaderField: "Authorization"), "Bearer fresh")
+        XCTAssertEqual(store.stored[profile.id]?.accessToken, "fresh")
+        XCTAssertNil(store.live, "An inactive profile's recovery must not touch the live keychain item")
+    }
+
+    /// The service downgrades scheduled recovery to read-only for the active
+    /// account, so even a caller bug cannot rotate the live chain unattended.
+    func testScheduledRecoveryNeverRotatesActiveCredential() async {
+        let store = FakeCredentialProvider()
+        let stale = makeCredentials(
+            accessToken: "stale",
+            refreshToken: "must-not-be-spent",
+            expiresAt: now.addingTimeInterval(-60)
+        )
+        store.live = stale
+        store.stored[profile.id] = stale
+        let http = ScriptedHTTPClient(responses: [])
+
+        do {
+            _ = try await makeService(http: http, credentials: store).fetchSnapshot(
+                for: profile,
+                isActiveCLI: true,
+                now: now,
+                accessMode: .nonInteractive,
+                rotationIntent: .scheduledRecovery
+            )
+            XCTFail("Expected scheduled recovery to defer the active chain")
+        } catch let error as ClaudeAccountUsageFetchError {
+            guard case .interactiveRefreshRequired = error else {
+                return XCTFail("Expected interactiveRefreshRequired, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error \(error)")
+        }
+
+        XCTAssertTrue(http.requests.isEmpty)
+        XCTAssertEqual(store.live?.refreshToken, "must-not-be-spent")
+        XCTAssertEqual(store.liveReplaceCount, 0)
+        XCTAssertEqual(store.storedMutationCount, 0)
+    }
+
+    func testScheduledRecoveryNeverRotatesSharedAccountSibling() async {
+        let store = FakeCredentialProvider()
+        store.stored[profile.id] = makeCredentials(
+            accessToken: "stale",
+            refreshToken: "refresh-1",
+            expiresAt: now.addingTimeInterval(-60)
+        )
+        let http = ScriptedHTTPClient(responses: [])
+
+        do {
+            _ = try await makeService(http: http, credentials: store).fetchSnapshot(
+                for: profile,
+                isActiveCLI: false,
+                accountIsLiveElsewhere: true,
+                now: now,
+                accessMode: .nonInteractive,
+                rotationIntent: .scheduledRecovery
+            )
+            XCTFail("Expected the shared chain to refuse scheduled recovery")
+        } catch let error as ClaudeAccountUsageFetchError {
+            guard case .accountActiveElsewhere = error else {
+                return XCTFail("Expected accountActiveElsewhere, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error \(error)")
+        }
+
+        XCTAssertTrue(http.requests.isEmpty)
+        XCTAssertEqual(store.stored[profile.id]?.refreshToken, "refresh-1")
+    }
+
+    func testScheduledRecoveryUnauthorizedTriggersExactlyOneForcedRefresh() async throws {
+        let store = FakeCredentialProvider()
+        store.stored[profile.id] = makeCredentials(
+            accessToken: "revoked",
+            refreshToken: "refresh-1",
+            expiresAt: now.addingTimeInterval(3600)
+        )
+        let http = ScriptedHTTPClient(responses: [
+            (Data("{}".utf8), 401),
+            (refreshJSON(accessToken: "fresh"), 200),
+            (usageJSON, 200)
+        ])
+
+        let service = makeService(http: http, credentials: store)
+        _ = try await service.fetchSnapshot(
+            for: profile,
+            isActiveCLI: false,
+            now: now,
+            accessMode: .nonInteractive,
+            rotationIntent: .scheduledRecovery
+        )
+
+        XCTAssertEqual(http.requests.count, 3)
+        XCTAssertEqual(http.requests[1].url, ClaudeOAuthConstants.tokenEndpoint)
+        XCTAssertEqual(http.requests[2].value(forHTTPHeaderField: "Authorization"), "Bearer fresh")
+    }
+
+    func testScheduledRecoveryReconcilesPendingSiblingWithoutTokenSpend() async throws {
+        let store = FakeCredentialProvider()
+        let fresh = makeCredentials(
+            accessToken: "fresh",
+            refreshToken: "refresh-2",
+            expiresAt: now.addingTimeInterval(3_600),
+            additionalFields: ["ownerMarker": "initiator"]
+        )
+        store.stored[profile.id] = fresh
+        let siblingID = UUID()
+        store.stored[siblingID] = makeCredentials(
+            accessToken: "sibling-stale",
+            refreshToken: "refresh-1",
+            expiresAt: now.addingTimeInterval(600),
+            additionalFields: ["ownerMarker": "sibling"]
+        )
+        let recoveryStore = FakeClaudeRotationRecoveryStore()
+        try recoveryStore.save(
+            ClaudeRotationRecoveryRecord(
+                createdAt: now,
+                staleChainFingerprint: ClaudeRefreshChainFingerprint.make(
+                    refreshToken: "refresh-1"
+                )!,
+                freshChainFingerprint: ClaudeRefreshChainFingerprint.make(
+                    credentials: fresh
+                ),
+                oauthJSON: fresh.rawClaudeAiOauth,
+                pendingDestinations: [.storedProfile(siblingID)]
+            ),
+            accessMode: .nonInteractive
+        )
+        let http = ScriptedHTTPClient(responses: [(usageJSON, 200)])
+
+        _ = try await makeService(
+            http: http,
+            credentials: store,
+            recoveryStore: recoveryStore
+        ).fetchSnapshot(
+            for: profile,
+            isActiveCLI: false,
+            now: now,
+            accessMode: .nonInteractive,
+            rotationIntent: .scheduledRecovery
+        )
+
+        XCTAssertEqual(store.stored[siblingID]?.accessToken, "fresh")
+        XCTAssertEqual(store.stored[siblingID]?.refreshToken, "refresh-2")
+        XCTAssertTrue(recoveryStore.records.isEmpty)
+        XCTAssertEqual(
+            http.requests.filter { $0.url == ClaudeOAuthConstants.tokenEndpoint }.count,
+            0,
+            "Journal reconciliation must not consume another refresh token"
+        )
+    }
+
     // MARK: - Fixtures
 
     private let profile = AccountProfile(provider: .claude, label: "Claude")
