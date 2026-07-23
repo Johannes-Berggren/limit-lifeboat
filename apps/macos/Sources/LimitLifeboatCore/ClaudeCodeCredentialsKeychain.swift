@@ -8,6 +8,8 @@ public enum ClaudeCodeCredentialsKeychainError: Error, LocalizedError {
     case malformedItemMetadata(String)
     case malformedCredentialJSON(String)
     case itemIdentityMismatch
+    case unsupportedSecurityToolAccess(String)
+    case securityToolError(ClaudeSecurityToolCredentialError)
     case keychainError(OSStatus)
 
     public var errorDescription: String? {
@@ -27,6 +29,10 @@ public enum ClaudeCodeCredentialsKeychainError: Error, LocalizedError {
             return "The Claude Code credential item contains malformed JSON (\(detail)). No changes were made. Recreate the Claude login explicitly."
         case .itemIdentityMismatch:
             return "The selected Keychain item does not belong to this Claude Code credential source. No changes were made."
+        case .unsupportedSecurityToolAccess(let detail):
+            return "Claude Code's standard macOS Keychain backend is unavailable (\(detail)). No changes were made."
+        case .securityToolError(let error):
+            return error.localizedDescription
         case .keychainError(let status):
             if CredentialStoreError.isCodeSigningStatus(status) {
                 return CredentialStoreError.keychainError(status).localizedDescription
@@ -46,8 +52,21 @@ public enum ClaudeCodeCredentialsKeychainError: Error, LocalizedError {
             return CredentialAccessDisposition(underlying: underlying)
         case .keychainError(let status):
             return CredentialAccessDisposition(status: status)
+        case .securityToolError(let error):
+            switch error {
+            case .authorizationDenied, .keychainLocked:
+                return .interactionRequired
+            case .userCancelled:
+                return .userCancelled
+            case .malformedToolOutput, .verificationFailed,
+                 .toolTimedOut, .toolFailed:
+                return .unavailable
+            case .itemChanged, .invalidArgument, .payloadTooLarge:
+                return nil
+            }
         case .missingLiveItem, .duplicateLiveItems, .malformedItemMetadata,
-             .malformedCredentialJSON, .itemIdentityMismatch:
+             .malformedCredentialJSON, .itemIdentityMismatch,
+             .unsupportedSecurityToolAccess:
             return nil
         }
     }
@@ -84,6 +103,50 @@ public protocol ClaudeCLICredentialSource: Sendable {
     func deleteLiveItem(
         at location: ClaudeKeychainItemLocation,
         accessMode: CredentialAccessMode
+    ) throws
+}
+
+/// Internal transaction receipt for the exact boundary where the security
+/// helper may begin mutating Claude's provider-owned item.
+final class ClaudeCredentialWriteAttempt: @unchecked Sendable {
+    private let lock = NSLock()
+    private var started = false
+    private var succeeded = false
+
+    var helperStarted: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return started
+    }
+
+    var helperSucceeded: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return succeeded
+    }
+
+    func markHelperStarted() {
+        lock.lock()
+        started = true
+        lock.unlock()
+    }
+
+    func markHelperSucceeded() {
+        lock.lock()
+        started = true
+        succeeded = true
+        lock.unlock()
+    }
+}
+
+/// Production sources report the helper boundary so a transaction can avoid
+/// both inventing a mutation before launch and stale rollback after launch.
+protocol ClaudeCredentialWriteReporting: Sendable {
+    func writeLiveItemJSON(
+        _ data: Data,
+        at location: ClaudeKeychainItemLocation,
+        accessMode: CredentialAccessMode,
+        mutationAttempt: ClaudeCredentialWriteAttempt
     ) throws
 }
 
@@ -131,18 +194,22 @@ public extension ClaudeCLICredentialSource {
     }
 }
 
-/// Reads and writes the "Claude Code-credentials" generic password directly
-/// through Security.framework. Existing items keep their ACL because updates
-/// modify only kSecValueData. This app deliberately never creates the live
-/// item: Claude Code must remain its owner so its access-control list is not
-/// replaced with one that makes the CLI repeatedly request authorization.
-public struct ClaudeCodeCredentialsKeychain: ClaudeCLICredentialSource {
+/// Discovers the exact provider-owned "Claude Code-credentials" item through
+/// Security.framework, then reads and updates its data through Claude Code's
+/// own `/usr/bin/security` backend. Matching Claude's storage identity keeps
+/// Conductor, Terminal, IDE integrations, and Limit Lifeboat compatible
+/// without rewriting partition ACLs or handling the login-keychain password.
+public struct ClaudeCodeCredentialsKeychain:
+    ClaudeCLICredentialSource,
+    ClaudeCredentialWriteReporting
+{
     public static let serviceName = "Claude Code-credentials"
 
     private let serviceName: String
     private let accountName: String
     private let validateAccess: @Sendable () throws -> Void
     private let securityClient: any ClaudeKeychainSecurityClient
+    private let liveCredentialBackend: any ClaudeLiveCredentialBackend
 
     public var supportsExactItemLocations: Bool { true }
 
@@ -155,18 +222,21 @@ public struct ClaudeCodeCredentialsKeychain: ClaudeCLICredentialSource {
         self.accountName = accountName
         self.validateAccess = validateAccess
         self.securityClient = SystemClaudeKeychainSecurityClient()
+        self.liveCredentialBackend = ClaudeSecurityToolCredentialBackend()
     }
 
     init(
         serviceName: String = Self.serviceName,
         accountName: String = NSUserName(),
         validateAccess: @escaping @Sendable () throws -> Void = {},
-        securityClient: any ClaudeKeychainSecurityClient
+        securityClient: any ClaudeKeychainSecurityClient,
+        liveCredentialBackend: any ClaudeLiveCredentialBackend
     ) {
         self.serviceName = serviceName
         self.accountName = accountName
         self.validateAccess = validateAccess
         self.securityClient = securityClient
+        self.liveCredentialBackend = liveCredentialBackend
     }
 
     public func locateLiveItem(
@@ -179,7 +249,7 @@ public struct ClaudeCodeCredentialsKeychain: ClaudeCLICredentialSource {
     public func readLiveItemJSON(accessMode: CredentialAccessMode) throws -> Data? {
         try validateCredentialAccess()
         guard let location = try locateValidated(accessMode: accessMode) else { return nil }
-        return try securityClient.readData(at: location, accessMode: accessMode)
+        return try readValidated(at: location, accessMode: accessMode)
     }
 
     public func readLiveItemJSON(
@@ -188,7 +258,7 @@ public struct ClaudeCodeCredentialsKeychain: ClaudeCLICredentialSource {
     ) throws -> Data? {
         try validateCredentialAccess()
         try validate(location: location)
-        return try securityClient.readData(at: location, accessMode: accessMode)
+        return try readValidated(at: location, accessMode: accessMode)
     }
 
     public func writeLiveItemJSON(_ data: Data, accessMode: CredentialAccessMode) throws {
@@ -209,10 +279,28 @@ public struct ClaudeCodeCredentialsKeychain: ClaudeCLICredentialSource {
         try writeValidated(data, at: location, accessMode: accessMode)
     }
 
+    func writeLiveItemJSON(
+        _ data: Data,
+        at location: ClaudeKeychainItemLocation,
+        accessMode: CredentialAccessMode,
+        mutationAttempt: ClaudeCredentialWriteAttempt
+    ) throws {
+        try validateCredentialAccess()
+        try validate(location: location)
+        try writeValidated(
+            data,
+            at: location,
+            accessMode: accessMode,
+            mutationAttempt: mutationAttempt
+        )
+    }
+
     public func deleteLiveItem(accessMode: CredentialAccessMode) throws {
         try validateCredentialAccess()
-        guard let location = try locateValidated(accessMode: accessMode) else { return }
-        try securityClient.deleteItem(at: location, accessMode: accessMode)
+        guard try locateValidated(accessMode: accessMode) != nil else { return }
+        throw ClaudeCodeCredentialsKeychainError.unsupportedSecurityToolAccess(
+            "Limit Lifeboat never deletes Claude's provider-owned credential item"
+        )
     }
 
     public func deleteLiveItem(
@@ -221,7 +309,9 @@ public struct ClaudeCodeCredentialsKeychain: ClaudeCLICredentialSource {
     ) throws {
         try validateCredentialAccess()
         try validate(location: location)
-        try securityClient.deleteItem(at: location, accessMode: accessMode)
+        throw ClaudeCodeCredentialsKeychainError.unsupportedSecurityToolAccess(
+            "Limit Lifeboat never deletes Claude's provider-owned credential item"
+        )
     }
 
     private func locateValidated(
@@ -241,12 +331,134 @@ public struct ClaudeCodeCredentialsKeychain: ClaudeCLICredentialSource {
     private func writeValidated(
         _ data: Data,
         at location: ClaudeKeychainItemLocation,
+        accessMode: CredentialAccessMode,
+        mutationAttempt: ClaudeCredentialWriteAttempt? = nil
+    ) throws {
+        CredentialAccess.recordKeychainWrite()
+        do {
+            try liveCredentialBackend.updateData(
+                data,
+                at: location,
+                accessMode: accessMode,
+                authorizeAccess: { mode in
+                    try authorizeSecurityToolAccess(at: location, accessMode: mode)
+                },
+                verifyBefore: {
+                    // The ACL check (or an explicit authorization prompt) can
+                    // outlive a cooperative mutation lease. Revalidate at the
+                    // last synchronous boundary before `/usr/bin/security`
+                    // starts, while allowing standalone exact-source tests
+                    // and read-only callers that have no mutation context.
+                    guard try currentLocationMatches(
+                        location,
+                        requireSameModificationStamp: true
+                    ) else {
+                        return false
+                    }
+                    try ClaudeOAuthMutationLeaseContext.current?.validate()
+                    return true
+                },
+                verifyAfter: {
+                    guard try currentLocationMatches(
+                        location,
+                        requireSameModificationStamp: false
+                    ) else {
+                        return false
+                    }
+                    return true
+                },
+                mutationAttempt: mutationAttempt
+            )
+
+            guard let freshLocation = try locateValidated(accessMode: .nonInteractive),
+                  freshLocation.identity == location.identity,
+                  freshLocation.label == location.label else {
+                throw ClaudeSecurityToolCredentialError.itemChanged
+            }
+            try authorizeSecurityToolAccess(
+                at: freshLocation,
+                accessMode: .nonInteractive
+            )
+            let verified = try readBackendData(
+                at: freshLocation,
+                accessMode: .nonInteractive
+            )
+            guard verified == data else {
+                throw ClaudeSecurityToolCredentialError.verificationFailed
+            }
+        } catch let error as ClaudeSecurityToolCredentialError {
+            throw ClaudeCodeCredentialsKeychainError.securityToolError(error)
+        }
+    }
+
+    private func readValidated(
+        at location: ClaudeKeychainItemLocation,
+        accessMode: CredentialAccessMode
+    ) throws -> Data? {
+        do {
+            return try readBackendData(at: location, accessMode: accessMode)
+        } catch let error as ClaudeSecurityToolCredentialError {
+            throw ClaudeCodeCredentialsKeychainError.securityToolError(error)
+        }
+    }
+
+    private func readBackendData(
+        at location: ClaudeKeychainItemLocation,
+        accessMode: CredentialAccessMode
+    ) throws -> Data {
+        CredentialAccess.recordKeychainDataRead()
+        return try liveCredentialBackend.readData(
+            at: location,
+            accessMode: accessMode,
+            authorizeAccess: { mode in
+                try authorizeSecurityToolAccess(at: location, accessMode: mode)
+            },
+            verifyBefore: {
+                try currentLocationMatches(
+                    location,
+                    requireSameModificationStamp: true
+                )
+            },
+            verifyAfter: {
+                try currentLocationMatches(
+                    location,
+                    requireSameModificationStamp: accessMode == .nonInteractive
+                )
+            }
+        )
+    }
+
+    private func authorizeSecurityToolAccess(
+        at location: ClaudeKeychainItemLocation,
         accessMode: CredentialAccessMode
     ) throws {
-        let updated = try securityClient.updateData(data, at: location, accessMode: accessMode)
-        guard updated else {
-            throw ClaudeCodeCredentialsKeychainError.missingLiveItem
+        switch try securityClient.securityToolAccessStatus(at: location) {
+        case .ready:
+            return
+        case .needsAuthorization:
+            guard accessMode == .userInitiated else {
+                throw ClaudeSecurityToolCredentialError.authorizationDenied
+            }
+        case .keychainLocked:
+            guard accessMode == .userInitiated else {
+                throw ClaudeSecurityToolCredentialError.keychainLocked
+            }
+        case .unsupported(let detail):
+            throw ClaudeCodeCredentialsKeychainError.unsupportedSecurityToolAccess(detail)
         }
+    }
+
+    private func currentLocationMatches(
+        _ expected: ClaudeKeychainItemLocation,
+        requireSameModificationStamp: Bool
+    ) throws -> Bool {
+        guard let current = try locateValidated(accessMode: .nonInteractive),
+              current.identity == expected.identity,
+              current.label == expected.label else {
+            return false
+        }
+        return !requireSameModificationStamp
+            || current.modificationStamp == expected.modificationStamp
     }
 
     private func validate(location: ClaudeKeychainItemLocation) throws {

@@ -918,6 +918,14 @@ public struct ClaudeAccountUsageService {
                     )
                     live = liveRecord?.credentials
                 } catch let error as ClaudeCodeCredentialsKeychainError where error.isKeychainAccessDenied {
+                    if case .securityToolError(.keychainLocked) = error {
+                        // A locked login Keychain is transient. Preserve the
+                        // typed error so AppState retries after unlock instead
+                        // of remembering this generation as an ACL denial.
+                        throw ClaudeAccountUsageFetchError.credentialUnavailable(
+                            error
+                        )
+                    }
                     liveAccessDenied = true
                     liveCredentialAccessDenied?(
                         error.credentialAccessDisposition ?? .interactionRequired

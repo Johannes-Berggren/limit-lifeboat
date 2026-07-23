@@ -13,6 +13,28 @@ private func accessDisposition(from error: Error) -> CredentialAccessDisposition
     return nil
 }
 
+private func isTransientClaudeProviderKeychainFailure(
+    _ error: Error,
+    depth: Int = 0
+) -> Bool {
+    guard depth < 8 else { return false }
+    guard let error = error as? ClaudeCodeCredentialsKeychainError else {
+        return false
+    }
+    switch error {
+    case .securityToolError(.itemChanged),
+         .securityToolError(.keychainLocked):
+        return true
+    case .credentialAccessUnavailable(let underlying):
+        return isTransientClaudeProviderKeychainFailure(
+            underlying,
+            depth: depth + 1
+        )
+    default:
+        return false
+    }
+}
+
 public enum CLISwitcherError: Error, LocalizedError {
     case missingCredentials(String)
     case missingStoredSnapshot(UUID)
@@ -433,22 +455,29 @@ public final class CLISwitcher {
             expectedLiveFingerprint: shouldEnforceLiveState ? .some(expectedLiveFingerprint) : nil,
             accessMode: accessMode,
             claudeKeychainItemLocation: claudeItemLocation,
-            validateRestoredCredentials: { [self] in
+            validateRestoredCredentials: { [self] refreshedClaudeItemLocation in
                 let observation: LiveCredentialObservation
                 do {
-                    if let claudeItemLocation {
+                    if let refreshedClaudeItemLocation {
                         let item = try claudeCLICredentialSource.readLiveItemJSON(
-                            at: claudeItemLocation,
+                            at: refreshedClaudeItemLocation,
                             accessMode: accessMode
                         )
                         observation = try claudeCredentials.observe(
                             liveItem: item,
-                            location: claudeItemLocation
+                            location: refreshedClaudeItemLocation
                         )
                     } else {
                         observation = try liveObservation(provider: profile.provider, accessMode: accessMode)
                     }
                 } catch {
+                    if isTransientClaudeProviderKeychainFailure(error) {
+                        // Keep replacement/lock outcomes typed all the way to
+                        // AppState. Reducing either to an authorization
+                        // disposition would make a transient wake or outside
+                        // generation look like a sticky ACL denial.
+                        throw error
+                    }
                     throw CLISwitcherError.restoreValidationFailed(
                         provider: profile.provider,
                         reason: error.localizedDescription,
@@ -694,8 +723,12 @@ public final class CLISwitcher {
         // legitimately rotate while the OAuth request is in flight; preserve
         // that latest sibling state and conflict only when `claudeAiOauth`
         // itself changed (or the pinned item vanished/replaced).
+        let latestLocation = try refreshedClaudeKeychainItemLocation(
+            matching: location,
+            accessMode: accessMode
+        )
         guard let latest = try readClaudeKeychainItem(
-            at: location,
+            at: latestLocation,
             accessMode: accessMode
         ),
         ClaudeOAuthCredentials.extract(fromKeychainItemJSON: latest)?
@@ -706,7 +739,11 @@ public final class CLISwitcher {
             credentials.rawClaudeAiOauth,
             intoItemJSON: latest
         )
-        try writeClaudeKeychainItem(merged, at: location, accessMode: accessMode)
+        try writeClaudeKeychainItem(
+            merged,
+            at: latestLocation,
+            accessMode: accessMode
+        )
         return true
     }
 
@@ -907,6 +944,26 @@ public final class CLISwitcher {
         return try claudeCLICredentialSource.readLiveItemJSON(accessMode: accessMode)
     }
 
+    private func refreshedClaudeKeychainItemLocation(
+        matching expected: ClaudeKeychainItemLocation?,
+        accessMode: CredentialAccessMode
+    ) throws -> ClaudeKeychainItemLocation? {
+        guard claudeCLICredentialSource.supportsExactItemLocations else {
+            return expected
+        }
+        guard let expected,
+              let current = try claudeCLICredentialSource.locateLiveItem(
+                  accessMode: accessMode
+              ),
+              current.identity == expected.identity,
+              current.label == expected.label else {
+            throw ClaudeCodeCredentialsKeychainError.securityToolError(
+                .itemChanged
+            )
+        }
+        return current
+    }
+
     private func writeClaudeKeychainItem(
         _ data: Data,
         at location: ClaudeKeychainItemLocation?,
@@ -925,6 +982,9 @@ public final class CLISwitcher {
         } else {
             try claudeCLICredentialSource.writeLiveItemJSON(data, accessMode: accessMode)
         }
+        // Detect a lease lost while `/usr/bin/security` was running before
+        // the surrounding refresh or switch can report success.
+        try validateClaudeOAuthMutationLease()
     }
 
     /// The raw `~/.codex/auth.json` captured into a profile's stored snapshot,

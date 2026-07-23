@@ -54,7 +54,7 @@ final class CredentialRestoreTransaction {
         expectedLiveFingerprint: String?? = nil,
         accessMode: CredentialAccessMode = CredentialAccess.currentMode,
         claudeKeychainItemLocation: ClaudeKeychainItemLocation? = nil,
-        validateRestoredCredentials: () throws -> Void
+        validateRestoredCredentials: (ClaudeKeychainItemLocation?) throws -> Void
     ) throws -> [URL] {
         var normalizedItems = try snapshot.items.map { try normalized($0, provider: snapshot.provider) }
         if snapshot.provider == .claude {
@@ -106,6 +106,7 @@ final class CredentialRestoreTransaction {
         }
 
         var baselines: [String: Data] = [:]
+        var baselineFileGenerations: [String: FileGenerationStamp] = [:]
         var baselinePermissions: [String: Int] = [:]
         var baselineBackupURLs: [String: URL] = [:]
         var missingBaselines: Set<String> = []
@@ -120,6 +121,15 @@ final class CredentialRestoreTransaction {
             }
             if let baseline {
                 baselines[destination.path] = baseline
+                do {
+                    baselineFileGenerations[destination.path] =
+                        try fileGenerationStamp(at: destination)
+                } catch {
+                    throw CLISwitcherError.backupFailed(
+                        path: destination.path,
+                        underlying: error
+                    )
+                }
                 baselinePermissions[destination.path] =
                     (try? fileManager.attributesOfItem(atPath: destination.path)[.posixPermissions]) as? Int
             } else {
@@ -161,6 +171,14 @@ final class CredentialRestoreTransaction {
                     throw CLISwitcherError.backupFailed(path: CLISwitcher.claudeKeychainItemPath, underlying: error)
                 }
             }
+            if claudeCredentialSource.supportsExactItemLocations,
+               !keychainItems.isEmpty,
+               (claudeKeychainItemLocation == nil || liveKeychainBackup == nil) {
+                throw CLISwitcherError.backupFailed(
+                    path: CLISwitcher.claudeKeychainItemPath,
+                    underlying: ClaudeCodeCredentialsKeychainError.missingLiveItem
+                )
+            }
         }
 
         // Backups can take long enough for Conductor or a CLI to switch the
@@ -181,7 +199,10 @@ final class CredentialRestoreTransaction {
         // logged into a half-switched account.
         var touched: [URL] = []
         var writtenFiles: [String: Data] = [:]
+        var writtenFileGenerations: [String: FileGenerationStamp] = [:]
         var writtenKeychain: Data?
+        var keychainWriteRequiresReconciliation = false
+        var currentClaudeKeychainItemLocation = claudeKeychainItemLocation
         do {
             for item in fileItems {
                 try validateMutationLease?()
@@ -192,8 +213,13 @@ final class CredentialRestoreTransaction {
                 }
                 try hooks.beforeDestinationCheck?(destination)
                 let current = fileManager.fileExists(atPath: destination.path) ? try Data(contentsOf: destination) : nil
-                let matchesBaseline = baselines[destination.path].map { current == $0 }
-                    ?? (missingBaselines.contains(destination.path) && current == nil)
+                let matchesBaseline = baselineMatchesCurrentFile(
+                    at: destination,
+                    currentData: current,
+                    baselines: baselines,
+                    baselineGenerations: baselineFileGenerations,
+                    missingBaselines: missingBaselines
+                )
                 guard matchesBaseline else {
                     throw CLISwitcherError.credentialConflict(destination.path)
                 }
@@ -215,12 +241,29 @@ final class CredentialRestoreTransaction {
                 }
                 try hooks.beforeDestinationWrite?(destination)
                 try validateMutationLease?()
+                let finalCurrent =
+                    fileManager.fileExists(atPath: destination.path)
+                    ? try Data(contentsOf: destination)
+                    : nil
+                guard baselineMatchesCurrentFile(
+                    at: destination,
+                    currentData: finalCurrent,
+                    baselines: baselines,
+                    baselineGenerations: baselineFileGenerations,
+                    missingBaselines: missingBaselines
+                ) else {
+                    throw CLISwitcherError.credentialConflict(
+                        destination.path
+                    )
+                }
                 try written.write(to: destination, options: [.atomic])
                 // Register the exact mutation before any later operation can
                 // throw. Permission changes, injected checks, and validation
                 // must all be able to roll this write back safely.
                 touched.append(destination)
                 writtenFiles[destination.path] = written
+                writtenFileGenerations[destination.path] =
+                    try fileGenerationStamp(at: destination)
                 try hooks.afterDestinationWrite?(destination)
                 try validateMutationLease?()
                 try fileManager.setAttributes(
@@ -231,7 +274,7 @@ final class CredentialRestoreTransaction {
             for item in keychainItems {
                 try validateMutationLease?()
                 let current = try readClaudeKeychainItem(
-                    at: claudeKeychainItemLocation,
+                    at: currentClaudeKeychainItemLocation,
                     accessMode: accessMode
                 )
                 guard current == liveKeychainBackup else {
@@ -239,25 +282,80 @@ final class CredentialRestoreTransaction {
                 }
                 let merged = try mergeClaudeAiOauth(item.contents, intoItemJSON: liveKeychainBackup)
                 try hooks.beforeKeychainWrite?()
-                try writeClaudeKeychainItem(
-                    merged,
-                    at: claudeKeychainItemLocation,
+                let mutationAttempt = ClaudeCredentialWriteAttempt()
+                let reportsMutationStart =
+                    currentClaudeKeychainItemLocation != nil
+                    && claudeCredentialSource is any ClaudeCredentialWriteReporting
+                do {
+                    try writeClaudeKeychainItem(
+                        merged,
+                        at: currentClaudeKeychainItemLocation,
+                        accessMode: accessMode,
+                        mutationAttempt: mutationAttempt
+                    )
+                    // The source completed its helper and full-value
+                    // verification. Record that an exact provider item may
+                    // now differ before the post-helper lease check can throw.
+                    if currentClaudeKeychainItemLocation != nil {
+                        // Legacy Keychain modification dates have one-second
+                        // granularity, so even a matching post-write stamp
+                        // cannot prove that a rapid same-byte outside update
+                        // belongs to this transaction. Never auto-rollback an
+                        // exact provider-owned item after the helper ran.
+                        keychainWriteRequiresReconciliation = true
+                    } else {
+                        writtenKeychain = merged
+                    }
+                } catch {
+                    // A helper can commit and then fail its identity/value
+                    // verification. Preserve enough information to reconcile
+                    // that uncertain outcome, but do not invent a mutation
+                    // when a final pre-helper lease or authorization check
+                    // proves the process never started.
+                    switch keychainWriteOutcome(
+                        after: error,
+                        mutationAttempt: mutationAttempt,
+                        reportsMutationStart: reportsMutationStart
+                    ) {
+                    case .confirmed:
+                        keychainWriteRequiresReconciliation = true
+                    case .uncertain:
+                        keychainWriteRequiresReconciliation = true
+                    case .notCommitted:
+                        break
+                    }
+                    throw error
+                }
+                try validateMutationLease?()
+                currentClaudeKeychainItemLocation = try refreshedClaudeKeychainItemLocation(
+                    matching: currentClaudeKeychainItemLocation,
                     accessMode: accessMode
                 )
-                writtenKeychain = merged
             }
             // Verification is part of the transaction: rollback material is
             // not deleted until the restored login identifies the target.
             try validateMutationLease?()
-            try validateRestoredCredentials()
+            try validateRestoredCredentials(currentClaudeKeychainItemLocation)
         } catch {
             let originalError = error
             var rollbackDisposition = credentialDisposition(from: originalError)
+            var rollbackFailure: Error?
             var rollbackConflicts: [String] = []
             for destination in touched.reversed() {
-                guard let written = writtenFiles[destination.path] else { continue }
+                guard let written = writtenFiles[destination.path],
+                      let writtenGeneration =
+                          writtenFileGenerations[destination.path] else {
+                    rollbackConflicts.append(destination.path)
+                    continue
+                }
+                let generationBeforeRead =
+                    try? fileGenerationStamp(at: destination)
                 let current = try? Data(contentsOf: destination)
-                guard current == written else {
+                let generationAfterRead =
+                    try? fileGenerationStamp(at: destination)
+                guard current == written,
+                      generationBeforeRead == writtenGeneration,
+                      generationAfterRead == writtenGeneration else {
                     rollbackConflicts.append(destination.path)
                     continue
                 }
@@ -270,47 +368,114 @@ final class CredentialRestoreTransaction {
                     if let backupURL = baselineBackupURLs[destination.path] {
                         let baseline = try Data(contentsOf: backupURL)
                         try validateMutationLease?()
+                        guard try fileGenerationStamp(at: destination)
+                            == writtenGeneration else {
+                            throw FileRollbackGenerationChanged()
+                        }
                         try baseline.write(to: destination, options: [.atomic])
+                        let restoredGeneration =
+                            try fileGenerationStamp(at: destination)
+                        try validateMutationLease?()
                         if let permissions = baselinePermissions[destination.path] {
-                            try validateMutationLease?()
+                            guard try fileGenerationStamp(at: destination)
+                                == restoredGeneration else {
+                                throw FileRollbackGenerationChanged()
+                            }
                             try fileManager.setAttributes([.posixPermissions: permissions], ofItemAtPath: destination.path)
+                            try validateMutationLease?()
                         }
                     } else if fileManager.fileExists(atPath: destination.path) {
                         try validateMutationLease?()
+                        guard try fileGenerationStamp(at: destination)
+                            == writtenGeneration else {
+                            throw FileRollbackGenerationChanged()
+                        }
                         try fileManager.removeItem(at: destination)
+                        try validateMutationLease?()
                     }
+                } catch is FileRollbackGenerationChanged {
+                    rollbackConflicts.append(destination.path)
                 } catch let rollbackError {
-                    rollbackDisposition = rollbackDisposition
-                        ?? credentialDisposition(from: rollbackError)
+                    rollbackDisposition =
+                        credentialDisposition(from: rollbackError)
+                        ?? rollbackDisposition
+                    rollbackFailure = rollbackFailure ?? rollbackError
                     rollbackConflicts.append(destination.path)
                 }
             }
             if let writtenKeychain {
                 do {
                     try validateMutationLease?()
-                    if try readClaudeKeychainItem(
-                        at: claudeKeychainItemLocation,
+                    let rollbackLocation = try refreshedClaudeKeychainItemLocation(
+                        matching: currentClaudeKeychainItemLocation
+                            ?? claudeKeychainItemLocation,
                         accessMode: accessMode
-                    ) == writtenKeychain {
+                    )
+                    let current = try readClaudeKeychainItem(
+                        at: rollbackLocation,
+                        accessMode: accessMode
+                    )
+                    if current == writtenKeychain {
                         if let liveKeychainBackup {
                             try writeClaudeKeychainItem(
                                 liveKeychainBackup,
-                                at: claudeKeychainItemLocation,
-                                accessMode: accessMode
+                                at: rollbackLocation,
+                                accessMode: accessMode,
+                                mutationAttempt: ClaudeCredentialWriteAttempt()
                             )
+                            try validateMutationLease?()
                         } else {
-                            try deleteClaudeKeychainItem(
-                                at: claudeKeychainItemLocation,
-                                accessMode: accessMode
-                            )
+                            // Limit Lifeboat never creates or deletes Claude's
+                            // provider-owned item. An item appearing where the
+                            // baseline was absent is an ambiguous external
+                            // generation and must be left for explicit repair.
+                            rollbackConflicts.append(CLISwitcher.claudeKeychainItemPath)
                         }
-                    } else {
+                    } else if current != liveKeychainBackup {
+                        // The forward write either lost an item-replacement
+                        // race or another client changed the value. Preserve
+                        // that outside generation instead of broad-writing a
+                        // stale rollback value.
                         rollbackConflicts.append(CLISwitcher.claudeKeychainItemPath)
                     }
                 } catch let rollbackError {
-                    rollbackDisposition = rollbackDisposition
-                        ?? credentialDisposition(from: rollbackError)
+                    rollbackDisposition =
+                        credentialDisposition(from: rollbackError)
+                        ?? rollbackDisposition
+                    rollbackFailure = rollbackFailure ?? rollbackError
                     rollbackConflicts.append(CLISwitcher.claudeKeychainItemPath)
+                }
+            }
+            if keychainWriteRequiresReconciliation {
+                do {
+                    try validateMutationLease?()
+                    let observedLocation = try refreshedClaudeKeychainItemLocation(
+                        matching: currentClaudeKeychainItemLocation
+                            ?? claudeKeychainItemLocation,
+                        accessMode: accessMode
+                    )
+                    let current = try readClaudeKeychainItem(
+                        at: observedLocation,
+                        accessMode: accessMode
+                    )
+                    if current != liveKeychainBackup {
+                        // Legacy Keychain metadata cannot uniquely attribute
+                        // rapid same-byte updates. Once the helper may have
+                        // written, preserve any non-baseline value, retain the
+                        // exact recovery material, and require explicit retry
+                        // instead of risking a stale rollback.
+                        rollbackConflicts.append(
+                            CLISwitcher.claudeKeychainItemPath
+                        )
+                    }
+                } catch let rollbackError {
+                    rollbackDisposition =
+                        credentialDisposition(from: rollbackError)
+                        ?? rollbackDisposition
+                    rollbackFailure = rollbackFailure ?? rollbackError
+                    rollbackConflicts.append(
+                        CLISwitcher.claudeKeychainItemPath
+                    )
                 }
             }
             if !rollbackConflicts.isEmpty {
@@ -318,7 +483,7 @@ final class CredentialRestoreTransaction {
                 throw CLISwitcherError.rollbackConflict(
                     paths: rollbackConflicts,
                     recoveryDirectory: restoreBackupDirectory,
-                    underlying: originalError,
+                    underlying: rollbackFailure ?? originalError,
                     disposition: rollbackDisposition
                 )
             }
@@ -326,6 +491,29 @@ final class CredentialRestoreTransaction {
         }
 
         return touched
+    }
+
+    /// A successful Keychain update keeps the persistent identity but advances
+    /// the modification generation. Re-resolve that same identity before any
+    /// post-write read; carrying the pre-write stamp would make our own update
+    /// look like an outside replacement.
+    private func refreshedClaudeKeychainItemLocation(
+        matching expected: ClaudeKeychainItemLocation?,
+        accessMode: CredentialAccessMode
+    ) throws -> ClaudeKeychainItemLocation? {
+        guard claudeCredentialSource.supportsExactItemLocations else {
+            return expected
+        }
+        guard let expected,
+              let current = try claudeCredentialSource.locateLiveItem(
+                  accessMode: accessMode
+              ),
+              current.identity == expected.identity else {
+            throw ClaudeCodeCredentialsKeychainError.securityToolError(
+                .itemChanged
+            )
+        }
+        return current
     }
 
     private func validateExpectedLiveFingerprint(
@@ -374,10 +562,20 @@ final class CredentialRestoreTransaction {
     private func writeClaudeKeychainItem(
         _ data: Data,
         at location: ClaudeKeychainItemLocation?,
-        accessMode: CredentialAccessMode
+        accessMode: CredentialAccessMode,
+        mutationAttempt: ClaudeCredentialWriteAttempt
     ) throws {
         try validateMutationLease?()
-        if let location {
+        if let location,
+           let reportingSource =
+               claudeCredentialSource as? any ClaudeCredentialWriteReporting {
+            try reportingSource.writeLiveItemJSON(
+                data,
+                at: location,
+                accessMode: accessMode,
+                mutationAttempt: mutationAttempt
+            )
+        } else if let location {
             try claudeCredentialSource.writeLiveItemJSON(
                 data,
                 at: location,
@@ -385,21 +583,6 @@ final class CredentialRestoreTransaction {
             )
         } else {
             try claudeCredentialSource.writeLiveItemJSON(data, accessMode: accessMode)
-        }
-    }
-
-    private func deleteClaudeKeychainItem(
-        at location: ClaudeKeychainItemLocation?,
-        accessMode: CredentialAccessMode
-    ) throws {
-        try validateMutationLease?()
-        if let location {
-            try claudeCredentialSource.deleteLiveItem(
-                at: location,
-                accessMode: accessMode
-            )
-        } else {
-            try claudeCredentialSource.deleteLiveItem(accessMode: accessMode)
         }
     }
 
@@ -414,6 +597,148 @@ final class CredentialRestoreTransaction {
             return error.credentialAccessDisposition
         }
         return nil
+    }
+
+    private enum KeychainWriteOutcome {
+        case notCommitted
+        case confirmed
+        case uncertain
+    }
+
+    private struct FileGenerationStamp: Equatable {
+        let systemNumber: UInt64
+        let systemFileNumber: UInt64
+        let size: UInt64
+        let modificationDate: Date
+    }
+
+    private struct FileGenerationUnavailable: Error {}
+    private struct FileRollbackGenerationChanged: Error {}
+
+    private func fileGenerationStamp(at url: URL) throws -> FileGenerationStamp {
+        let attributes = try fileManager.attributesOfItem(atPath: url.path)
+        guard let systemNumber =
+                  (attributes[.systemNumber] as? NSNumber)?.uint64Value,
+              let systemFileNumber =
+                  (attributes[.systemFileNumber] as? NSNumber)?.uint64Value,
+              let size = (attributes[.size] as? NSNumber)?.uint64Value,
+              let modificationDate = attributes[.modificationDate] as? Date else {
+            throw FileGenerationUnavailable()
+        }
+        return FileGenerationStamp(
+            systemNumber: systemNumber,
+            systemFileNumber: systemFileNumber,
+            size: size,
+            modificationDate: modificationDate
+        )
+    }
+
+    private func baselineMatchesCurrentFile(
+        at url: URL,
+        currentData: Data?,
+        baselines: [String: Data],
+        baselineGenerations: [String: FileGenerationStamp],
+        missingBaselines: Set<String>
+    ) -> Bool {
+        if let baseline = baselines[url.path],
+           let baselineGeneration = baselineGenerations[url.path] {
+            guard currentData == baseline,
+                  let generationBeforeRead =
+                      try? fileGenerationStamp(at: url),
+                  generationBeforeRead == baselineGeneration,
+                  let generationAfterRead =
+                      try? fileGenerationStamp(at: url),
+                  generationAfterRead == baselineGeneration else {
+                return false
+            }
+            return true
+        }
+        return missingBaselines.contains(url.path) && currentData == nil
+    }
+
+    private func keychainWriteOutcome(
+        after error: Error,
+        mutationAttempt: ClaudeCredentialWriteAttempt,
+        reportsMutationStart: Bool
+    ) -> KeychainWriteOutcome {
+        if let error = error as? ClaudeCodeCredentialsKeychainError,
+           case .securityToolError(.itemChanged) = error {
+            // An item/generation change is authoritative regardless of whether
+            // our upsert helper had started. Coincidentally equal bytes are
+            // never permission to roll that outside change back.
+            return mutationAttempt.helperStarted ? .uncertain : .notCommitted
+        }
+        if reportsMutationStart {
+            if mutationAttempt.helperSucceeded {
+                return .confirmed
+            }
+            guard mutationAttempt.helperStarted else {
+                return .notCommitted
+            }
+            // A launched helper with no success result is normally known not
+            // to have committed for authorization/cancellation failures.
+            // Timeout and opaque helper failures remain uncertain and are
+            // reconciled against the exact baseline/intended bytes.
+            if let error = error as? ClaudeCodeCredentialsKeychainError {
+                switch error {
+                case .securityToolError(let toolError):
+                    switch toolError {
+                    case .authorizationDenied, .userCancelled,
+                         .keychainLocked, .invalidArgument,
+                         .payloadTooLarge:
+                        return .notCommitted
+                    case .itemChanged:
+                        return .notCommitted
+                    case .toolFailed(let exitCode):
+                        return exitCode == nil ? .uncertain : .notCommitted
+                    case .toolTimedOut:
+                        return .uncertain
+                    case .malformedToolOutput, .verificationFailed:
+                        return .uncertain
+                    }
+                case .credentialAccessUnavailable, .missingLiveItem,
+                     .itemIdentityMismatch, .unsupportedSecurityToolAccess:
+                    return .notCommitted
+                case .duplicateLiveItems, .malformedItemMetadata,
+                     .malformedCredentialJSON, .keychainError:
+                    return .uncertain
+                }
+            }
+            return .uncertain
+        }
+        if error is ClaudeOAuthRefreshCoordinatorError {
+            // The transaction helper performs its lease validation before it
+            // enters a non-reporting credential source. Post-helper lease
+            // validation is deliberately outside the source call, after a
+            // successful return has registered the write.
+            return .notCommitted
+        }
+        guard let error = error as? ClaudeCodeCredentialsKeychainError else {
+            // A source without phase reporting cannot prove that matching
+            // target bytes belong to this transaction.
+            return .uncertain
+        }
+        switch error {
+        case .credentialAccessUnavailable, .missingLiveItem,
+             .itemIdentityMismatch, .unsupportedSecurityToolAccess:
+            return .notCommitted
+        case .securityToolError(let toolError):
+            switch toolError {
+            case .authorizationDenied, .userCancelled, .keychainLocked,
+                 .invalidArgument, .payloadTooLarge:
+                return .notCommitted
+            case .itemChanged:
+                return .notCommitted
+            case .toolFailed(let exitCode):
+                return exitCode == nil ? .uncertain : .notCommitted
+            case .malformedToolOutput, .verificationFailed,
+                 .toolTimedOut:
+                return .uncertain
+            }
+        case .duplicateLiveItems, .malformedItemMetadata,
+             .malformedCredentialJSON, .keychainError:
+            return .uncertain
+        }
     }
 
     private func resolve(relativePath: String) -> URL {

@@ -69,9 +69,9 @@ direct-download source for release artifacts.
   default, and switching from a depleted account is off until you enable it.
   Every switch captures the current login, stages private rollback material,
   restores and validates the selected identity, then removes the temporary
-  material. If another process changes a credential during the operation, that
-  external change wins. A recovery path is retained and shown only when a safe
-  rollback cannot be completed.
+  material. If the transaction detects another process changing a credential
+  during the operation, that external change wins. A recovery path is retained
+  and shown only when a safe rollback cannot be completed.
 - **Warnings are optional.** The app can notify you when an account is nearing
   a limit or when a previously depleted account is likely available again.
 - **Updates are user-controlled.** Sparkle checks the signed GitHub release
@@ -99,15 +99,28 @@ preferences domain `com.limitlifeboat.app`. App-managed credential snapshots
 are encrypted by macOS Keychain under the service
 `com.limitlifeboat.app.credentials`.
 
-The app reads Claude Code's provider-owned `Claude Code-credentials` Keychain
-item when necessary, but it does not create or take ownership of that item.
-Background refreshes do not display a Keychain authorization prompt or switch
-the live CLI account. Codex usage checks and reset redemptions run from private
-temporary copies of the selected saved account. If Codex rotates a token, the
-app merges it back only when the stored and live credential fingerprints still
-match; a newer external CLI login always wins. If macOS requires authorization,
-the app keeps the last reading and waits for an explicit retry, capture,
-removal, or account switch.
+The app discovers Claude Code's provider-owned `Claude Code-credentials`
+Keychain item through Security.framework, then reads and updates its secret
+through the same hardcoded `/usr/bin/security` path used by Claude Code. It
+never intentionally creates or deletes that item, takes ownership of it, or
+rewrites its partition list, and credential bytes are passed to updates only
+through standard input. Because Apple's `-U` operation is an upsert, the app
+brackets every update with complete item-identity and value checks. A detected
+external replacement aborts without retrying or rolling back over the outside
+change. The command-line helper cannot atomically target a persistent Keychain
+reference, so a replacement in the narrow interval between the precheck and
+the upsert can already have been updated or recreated before the postcheck
+detects it. Legacy Keychain modification timestamps also have one-second
+granularity, so after the helper may have written, any later failure retains
+recovery material and asks for a retry instead of automatically restoring a
+possibly stale value. Background refreshes inspect lock and ACL state without
+UI and do not launch `security` when authorization is absent or the Keychain is
+locked. They also never switch the live CLI account. Codex
+usage checks and reset redemptions run from private temporary copies of the
+selected saved account. If Codex rotates a token, the app merges it back only
+when the stored and live credential fingerprints still match; a newer external
+CLI login always wins. If macOS requires authorization, the app keeps the last
+reading and waits for an explicit retry, capture, removal, or account switch.
 
 Network access is limited to the services needed for the selected features:
 
@@ -173,9 +186,9 @@ bundle ID, preferences, Application Support folder, and app-owned Keychain
 items are isolated from the installed release; updates and launch at login are
 disabled. Quit the copy in `apps/macos/dist` before rebuilding it.
 
-The Security.framework integration suite is opt-in. It creates a disposable
-temporary Keychain, scopes every query to it, and never adds it to the user's
-search list or touches the login Keychain:
+Keychain integration tests create disposable temporary Keychains, scope every
+query to them, and never add them to the user's search list or touch the login
+Keychain. The additional end-to-end discovery test is opt-in:
 
 ```bash
 RUN_DISPOSABLE_KEYCHAIN_TESTS=1 swift test --package-path apps/macos \
@@ -184,12 +197,14 @@ RUN_DISPOSABLE_KEYCHAIN_TESTS=1 swift test --package-path apps/macos \
 
 ### Troubleshooting keychain prompts
 
-**Limit Lifeboat needs access to Claude's credential.** Open the menu bar
-popover, choose **More → Authorize Keychain Access…**, read the explanation,
-then enter your macOS password once and choose **Always Allow** in the native
-Keychain dialog. Choosing only **Allow** grants access for that read but does
-not make it durable, so the app keeps the authorization action available and
-does not retry automatically.
+**Claude's shared security helper needs access to the credential.** Open the
+menu bar popover, choose **More → Authorize Claude Keychain Access…**, read the
+explanation, then enter your macOS password once and choose **Always Allow** in
+the native Keychain dialog. The requester is named `security`, because Limit
+Lifeboat deliberately uses Claude Code's `/usr/bin/security` storage identity.
+Choosing only **Allow** grants access for that operation but does not make it
+durable, so the app keeps the authorization action available and does not
+retry automatically.
 
 Background refreshes, login watchers, popover opens, and `/usage` probes are
 noninteractive. The `/usage` fallback launches Claude only when a valid OAuth
@@ -200,13 +215,12 @@ If the app reports duplicate or malformed Claude items, it deliberately does
 not choose, rewrite, or delete one. Quit workspace builds and relaunch the
 stable app in `/Applications`, or explicitly recreate the Claude login.
 
-**Dev builds re-prompt after every rebuild.** Ad-hoc signed bundles get a
-per-build `cdhash` grant that dies with the next build. `package-app.sh`
-auto-picks an Apple Development identity (or honors `SIGN_IDENTITY`), which
-keeps the code requirement stable across rebuilds. The app labels ad-hoc
-authorization as nondurable; relaunch an Apple Development-signed workspace
-bundle or the installed Developer ID-signed release before authorizing if the
-grant needs to survive a rebuild.
+**App-owned snapshot access in dev builds may re-prompt after every rebuild.**
+Ad-hoc signed bundles get a per-build `cdhash` grant that dies with the next
+build. `package-app.sh` auto-picks an Apple Development identity (or honors
+`SIGN_IDENTITY`), which keeps the app's code requirement stable across
+rebuilds. This does not change Claude's provider-owned item, whose requester is
+the stable `/usr/bin/security` helper described above.
 
 **Never replace a running bundle.** `manage-workspace-app.sh check` refuses
 to overwrite a live app; quit it first. Swapping the binary under a running
