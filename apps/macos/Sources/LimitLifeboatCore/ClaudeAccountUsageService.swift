@@ -214,13 +214,19 @@ public enum ClaudeAccountUsageFetchError: Error, LocalizedError {
 /// not grant permission to rotate a single-use OAuth refresh chain.
 public enum ClaudeRotationIntent: Sendable, Equatable {
     case scheduledReadOnly
+    /// A policy-gated automatic Retry for an inactive account whose refresh
+    /// chain has a single local owner. Races with the live Claude Code login
+    /// are prevented by the shared refresh lease, not by refusing to rotate;
+    /// the service still downgrades this intent to read-only for the active
+    /// account, so the live chain is never rotated by scheduled work.
+    case scheduledRecovery
     case userRetry
     case userInitiatedSwitch
     case automaticSwitch
 
     public var allowsCredentialRotation: Bool {
         switch self {
-        case .userRetry, .userInitiatedSwitch:
+        case .userRetry, .userInitiatedSwitch, .scheduledRecovery:
             return true
         case .scheduledReadOnly, .automaticSwitch:
             return false
@@ -547,6 +553,12 @@ public struct ClaudeAccountUsageService {
         credentialDidPersist: ((ClaudeOAuthCredentials) -> Void)?,
         credentialDidResolve: ((ClaudeOAuthCredentials) -> Void)?
     ) async throws -> ClaudeAccountUsageFetchResult {
+        // The live Claude Code chain is never rotated by unattended work, even
+        // if a caller asks for scheduled recovery. Downgrading here keeps every
+        // downstream rotation guard consistent with that invariant.
+        let rotationIntent = (rotationIntent == .scheduledRecovery && isActiveCLI)
+            ? .scheduledReadOnly
+            : rotationIntent
         do {
             try refreshCoordinator.validateSupportedConfiguration()
         } catch let error as ClaudeOAuthRefreshCoordinatorError {
@@ -670,6 +682,11 @@ public struct ClaudeAccountUsageService {
         liveCredentialReadPolicy: ClaudeLiveCredentialReadPolicy = .read,
         liveCredentialAccessDenied: ((CredentialAccessDisposition) -> Void)? = nil
     ) async throws -> ClaudeAPIAccountInfo {
+        // Same active-chain backstop as `fetchSnapshotResult`: scheduled
+        // recovery may never rotate the live login.
+        let rotationIntent = (rotationIntent == .scheduledRecovery && isActiveCLI)
+            ? .scheduledReadOnly
+            : rotationIntent
         do {
             try refreshCoordinator.validateSupportedConfiguration()
         } catch let error as ClaudeOAuthRefreshCoordinatorError {
@@ -827,9 +844,11 @@ public struct ClaudeAccountUsageService {
     }
 
     /// The single rotation gate both guard sites share. A shared-account sibling
-    /// is never rotated (it would strand the live login). Both active and
-    /// inactive credentials rotate only on an explicit Retry or user-clicked
-    /// switch; scheduled polling and automatic switching are read-only.
+    /// is never rotated (it would strand the live login). Credentials rotate
+    /// only on an explicit Retry, a user-clicked switch, or a policy-gated
+    /// scheduled recovery of an inactive account (the service downgrades that
+    /// intent to read-only for the active account); plain scheduled polling and
+    /// automatic switching are read-only.
     private static func mayRotate(
         accountIsLiveElsewhere: Bool,
         rotationIntent: ClaudeRotationIntent
