@@ -12,6 +12,9 @@ public struct SwitchCandidate: Equatable, Sendable {
     public var manualSwitchEligibility: AccountSwitchEligibility
     public var automaticSwitchEligibility: AccountSwitchEligibility
     public var snapshot: UsageSnapshot?
+    /// Position in the user's per-provider priority order; 0 is switched to
+    /// first, the highest rank last.
+    public var priorityRank: Int
 
     public init(
         profileID: UUID,
@@ -19,7 +22,8 @@ public struct SwitchCandidate: Equatable, Sendable {
         isActiveCLI: Bool,
         manualSwitchEligibility: AccountSwitchEligibility,
         automaticSwitchEligibility: AccountSwitchEligibility,
-        snapshot: UsageSnapshot?
+        snapshot: UsageSnapshot?,
+        priorityRank: Int = 0
     ) {
         self.profileID = profileID
         self.label = label
@@ -27,6 +31,7 @@ public struct SwitchCandidate: Equatable, Sendable {
         self.manualSwitchEligibility = manualSwitchEligibility
         self.automaticSwitchEligibility = automaticSwitchEligibility
         self.snapshot = snapshot
+        self.priorityRank = priorityRank
     }
 }
 
@@ -37,6 +42,10 @@ public struct SwitchAdvice: Equatable, Sendable {
     public var bestCandidateID: UUID?
     public var bestCandidateLabel: String?
     public var shouldAutoSwitch: Bool
+    /// True when the switch returns to a recovered higher-priority account
+    /// rather than fleeing a depleted one. Rebalances defer to manual parking
+    /// in the app layer.
+    public var isRebalance: Bool
     /// Short human sentence for status/notification, nil when no advice.
     public var reason: String?
 
@@ -44,11 +53,13 @@ public struct SwitchAdvice: Equatable, Sendable {
         bestCandidateID: UUID? = nil,
         bestCandidateLabel: String? = nil,
         shouldAutoSwitch: Bool = false,
+        isRebalance: Bool = false,
         reason: String? = nil
     ) {
         self.bestCandidateID = bestCandidateID
         self.bestCandidateLabel = bestCandidateLabel
         self.shouldAutoSwitch = shouldAutoSwitch
+        self.isRebalance = isRebalance
         self.reason = reason
     }
 }
@@ -60,9 +71,11 @@ public struct SwitchAdvice: Equatable, Sendable {
 /// Eligible switch targets are inactive accounts with stored credentials
 /// whose every limit window has rolled over since the last reading (full
 /// quota regardless of staleness) or whose reading is fresh and whose
-/// tightest window is not depleted. An automatic switch additionally requires
-/// the active account to be depleted and the best target to clear both
-/// headroom bars.
+/// tightest window is not depleted. Targets rank in the user's priority
+/// order (repository order per provider), not by headroom. An automatic
+/// switch requires either a depleted active account and a target clearing
+/// both headroom bars, or a recovered higher-priority account clearing the
+/// rebalance bar.
 public struct SwitchAdvisor: Sendable {
     public struct Configuration: Sendable {
         /// Candidate readings older than this only count once every
@@ -72,17 +85,24 @@ public struct SwitchAdvisor: Sendable {
         public var minimumHeadroomPercent: Double
         /// And beat the active account's headroom by at least this much.
         public var minimumImprovementPercent: Double
+        /// A recovered higher-priority account needs this much headroom (or a
+        /// full window reset) before the advisor suggests returning to it —
+        /// deliberately higher than the escape bar so rebalances don't
+        /// ping-pong onto accounts that are about to deplete again.
+        public var rebalanceMinimumHeadroomPercent: Double
 
         public static let standard = Configuration()
 
         public init(
             staleAfter: TimeInterval = 3 * 3600,
             minimumHeadroomPercent: Double = 30,
-            minimumImprovementPercent: Double = 20
+            minimumImprovementPercent: Double = 20,
+            rebalanceMinimumHeadroomPercent: Double = 50
         ) {
             self.staleAfter = staleAfter
             self.minimumHeadroomPercent = minimumHeadroomPercent
             self.minimumImprovementPercent = minimumImprovementPercent
+            self.rebalanceMinimumHeadroomPercent = rebalanceMinimumHeadroomPercent
         }
     }
 
@@ -93,12 +113,15 @@ public struct SwitchAdvisor: Sendable {
     }
 
     public func advise(candidates: [SwitchCandidate], now: Date = Date()) -> SwitchAdvice {
+        // User priority is the ranking; headroom only gates eligibility and
+        // feeds the reason string. The label tie-break is defensive — ranks
+        // are array indices and should never collide.
         let targets = candidates
             .filter { !$0.isActiveCLI && $0.manualSwitchEligibility.isEligible }
             .compactMap { scoredTarget(for: $0, now: now) }
             .sorted { left, right in
-                if left.score != right.score {
-                    return left.score > right.score
+                if left.candidate.priorityRank != right.candidate.priorityRank {
+                    return left.candidate.priorityRank < right.candidate.priorityRank
                 }
                 return left.candidate.label < right.candidate.label
             }
@@ -107,18 +130,40 @@ public struct SwitchAdvisor: Sendable {
             return SwitchAdvice()
         }
 
-        // If the active account is depleted, skip a higher-scoring target that
-        // needs user-authorized rotation and choose the best read-only target
-        // that actually clears the auto-switch bars. Otherwise preserve the
-        // best manually switchable account as the passive UI hint.
+        // If the active account is depleted, walk the priority order and pick
+        // the first read-only target that actually clears the auto-switch
+        // bars — a preferred account below the bars must not block a healthy
+        // one further down. Otherwise preserve the highest-priority manually
+        // switchable account as the passive UI hint.
         if let automaticBest = targets.first(where: {
             $0.candidate.automaticSwitchEligibility.isEligible
-        }), shouldAutoSwitch(to: automaticBest, candidates: candidates, now: now) {
+                && shouldAutoSwitch(to: $0, candidates: candidates, now: now)
+        }) {
             return SwitchAdvice(
                 bestCandidateID: automaticBest.candidate.profileID,
                 bestCandidateLabel: automaticBest.candidate.label,
                 shouldAutoSwitch: true,
                 reason: reason(for: automaticBest)
+            )
+        }
+
+        // The active account still has quota, but a higher-priority account
+        // may have recovered. Suggest returning to it once it clears the
+        // stricter rebalance bar; the app layer defers this to manual parking
+        // and its own backoffs.
+        if let activeRank = candidates.first(where: { $0.isActiveCLI })?.priorityRank,
+           let rebalanceTarget = targets.first(where: {
+               $0.candidate.priorityRank < activeRank
+                   && $0.canAutoSwitch
+                   && $0.candidate.automaticSwitchEligibility.isEligible
+                   && ($0.resetElapsed || $0.score >= configuration.rebalanceMinimumHeadroomPercent)
+           }) {
+            return SwitchAdvice(
+                bestCandidateID: rebalanceTarget.candidate.profileID,
+                bestCandidateLabel: rebalanceTarget.candidate.label,
+                shouldAutoSwitch: true,
+                isRebalance: true,
+                reason: "\(rebalanceTarget.candidate.label) is higher priority and \(recoveryPhrase(for: rebalanceTarget))"
             )
         }
 
@@ -259,6 +304,16 @@ public struct SwitchAdvisor: Sendable {
         }
         let percent = Int(target.score.rounded())
         return "\(target.candidate.label) has ~\(percent)% of its \(phrase(for: target.limitingWindow)) left"
+    }
+
+    /// Trailing clause of a rebalance reason ("<label> is higher priority
+    /// and …"): why the account counts as recovered.
+    private func recoveryPhrase(for target: ScoredTarget) -> String {
+        if target.resetElapsed {
+            return "its limit window has reset"
+        }
+        let percent = Int(target.score.rounded())
+        return "has ~\(percent)% of its \(phrase(for: target.limitingWindow)) left"
     }
 
     private func phrase(for window: UsageWindow?) -> String {

@@ -144,6 +144,10 @@ final class AppState: ObservableObject {
     /// switch onto a constrained account must not be immediately reverted.
     private var lastAutoSwitchAttempt: [Provider: Date] = [:]
     private var lastManualSwitchAt: [Provider: Date] = [:]
+    /// Whether the current active account was chosen by the user rather than
+    /// an automatic switch. A manual park is only ever left via the depleted
+    /// path, never a priority rebalance.
+    private var activeWasManuallySelected: [Provider: Bool] = [:]
     /// Per-account backoff for automatic reset attempts. Manual redemption is
     /// never throttled and reuses any persisted unresolved idempotency key.
     private var lastAutomaticCodexResetAttempt: [UUID: Date] = [:]
@@ -551,7 +555,8 @@ final class AppState: ObservableObject {
     private func switchCandidates(for provider: Provider) -> [SwitchCandidate] {
         profiles
             .filter { $0.provider == provider }
-            .map { profile in
+            .enumerated()
+            .map { rank, profile in
                 let session = accountSessionEvaluation(for: profile)
                 return SwitchCandidate(
                     profileID: profile.id,
@@ -559,7 +564,9 @@ final class AppState: ObservableObject {
                     isActiveCLI: profile.isActiveCLI,
                     manualSwitchEligibility: session.manualSwitchEligibility,
                     automaticSwitchEligibility: session.automaticSwitchEligibility,
-                    snapshot: snapshots[profile.id]
+                    snapshot: snapshots[profile.id],
+                    // Repository order doubles as the user's switch priority.
+                    priorityRank: rank
                 )
             }
     }
@@ -716,6 +723,12 @@ final class AppState: ObservableObject {
               let targetID = advice.bestCandidateID,
               let target = profiles.first(where: { $0.id == targetID }),
               !target.isActiveCLI else {
+            return
+        }
+
+        // A rebalance leaves an account that still has quota, so it must not
+        // undo a deliberate manual park — only depletion moves off of one.
+        if advice.isRebalance, activeWasManuallySelected[provider] == true {
             return
         }
 
@@ -1534,6 +1547,7 @@ final class AppState: ObservableObject {
             // same protection as a switch made from this app.
             lastManualSwitchAt[provider] = Date()
             lastAutoSwitchAttempt[provider] = nil
+            activeWasManuallySelected[provider] = true
         }
         updateMenuBarSummary()
         return active
@@ -2545,6 +2559,24 @@ final class AppState: ObservableObject {
         profiles[index].label = trimmed
         profiles[index].updatedAt = Date()
         persistProfiles()
+    }
+
+    /// Moves an account one step within its provider's switch-priority order
+    /// (repository order). Recomputes advice immediately so the hint and any
+    /// rebalance react to the new ranking; the auto-switch backoffs still
+    /// apply.
+    func moveProfilePriority(_ profileID: UUID, up: Bool) {
+        let reordered = AccountProfileOrdering.movingProfile(profileID, up: up, in: profiles)
+        guard reordered.map(\.id) != profiles.map(\.id),
+              let profile = profiles.first(where: { $0.id == profileID }) else {
+            return
+        }
+        profiles = reordered
+        persistProfiles()
+        statusMessage = up
+            ? "Moved \(profile.label) up in switch priority."
+            : "Moved \(profile.label) down in switch priority."
+        updateSwitchAdvice()
     }
 
     func setAutoUseCodexRateLimitResets(for profileID: UUID, enabled: Bool) {
@@ -3670,6 +3702,7 @@ final class AppState: ObservableObject {
                 AppLog.history.error("Could not record the switch event: \(error.localizedDescription, privacy: .public)")
             }
             refreshStates[profile.id] = .ok
+            activeWasManuallySelected[profile.provider] = !automatic
             if !automatic {
                 lastManualSwitchAt[profile.provider] = Date()
             }

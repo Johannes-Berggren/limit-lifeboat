@@ -41,6 +41,59 @@ final class ModelsTests: XCTestCase {
         )
     }
 
+    func testMovingProfileSwapsWithinProvider() {
+        let first = AccountProfile(provider: .claude, label: "First")
+        let second = AccountProfile(provider: .claude, label: "Second")
+        let third = AccountProfile(provider: .claude, label: "Third")
+
+        XCTAssertEqual(
+            AccountProfileOrdering.movingProfile(second.id, up: true, in: [first, second, third]).map(\.id),
+            [second.id, first.id, third.id]
+        )
+        XCTAssertEqual(
+            AccountProfileOrdering.movingProfile(second.id, up: false, in: [first, second, third]).map(\.id),
+            [first.id, third.id, second.id]
+        )
+    }
+
+    func testMovingProfileSkipsOtherProviderNeighbors() {
+        let claudeOne = AccountProfile(provider: .claude, label: "Claude One")
+        let codex = AccountProfile(provider: .codex, label: "Codex")
+        let claudeTwo = AccountProfile(provider: .claude, label: "Claude Two")
+
+        let reordered = AccountProfileOrdering.movingProfile(
+            claudeTwo.id,
+            up: true,
+            in: [claudeOne, codex, claudeTwo]
+        )
+
+        // Claude Two swaps with Claude One, not the Codex account between them.
+        XCTAssertEqual(reordered.map(\.id), [claudeTwo.id, codex.id, claudeOne.id])
+        XCTAssertEqual(
+            reordered.filter { $0.provider == .claude }.map(\.label),
+            ["Claude Two", "Claude One"]
+        )
+    }
+
+    func testMovingProfileNoOpsAtBoundariesAndForUnknownIDs() {
+        let first = AccountProfile(provider: .claude, label: "First")
+        let second = AccountProfile(provider: .claude, label: "Second")
+        let profiles = [first, second]
+
+        XCTAssertEqual(
+            AccountProfileOrdering.movingProfile(first.id, up: true, in: profiles).map(\.id),
+            profiles.map(\.id)
+        )
+        XCTAssertEqual(
+            AccountProfileOrdering.movingProfile(second.id, up: false, in: profiles).map(\.id),
+            profiles.map(\.id)
+        )
+        XCTAssertEqual(
+            AccountProfileOrdering.movingProfile(UUID(), up: true, in: profiles).map(\.id),
+            profiles.map(\.id)
+        )
+    }
+
     func testProviderLoginCommandsMatchCurrentCLIs() {
         XCTAssertEqual(Provider.claude.loginCommand, "claude auth login")
         XCTAssertEqual(Provider.codex.loginCommand, "codex login")

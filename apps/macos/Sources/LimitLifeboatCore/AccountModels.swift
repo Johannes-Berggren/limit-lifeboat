@@ -22,6 +22,30 @@ public enum AccountProfileOrdering {
         }
         return active + [recommended] + inactive.filter { $0.id != recommendedID }
     }
+
+    /// Repository order doubles as switch priority within each provider.
+    /// Swaps the profile with its nearest same-provider neighbor so ranks for
+    /// other providers never shift. Returns the array unchanged when the id is
+    /// unknown or already at that end of its provider group.
+    public static func movingProfile(
+        _ id: UUID,
+        up: Bool,
+        in profiles: [AccountProfile]
+    ) -> [AccountProfile] {
+        guard let index = profiles.firstIndex(where: { $0.id == id }) else {
+            return profiles
+        }
+        let provider = profiles[index].provider
+        let neighbors = up
+            ? profiles[..<index].indices.reversed().first { profiles[$0].provider == provider }
+            : profiles.indices[(index + 1)...].first { profiles[$0].provider == provider }
+        guard let neighbor = neighbors else {
+            return profiles
+        }
+        var reordered = profiles
+        reordered.swapAt(index, neighbor)
+        return reordered
+    }
 }
 
 public struct AccountIdentity: Codable, Hashable, Sendable {
