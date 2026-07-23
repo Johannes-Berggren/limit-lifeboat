@@ -44,6 +44,7 @@ let package = Package(
         .testTarget(
             name: "LimitLifeboatAppTests",
             dependencies: [
+                "LimitLifeboat",
                 "LimitLifeboatAppWorkflows",
                 "LimitLifeboatCore"
             ]

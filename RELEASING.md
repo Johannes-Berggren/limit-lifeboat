@@ -220,6 +220,11 @@ In disposable accounts on macOS 14 and the current macOS release, verify:
 Installation must always require the user's explicit Install and Relaunch
 action. Scheduled checks must not steal focus.
 
+For the 1.1.4 launch-crash hotfix, additionally verify both the 1.1.2 to 1.1.4
+Sparkle path and a manual 1.1.4 overwrite of an installed 1.1.3 copy. In both
+cases, confirm account data, Keychain access, provider marks, and launch-at-login
+continuity.
+
 Before promoting the first Sparkle-enabled release on the website and
 Homebrew, install a lower-build Sparkle-enabled candidate and verify that it
 updates through the published production appcast on both macOS 14 and current

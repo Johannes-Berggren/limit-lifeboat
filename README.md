@@ -43,6 +43,12 @@ open the DMG, and drag **Limit Lifeboat** to Applications. Limit Lifeboat runs
 in the menu bar and does not add a Dock icon. GitHub Releases is the only
 direct-download source for release artifacts.
 
+If version 1.1.3 quits immediately after updating, overwrite the app in
+Applications with version 1.1.4 or newer. Until 1.1.4 is published, the signed
+[1.1.2 release](https://github.com/Johannes-Berggren/limit-lifeboat/releases/tag/v1.1.2)
+is the recovery build. Replacing the app bundle preserves its Application
+Support and Keychain data.
+
 ## How it works
 
 - **Accounts register themselves.** Log in with `claude` or `codex login` in

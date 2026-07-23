@@ -139,9 +139,9 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         textAttributes: [NSAttributedString.Key: Any]
     ) -> NSAttributedString {
         guard let image = DS.providerMarkImage(provider) else {
-            return NSAttributedString(
-                string: " \(provider.displayName.uppercased()) ",
-                attributes: textAttributes
+            return ProviderMarkTitleFallback.attributedString(
+                for: provider,
+                textAttributes: textAttributes
             )
         }
 
@@ -199,4 +199,16 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         }
     }
 
+}
+
+enum ProviderMarkTitleFallback {
+    static func attributedString(
+        for provider: Provider,
+        textAttributes: [NSAttributedString.Key: Any]
+    ) -> NSAttributedString {
+        NSAttributedString(
+            string: " \(provider.displayName.uppercased()) ",
+            attributes: textAttributes
+        )
+    }
 }
