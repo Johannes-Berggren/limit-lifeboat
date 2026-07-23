@@ -30,23 +30,34 @@ final class ClaudeOAuthRefreshCoordinatorTests: XCTestCase {
         try lease.validate()
         try lease.release()
 
+        XCTAssertEqual(ClaudeOAuthLockKind.storageWrite.fileName, ".storage-write.lock")
+        XCTAssertEqual(
+            coordinator.storageWriteLockURL,
+            coordinator.claudeDirectory.appendingPathComponent(
+                ".storage-write.lock",
+                isDirectory: true
+            )
+        )
         XCTAssertEqual(
             fileSystem.events.filter { $0.hasPrefix("create:") },
             [
                 "create:\(coordinator.claudeDirectory.path)",
                 "create:\(coordinator.oauthRefreshLockURL.path)",
-                "create:\(coordinator.claudeLockURL.path)"
+                "create:\(coordinator.claudeLockURL.path)",
+                "create:\(coordinator.storageWriteLockURL.path)"
             ]
         )
         XCTAssertEqual(
             fileSystem.events.filter { $0.hasPrefix("remove:") },
             [
+                "remove:\(coordinator.storageWriteLockURL.path)",
                 "remove:\(coordinator.claudeLockURL.path)",
                 "remove:\(coordinator.oauthRefreshLockURL.path)"
             ]
         )
         XCTAssertFalse(FileManager.default.fileExists(atPath: coordinator.oauthRefreshLockURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: coordinator.claudeLockURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: coordinator.storageWriteLockURL.path))
     }
 
     func testWithLeaseInstallsTaskLocalProofAndCleansUp() async throws {
@@ -65,6 +76,7 @@ final class ClaudeOAuthRefreshCoordinatorTests: XCTestCase {
         }
         XCTAssertFalse(FileManager.default.fileExists(atPath: coordinator.oauthRefreshLockURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: coordinator.claudeLockURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: coordinator.storageWriteLockURL.path))
     }
 
     func testBusyLockUsesBoundedRetries() async throws {
@@ -141,6 +153,37 @@ final class ClaudeOAuthRefreshCoordinatorTests: XCTestCase {
         }
         XCTAssertFalse(FileManager.default.fileExists(atPath: coordinator.oauthRefreshLockURL.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: coordinator.claudeLockURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: coordinator.storageWriteLockURL.path))
+    }
+
+    func testContentionOnStorageWriteLockReleasesEarlierLocksInReverseOrder() async throws {
+        let fileSystem = RecordingOAuthLockFileSystem()
+        let coordinator = makeCoordinator(fileSystem: fileSystem)
+        try FileManager.default.createDirectory(
+            at: coordinator.claudeDirectory,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: coordinator.storageWriteLockURL,
+            withIntermediateDirectories: false
+        )
+
+        do {
+            _ = try await coordinator.acquire()
+            XCTFail("Expected storage-write lock contention")
+        } catch let error as ClaudeOAuthRefreshCoordinatorError {
+            XCTAssertEqual(error, .busy(lock: .storageWrite))
+        }
+        XCTAssertEqual(
+            fileSystem.events.filter { $0.hasPrefix("remove:") },
+            [
+                "remove:\(coordinator.claudeLockURL.path)",
+                "remove:\(coordinator.oauthRefreshLockURL.path)"
+            ]
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: coordinator.oauthRefreshLockURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: coordinator.claudeLockURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: coordinator.storageWriteLockURL.path))
     }
 
     func testExternalProcessLockExcludesCoordinator() async throws {
@@ -341,9 +384,39 @@ final class ClaudeOAuthRefreshCoordinatorTests: XCTestCase {
         XCTAssertThrowsError(try lease.release())
         XCTAssertTrue(FileManager.default.fileExists(atPath: coordinator.oauthRefreshLockURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: coordinator.claudeLockURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: coordinator.storageWriteLockURL.path))
     }
 
-    func testHeartbeatAdvancesBothLockModificationDates() async throws {
+    func testStorageWriteReplacementLosesLeaseAndReplacementIsPreserved() async throws {
+        let coordinator = makeCoordinator()
+        let lease = try await coordinator.acquire()
+        try FileManager.default.moveItem(
+            at: coordinator.storageWriteLockURL,
+            to: root.appendingPathComponent("original-storage-write-lock", isDirectory: true)
+        )
+        try FileManager.default.createDirectory(
+            at: coordinator.storageWriteLockURL,
+            withIntermediateDirectories: false
+        )
+
+        XCTAssertThrowsError(try lease.validate()) { error in
+            XCTAssertEqual(
+                error as? ClaudeOAuthRefreshCoordinatorError,
+                .leaseLost(lock: .storageWrite)
+            )
+        }
+        XCTAssertThrowsError(try lease.release()) { error in
+            XCTAssertEqual(
+                error as? ClaudeOAuthRefreshCoordinatorError,
+                .leaseLost(lock: .storageWrite)
+            )
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: coordinator.oauthRefreshLockURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: coordinator.claudeLockURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: coordinator.storageWriteLockURL.path))
+    }
+
+    func testHeartbeatAdvancesAllLockModificationDates() async throws {
         let coordinator = ClaudeOAuthRefreshCoordinator(
             homeDirectory: home,
             configuration: .init(staleAfter: 60, heartbeatInterval: 0.02, retryCount: 0),
@@ -353,6 +426,9 @@ final class ClaudeOAuthRefreshCoordinatorTests: XCTestCase {
         let lease = try await coordinator.acquire()
         let oauthBefore = try XCTUnwrap(try fileSystem.metadata(at: coordinator.oauthRefreshLockURL)?.modifiedAt)
         let claudeBefore = try XCTUnwrap(try fileSystem.metadata(at: coordinator.claudeLockURL)?.modifiedAt)
+        let storageWriteBefore = try XCTUnwrap(
+            try fileSystem.metadata(at: coordinator.storageWriteLockURL)?.modifiedAt
+        )
 
         // The heartbeat fires on a background timer and stamps the mtime with
         // the wall clock. Poll for the advance rather than assuming one fixed
@@ -362,15 +438,24 @@ final class ClaudeOAuthRefreshCoordinatorTests: XCTestCase {
         try await waitUntil(timeout: 5) {
             guard
                 let oauthNow = try fileSystem.metadata(at: coordinator.oauthRefreshLockURL)?.modifiedAt,
-                let claudeNow = try fileSystem.metadata(at: coordinator.claudeLockURL)?.modifiedAt
+                let claudeNow = try fileSystem.metadata(at: coordinator.claudeLockURL)?.modifiedAt,
+                let storageWriteNow = try fileSystem.metadata(
+                    at: coordinator.storageWriteLockURL
+                )?.modifiedAt
             else { return false }
-            return oauthNow > oauthBefore && claudeNow > claudeBefore
+            return oauthNow > oauthBefore
+                && claudeNow > claudeBefore
+                && storageWriteNow > storageWriteBefore
         }
 
         let oauthAfter = try XCTUnwrap(try fileSystem.metadata(at: coordinator.oauthRefreshLockURL)?.modifiedAt)
         let claudeAfter = try XCTUnwrap(try fileSystem.metadata(at: coordinator.claudeLockURL)?.modifiedAt)
+        let storageWriteAfter = try XCTUnwrap(
+            try fileSystem.metadata(at: coordinator.storageWriteLockURL)?.modifiedAt
+        )
         XCTAssertGreaterThan(oauthAfter, oauthBefore)
         XCTAssertGreaterThan(claudeAfter, claudeBefore)
+        XCTAssertGreaterThan(storageWriteAfter, storageWriteBefore)
         try lease.release()
     }
 
@@ -408,6 +493,74 @@ final class ClaudeOAuthRefreshCoordinatorTests: XCTestCase {
             }
         }
         XCTAssertFalse(FileManager.default.fileExists(atPath: coordinator.claudeDirectory.path))
+    }
+
+    func testRejectsNondefaultSecureStorageConfigDirectory() async throws {
+        let coordinator = ClaudeOAuthRefreshCoordinator(
+            homeDirectory: home,
+            configuration: .init(heartbeatInterval: 3_600, retryCount: 0),
+            environment: [
+                "CLAUDE_SECURESTORAGE_CONFIG_DIR": root
+                    .appendingPathComponent("custom-secure-storage")
+                    .path
+            ]
+        )
+
+        do {
+            _ = try await coordinator.acquire()
+            XCTFail("Expected ambiguous configuration")
+        } catch let error as ClaudeOAuthRefreshCoordinatorError {
+            guard case .ambiguousConfiguration = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: coordinator.claudeDirectory.path))
+    }
+
+    func testRejectsEveryNonemptySecureStorageConfigDirectory() async throws {
+        let defaultPath = home.appendingPathComponent(".claude").path
+        for configured in [" ", defaultPath, "\(defaultPath) "] {
+            let coordinator = ClaudeOAuthRefreshCoordinator(
+                homeDirectory: home,
+                configuration: .init(heartbeatInterval: 3_600, retryCount: 0),
+                environment: [
+                    "CLAUDE_SECURESTORAGE_CONFIG_DIR": configured
+                ]
+            )
+
+            do {
+                _ = try await coordinator.acquire()
+                XCTFail("Expected ambiguous configuration for \(configured.debugDescription)")
+            } catch let error as ClaudeOAuthRefreshCoordinatorError {
+                guard case .ambiguousConfiguration = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+            }
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: defaultPath))
+    }
+
+    func testRejectsCustomOAuthStorageBackend() async throws {
+        let coordinator = ClaudeOAuthRefreshCoordinator(
+            homeDirectory: home,
+            configuration: .init(heartbeatInterval: 3_600, retryCount: 0),
+            environment: [
+                "CLAUDE_CODE_CUSTOM_OAUTH_URL": "https://console.anthropic.com"
+            ]
+        )
+
+        do {
+            _ = try await coordinator.acquire()
+            XCTFail("Expected ambiguous configuration")
+        } catch let error as ClaudeOAuthRefreshCoordinatorError {
+            guard case .ambiguousConfiguration(let reason) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertTrue(reason.contains("CLAUDE_CODE_CUSTOM_OAUTH_URL"))
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: coordinator.claudeDirectory.path)
+        )
     }
 
     private func makeCoordinator(

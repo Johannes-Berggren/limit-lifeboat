@@ -133,7 +133,7 @@ struct MenuRootView: View {
                     Divider()
                 }
                 if state.canAuthorizeClaudeKeychain {
-                    Button("Authorize Keychain Access…") {
+                    Button("Authorize Claude Keychain Access…") {
                         Task { await state.authorizeClaudeKeychainAccess() }
                     }
                     .disabled(state.isAuthorizingClaudeKeychain)
@@ -149,7 +149,7 @@ struct MenuRootView: View {
             .help(state.claudeKeychainAuthorizationDiagnostic != nil
                 ? "Claude Keychain state needs attention"
                 : (state.shouldHighlightClaudeKeychainAuthorization
-                    ? "Limit Lifeboat needs one explicit Always Allow authorization"
+                    ? "Claude’s shared security helper needs one explicit Always Allow authorization"
                     : "More actions"))
 
             Button {

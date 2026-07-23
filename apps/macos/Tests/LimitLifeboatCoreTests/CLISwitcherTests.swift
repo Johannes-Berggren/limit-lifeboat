@@ -732,6 +732,7 @@ final class CLISwitcherTests: XCTestCase {
         let store = MemoryCredentialStore()
         let source = fakeClaudeSource()
         source.exactLocation = testClaudeKeychainLocation(reference: "restore-success")
+        source.advanceExactLocationAfterWrite = true
         let switcher = CLISwitcher(
             homeDirectory: fixture.home,
             backupDirectory: fixture.backups,
@@ -968,7 +969,7 @@ final class CLISwitcherTests: XCTestCase {
         ])
 
         XCTAssertThrowsError(
-            try transaction.restore(snapshot, validateRestoredCredentials: {
+            try transaction.restore(snapshot, validateRestoredCredentials: { _ in
                 throw CLISwitcherError.restoreValidationFailed(
                     provider: .codex,
                     reason: "test mismatch",
@@ -982,6 +983,643 @@ final class CLISwitcherTests: XCTestCase {
         }
         XCTAssertEqual(try Data(contentsOf: authURL), original)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.backups.path), [])
+    }
+
+    func testExactClaudeRestoreWithMissingLiveBaselineAbortsBeforeFileMutation() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let claudeURL = fixture.home.appendingPathComponent(".claude.json")
+        let originalFile = Data(#"{"theme":"dark"}"#.utf8)
+        try originalFile.write(to: claudeURL)
+
+        let source = FakeClaudeCLICredentialSource()
+        source.exactLocation = testClaudeKeychainLocation(reference: "missing-baseline")
+        source.itemJSON = nil
+        let transaction = CredentialRestoreTransaction(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            fileManager: .default,
+            claudeCredentialSource: source
+        )
+        let snapshot = CredentialSnapshot(provider: .claude, items: [
+            CredentialSnapshotItem(
+                relativePath: ".claude.json",
+                kind: .fullFile,
+                contents: Data(#"{"theme":"light"}"#.utf8),
+                posixPermissions: 0o600
+            ),
+            CredentialSnapshotItem(
+                relativePath: CLISwitcher.claudeKeychainItemPath,
+                kind: .keychainJSONFields,
+                contents: Data(#"{"accessToken":"target"}"#.utf8),
+                posixPermissions: nil
+            )
+        ])
+
+        XCTAssertThrowsError(
+            try transaction.restore(
+                snapshot,
+                claudeKeychainItemLocation: source.exactLocation,
+                validateRestoredCredentials: { _ in }
+            )
+        ) { error in
+            guard case CLISwitcherError.backupFailed(
+                CLISwitcher.claudeKeychainItemPath,
+                _
+            ) = error else {
+                return XCTFail("Expected missing live-item backup failure, got \(error)")
+            }
+        }
+        XCTAssertEqual(try Data(contentsOf: claudeURL), originalFile)
+        XCTAssertTrue(source.writes.isEmpty)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.backups.path), [])
+    }
+
+    func testPostCommitHelperFailurePreservesWriteAndRecoveryForRetry() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let source = fakeClaudeSource(accessToken: "original")
+        let location = testClaudeKeychainLocation(reference: "uncertain-write")
+        source.exactLocation = location
+        source.advanceExactLocationAfterWrite = true
+        let originalItem = try XCTUnwrap(source.itemJSON)
+        source.failAfterWriteNumber = 1
+
+        let transaction = CredentialRestoreTransaction(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            fileManager: .default,
+            claudeCredentialSource: source
+        )
+        let snapshot = CredentialSnapshot(provider: .claude, items: [
+            CredentialSnapshotItem(
+                relativePath: CLISwitcher.claudeKeychainItemPath,
+                kind: .keychainJSONFields,
+                contents: Data(#"{"accessToken":"target"}"#.utf8),
+                posixPermissions: nil
+            )
+        ])
+
+        var recoveryDirectory: URL?
+        XCTAssertThrowsError(
+            try transaction.restore(
+                snapshot,
+                claudeKeychainItemLocation: location,
+                validateRestoredCredentials: { _ in }
+            )
+        ) { error in
+            guard case CLISwitcherError.rollbackConflict(
+                let paths,
+                let recovery,
+                let underlying,
+                _
+            ) = error else {
+                return XCTFail("Expected rollbackConflict, got \(error)")
+            }
+            XCTAssertEqual(paths, [CLISwitcher.claudeKeychainItemPath])
+            guard case InjectedRestoreFailure.afterWrite = underlying else {
+                return XCTFail("Expected injected failure, got \(underlying)")
+            }
+            recoveryDirectory = recovery
+        }
+        XCTAssertEqual(source.writes.count, 1)
+        XCTAssertNotEqual(source.itemJSON, originalItem)
+        let recovery = try XCTUnwrap(recoveryDirectory)
+        let backups = try FileManager.default.contentsOfDirectory(
+            at: recovery,
+            includingPropertiesForKeys: nil
+        )
+        XCTAssertEqual(backups.count, 1)
+        XCTAssertEqual(try Data(contentsOf: backups[0]), originalItem)
+    }
+
+    func testPreHelperLeaseLossDoesNotInventKeychainRollbackConflict() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let source = fakeClaudeSource(accessToken: "original")
+        let location = testClaudeKeychainLocation(reference: "pre-helper-lease-loss")
+        source.exactLocation = location
+        let originalItem = try XCTUnwrap(source.itemJSON)
+        let leaseError = ClaudeOAuthRefreshCoordinatorError.leaseLost(
+            lock: .storageWrite
+        )
+        source.beforeWrite = { throw leaseError }
+
+        let transaction = CredentialRestoreTransaction(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            fileManager: .default,
+            claudeCredentialSource: source
+        )
+        let snapshot = CredentialSnapshot(provider: .claude, items: [
+            CredentialSnapshotItem(
+                relativePath: CLISwitcher.claudeKeychainItemPath,
+                kind: .keychainJSONFields,
+                contents: Data(#"{"accessToken":"target"}"#.utf8),
+                posixPermissions: nil
+            )
+        ])
+
+        XCTAssertThrowsError(
+            try transaction.restore(
+                snapshot,
+                claudeKeychainItemLocation: location,
+                validateRestoredCredentials: { _ in }
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ClaudeOAuthRefreshCoordinatorError,
+                leaseError
+            )
+        }
+        XCTAssertTrue(source.writes.isEmpty)
+        XCTAssertEqual(source.itemJSON, originalItem)
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(
+                atPath: fixture.backups.path
+            ),
+            []
+        )
+    }
+
+    func testPreHelperItemChangeWithTargetBytesPreservesExternalGeneration() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let source = fakeClaudeSource(accessToken: "original")
+        let location = testClaudeKeychainLocation(reference: "outside-update")
+        source.exactLocation = location
+        let originalItem = try XCTUnwrap(source.itemJSON)
+        let targetFields = Data(#"{"accessToken":"target"}"#.utf8)
+        let externalItem = try mergeClaudeAiOauth(
+            targetFields,
+            intoItemJSON: originalItem
+        )
+        source.beforeWrite = {
+            source.itemJSON = externalItem
+            source.exactLocation = ClaudeKeychainItemLocation(
+                serviceName: location.serviceName,
+                accountName: location.accountName,
+                keychainPath: location.keychainPath,
+                persistentReference: location.persistentReference,
+                creationDate: location.creationDate,
+                modificationDate: location.modificationDate.addingTimeInterval(1),
+                label: location.label
+            )
+            throw ClaudeCodeCredentialsKeychainError.securityToolError(
+                .itemChanged
+            )
+        }
+
+        let transaction = CredentialRestoreTransaction(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            fileManager: .default,
+            claudeCredentialSource: source
+        )
+        let snapshot = CredentialSnapshot(provider: .claude, items: [
+            CredentialSnapshotItem(
+                relativePath: CLISwitcher.claudeKeychainItemPath,
+                kind: .keychainJSONFields,
+                contents: targetFields,
+                posixPermissions: nil
+            )
+        ])
+
+        XCTAssertThrowsError(
+            try transaction.restore(
+                snapshot,
+                claudeKeychainItemLocation: location,
+                validateRestoredCredentials: { _ in }
+            )
+        ) { error in
+            guard case ClaudeCodeCredentialsKeychainError.securityToolError(
+                .itemChanged
+            ) = error else {
+                return XCTFail("Expected itemChanged, got \(error)")
+            }
+        }
+        XCTAssertTrue(source.writes.isEmpty)
+        XCTAssertEqual(source.itemJSON, externalItem)
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(
+                atPath: fixture.backups.path
+            ),
+            []
+        )
+    }
+
+    func testPostHelperLockedErrorPreservesWriteAndRecoveryForRetry() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let source = fakeClaudeSource(accessToken: "original")
+        let location = testClaudeKeychainLocation(reference: "post-helper-lock")
+        source.exactLocation = location
+        source.advanceExactLocationAfterWrite = true
+        source.errorAfterWrite =
+            ClaudeCodeCredentialsKeychainError.securityToolError(
+                .keychainLocked
+            )
+        let originalItem = try XCTUnwrap(source.itemJSON)
+
+        let transaction = CredentialRestoreTransaction(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            fileManager: .default,
+            claudeCredentialSource: source
+        )
+        let snapshot = CredentialSnapshot(provider: .claude, items: [
+            CredentialSnapshotItem(
+                relativePath: CLISwitcher.claudeKeychainItemPath,
+                kind: .keychainJSONFields,
+                contents: Data(#"{"accessToken":"target"}"#.utf8),
+                posixPermissions: nil
+            )
+        ])
+
+        var recoveryDirectory: URL?
+        XCTAssertThrowsError(
+            try transaction.restore(
+                snapshot,
+                claudeKeychainItemLocation: location,
+                validateRestoredCredentials: { _ in }
+            )
+        ) { error in
+            guard case CLISwitcherError.rollbackConflict(
+                let paths,
+                let recovery,
+                let underlying,
+                let disposition
+            ) = error else {
+                return XCTFail("Expected rollbackConflict, got \(error)")
+            }
+            XCTAssertEqual(paths, [CLISwitcher.claudeKeychainItemPath])
+            XCTAssertEqual(disposition, .interactionRequired)
+            guard case ClaudeCodeCredentialsKeychainError.securityToolError(
+                .keychainLocked
+            ) = underlying else {
+                return XCTFail("Expected keychainLocked, got \(underlying)")
+            }
+            recoveryDirectory = recovery
+        }
+        XCTAssertEqual(source.writes.count, 1)
+        XCTAssertNotEqual(source.itemJSON, originalItem)
+        let recovery = try XCTUnwrap(recoveryDirectory)
+        let backups = try FileManager.default.contentsOfDirectory(
+            at: recovery,
+            includingPropertiesForKeys: nil
+        )
+        XCTAssertEqual(backups.count, 1)
+        XCTAssertEqual(try Data(contentsOf: backups[0]), originalItem)
+    }
+
+    func testConfirmedWriteDoesNotRollbackAliasedMatchingKeychainGeneration() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let source = fakeClaudeSource(accessToken: "original")
+        let location = testClaudeKeychainLocation(
+            reference: "confirmed-write-aba"
+        )
+        source.exactLocation = location
+        source.advanceExactLocationAfterWrite = true
+        let originalItem = try XCTUnwrap(source.itemJSON)
+        let targetFields = Data(#"{"accessToken":"target"}"#.utf8)
+        let externalItem = try mergeClaudeAiOauth(
+            targetFields,
+            intoItemJSON: originalItem
+        )
+
+        let transaction = CredentialRestoreTransaction(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            fileManager: .default,
+            claudeCredentialSource: source
+        )
+        let snapshot = CredentialSnapshot(provider: .claude, items: [
+            CredentialSnapshotItem(
+                relativePath: CLISwitcher.claudeKeychainItemPath,
+                kind: .keychainJSONFields,
+                contents: targetFields,
+                posixPermissions: nil
+            )
+        ])
+
+        var recoveryDirectory: URL?
+        XCTAssertThrowsError(
+            try transaction.restore(
+                snapshot,
+                claudeKeychainItemLocation: location,
+                validateRestoredCredentials: { currentLocation in
+                    let current = try XCTUnwrap(currentLocation)
+                    source.itemJSON = externalItem
+                    source.exactLocation = ClaudeKeychainItemLocation(
+                        serviceName: current.serviceName,
+                        accountName: current.accountName,
+                        keychainPath: current.keychainPath,
+                        persistentReference: current.persistentReference,
+                        creationDate: current.creationDate,
+                        // Legacy Keychain `mdat` is second-granularity, so a
+                        // distinct rapid update can alias this exact value.
+                        modificationDate: current.modificationDate,
+                        label: current.label
+                    )
+                    throw InjectedRestoreFailure.afterWrite
+                }
+            )
+        ) { error in
+            guard case CLISwitcherError.rollbackConflict(
+                let paths,
+                let recovery,
+                let underlying,
+                _
+            ) = error else {
+                return XCTFail("Expected rollbackConflict, got \(error)")
+            }
+            XCTAssertEqual(paths, [CLISwitcher.claudeKeychainItemPath])
+            guard case InjectedRestoreFailure.afterWrite = underlying else {
+                return XCTFail("Expected injected failure, got \(underlying)")
+            }
+            recoveryDirectory = recovery
+        }
+
+        XCTAssertEqual(source.writes.count, 1)
+        XCTAssertEqual(source.itemJSON, externalItem)
+        let recovery = try XCTUnwrap(recoveryDirectory)
+        let backups = try FileManager.default.contentsOfDirectory(
+            at: recovery,
+            includingPropertiesForKeys: nil
+        )
+        XCTAssertEqual(backups.count, 1)
+        XCTAssertEqual(try Data(contentsOf: backups[0]), originalItem)
+    }
+
+    func testConcurrentKeychainRecreationAfterHelperStartIsNeverRolledBack() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let source = fakeClaudeSource(accessToken: "original")
+        let location = testClaudeKeychainLocation(
+            reference: "deleted-original"
+        )
+        source.exactLocation = location
+        let originalItem = try XCTUnwrap(source.itemJSON)
+        let replacement = testClaudeKeychainLocation(
+            reference: "recreated-item"
+        )
+        source.afterHelperStart = {
+            source.exactLocation = replacement
+        }
+        source.errorAfterWrite =
+            ClaudeCodeCredentialsKeychainError.securityToolError(.itemChanged)
+
+        let transaction = CredentialRestoreTransaction(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            fileManager: .default,
+            claudeCredentialSource: source
+        )
+        let snapshot = CredentialSnapshot(provider: .claude, items: [
+            CredentialSnapshotItem(
+                relativePath: CLISwitcher.claudeKeychainItemPath,
+                kind: .keychainJSONFields,
+                contents: Data(#"{"accessToken":"target"}"#.utf8),
+                posixPermissions: nil
+            )
+        ])
+
+        var recoveryDirectory: URL?
+        XCTAssertThrowsError(
+            try transaction.restore(
+                snapshot,
+                claudeKeychainItemLocation: location,
+                validateRestoredCredentials: { _ in }
+            )
+        ) { error in
+            guard case CLISwitcherError.rollbackConflict(
+                let paths,
+                let recovery,
+                let underlying,
+                _
+            ) = error else {
+                return XCTFail("Expected rollbackConflict, got \(error)")
+            }
+            XCTAssertEqual(paths, [CLISwitcher.claudeKeychainItemPath])
+            guard case ClaudeCodeCredentialsKeychainError.securityToolError(
+                .itemChanged
+            ) = underlying else {
+                return XCTFail("Expected itemChanged, got \(underlying)")
+            }
+            recoveryDirectory = recovery
+        }
+
+        XCTAssertEqual(source.writes.count, 1)
+        XCTAssertEqual(source.exactLocation?.identity, replacement.identity)
+        XCTAssertNotEqual(source.itemJSON, originalItem)
+        let recovery = try XCTUnwrap(recoveryDirectory)
+        let backups = try FileManager.default.contentsOfDirectory(
+            at: recovery,
+            includingPropertiesForKeys: nil
+        )
+        XCTAssertEqual(backups.count, 1)
+        XCTAssertEqual(try Data(contentsOf: backups[0]), originalItem)
+    }
+
+    func testCancelledHelperLaunchDoesNotRetryOrReconcileKeychainData() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let source = fakeClaudeSource(accessToken: "original")
+        let location = testClaudeKeychainLocation(reference: "cancelled-helper")
+        source.exactLocation = location
+        source.errorAfterHelperStart =
+            ClaudeCodeCredentialsKeychainError.securityToolError(
+                .userCancelled
+            )
+        let originalItem = try XCTUnwrap(source.itemJSON)
+
+        let transaction = CredentialRestoreTransaction(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            fileManager: .default,
+            claudeCredentialSource: source
+        )
+        let snapshot = CredentialSnapshot(provider: .claude, items: [
+            CredentialSnapshotItem(
+                relativePath: CLISwitcher.claudeKeychainItemPath,
+                kind: .keychainJSONFields,
+                contents: Data(#"{"accessToken":"target"}"#.utf8),
+                posixPermissions: nil
+            )
+        ])
+
+        XCTAssertThrowsError(
+            try transaction.restore(
+                snapshot,
+                claudeKeychainItemLocation: location,
+                validateRestoredCredentials: { _ in }
+            )
+        ) { error in
+            guard case ClaudeCodeCredentialsKeychainError.securityToolError(
+                .userCancelled
+            ) = error else {
+                return XCTFail("Expected userCancelled, got \(error)")
+            }
+        }
+        XCTAssertEqual(source.readCount, 2)
+        XCTAssertTrue(source.writes.isEmpty)
+        XCTAssertEqual(source.itemJSON, originalItem)
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(
+                atPath: fixture.backups.path
+            ),
+            []
+        )
+    }
+
+    func testTimedOutHelperNeverClaimsMatchingExternalTargetBytes() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let source = fakeClaudeSource(accessToken: "original")
+        let location = testClaudeKeychainLocation(reference: "timeout-race")
+        source.exactLocation = location
+        let originalItem = try XCTUnwrap(source.itemJSON)
+        let targetFields = Data(#"{"accessToken":"target"}"#.utf8)
+        let externalItem = try mergeClaudeAiOauth(
+            targetFields,
+            intoItemJSON: originalItem
+        )
+        source.afterHelperStart = {
+            source.itemJSON = externalItem
+            source.exactLocation = ClaudeKeychainItemLocation(
+                serviceName: location.serviceName,
+                accountName: location.accountName,
+                keychainPath: location.keychainPath,
+                persistentReference: location.persistentReference,
+                creationDate: location.creationDate,
+                modificationDate: location.modificationDate.addingTimeInterval(1),
+                label: location.label
+            )
+        }
+        source.errorAfterHelperStart =
+            ClaudeCodeCredentialsKeychainError.securityToolError(
+                .toolTimedOut
+            )
+
+        let transaction = CredentialRestoreTransaction(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            fileManager: .default,
+            claudeCredentialSource: source
+        )
+        let snapshot = CredentialSnapshot(provider: .claude, items: [
+            CredentialSnapshotItem(
+                relativePath: CLISwitcher.claudeKeychainItemPath,
+                kind: .keychainJSONFields,
+                contents: targetFields,
+                posixPermissions: nil
+            )
+        ])
+
+        var recoveryDirectory: URL?
+        XCTAssertThrowsError(
+            try transaction.restore(
+                snapshot,
+                claudeKeychainItemLocation: location,
+                validateRestoredCredentials: { _ in }
+            )
+        ) { error in
+            guard case CLISwitcherError.rollbackConflict(
+                let paths,
+                let recovery,
+                let underlying,
+                _
+            ) = error else {
+                return XCTFail("Expected rollbackConflict, got \(error)")
+            }
+            XCTAssertEqual(
+                paths,
+                [CLISwitcher.claudeKeychainItemPath]
+            )
+            guard case ClaudeCodeCredentialsKeychainError.securityToolError(
+                .toolTimedOut
+            ) = underlying else {
+                return XCTFail("Expected toolTimedOut, got \(underlying)")
+            }
+            recoveryDirectory = recovery
+        }
+        XCTAssertTrue(source.writes.isEmpty)
+        XCTAssertEqual(source.itemJSON, externalItem)
+        let recovery = try XCTUnwrap(recoveryDirectory)
+        let backups = try FileManager.default.contentsOfDirectory(
+            at: recovery,
+            includingPropertiesForKeys: nil
+        )
+        XCTAssertEqual(backups.count, 1)
+        XCTAssertEqual(try Data(contentsOf: backups[0]), originalItem)
+    }
+
+    func testKnownNonzeroHelperFailureNeverClaimsExternalTargetBytes() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let source = fakeClaudeSource(accessToken: "original")
+        let location = testClaudeKeychainLocation(reference: "nonzero-race")
+        source.exactLocation = location
+        let originalItem = try XCTUnwrap(source.itemJSON)
+        let targetFields = Data(#"{"accessToken":"target"}"#.utf8)
+        let externalItem = try mergeClaudeAiOauth(
+            targetFields,
+            intoItemJSON: originalItem
+        )
+        source.afterHelperStart = {
+            source.itemJSON = externalItem
+            source.exactLocation = ClaudeKeychainItemLocation(
+                serviceName: location.serviceName,
+                accountName: location.accountName,
+                keychainPath: location.keychainPath,
+                persistentReference: location.persistentReference,
+                creationDate: location.creationDate,
+                modificationDate: location.modificationDate.addingTimeInterval(1),
+                label: location.label
+            )
+        }
+        source.errorAfterHelperStart =
+            ClaudeCodeCredentialsKeychainError.securityToolError(
+                .toolFailed(exitCode: 1)
+            )
+
+        let transaction = CredentialRestoreTransaction(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            fileManager: .default,
+            claudeCredentialSource: source
+        )
+        let snapshot = CredentialSnapshot(provider: .claude, items: [
+            CredentialSnapshotItem(
+                relativePath: CLISwitcher.claudeKeychainItemPath,
+                kind: .keychainJSONFields,
+                contents: targetFields,
+                posixPermissions: nil
+            )
+        ])
+
+        XCTAssertThrowsError(
+            try transaction.restore(
+                snapshot,
+                claudeKeychainItemLocation: location,
+                validateRestoredCredentials: { _ in }
+            )
+        ) { error in
+            guard case ClaudeCodeCredentialsKeychainError.securityToolError(
+                .toolFailed(exitCode: 1)
+            ) = error else {
+                return XCTFail("Expected toolFailed(1), got \(error)")
+            }
+        }
+        XCTAssertTrue(source.writes.isEmpty)
+        XCTAssertEqual(source.itemJSON, externalItem)
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(
+                atPath: fixture.backups.path
+            ),
+            []
+        )
     }
 
     func testFailureImmediatelyAfterFileWriteRollsBackAndCleansRollbackMaterial() throws {
@@ -1014,7 +1652,7 @@ final class CLISwitcherTests: XCTestCase {
         ])
 
         XCTAssertThrowsError(
-            try transaction.restore(snapshot, validateRestoredCredentials: {})
+            try transaction.restore(snapshot, validateRestoredCredentials: { _ in })
         ) { error in
             guard case InjectedRestoreFailure.afterWrite = error else {
                 return XCTFail("Expected injected post-write failure, got \(error)")
@@ -1022,6 +1660,130 @@ final class CLISwitcherTests: XCTestCase {
         }
         XCTAssertEqual(try Data(contentsOf: authURL), original)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.backups.path), [])
+    }
+
+    func testFinalFileCASDoesNotOverwriteMatchingExternalGeneration() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let authURL = fixture.home.appendingPathComponent(".codex/auth.json")
+        try FileManager.default.createDirectory(
+            at: authURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let original = Data(
+            #"{"tokens":{"access_token":"original"}}"#.utf8
+        )
+        let target = Data(
+            #"{"tokens":{"access_token":"target"}}"#.utf8
+        )
+        try original.write(to: authURL)
+
+        let transaction = CredentialRestoreTransaction(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            fileManager: .default,
+            claudeCredentialSource: FakeClaudeCLICredentialSource(),
+            hooks: CredentialRestoreHooks(beforeDestinationWrite: {
+                destination in
+                try original.write(to: destination, options: [.atomic])
+            })
+        )
+        let snapshot = CredentialSnapshot(provider: .codex, items: [
+            CredentialSnapshotItem(
+                relativePath: ".codex/auth.json",
+                kind: .fullFile,
+                contents: target,
+                posixPermissions: 0o600
+            )
+        ])
+
+        XCTAssertThrowsError(
+            try transaction.restore(
+                snapshot,
+                validateRestoredCredentials: { _ in }
+            )
+        ) { error in
+            guard case CLISwitcherError.credentialConflict(authURL.path)
+                = error else {
+                return XCTFail("Expected credentialConflict, got \(error)")
+            }
+        }
+
+        XCTAssertEqual(try Data(contentsOf: authURL), original)
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(
+                atPath: fixture.backups.path
+            ),
+            []
+        )
+    }
+
+    func testRollbackDoesNotOverwriteNewerFileGenerationWithMatchingBytes() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let authURL = fixture.home.appendingPathComponent(".codex/auth.json")
+        try FileManager.default.createDirectory(
+            at: authURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let original = Data(
+            #"{"tokens":{"access_token":"original"}}"#.utf8
+        )
+        let target = Data(
+            #"{"tokens":{"access_token":"target"}}"#.utf8
+        )
+        try original.write(to: authURL)
+
+        let transaction = CredentialRestoreTransaction(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            fileManager: .default,
+            claudeCredentialSource: FakeClaudeCLICredentialSource(),
+            hooks: CredentialRestoreHooks(afterDestinationWrite: {
+                destination in
+                try target.write(to: destination, options: [.atomic])
+                throw InjectedRestoreFailure.afterWrite
+            })
+        )
+        let snapshot = CredentialSnapshot(provider: .codex, items: [
+            CredentialSnapshotItem(
+                relativePath: ".codex/auth.json",
+                kind: .fullFile,
+                contents: target,
+                posixPermissions: 0o600
+            )
+        ])
+
+        var recoveryDirectory: URL?
+        XCTAssertThrowsError(
+            try transaction.restore(
+                snapshot,
+                validateRestoredCredentials: { _ in }
+            )
+        ) { error in
+            guard case CLISwitcherError.rollbackConflict(
+                let paths,
+                let recovery,
+                let underlying,
+                _
+            ) = error else {
+                return XCTFail("Expected rollbackConflict, got \(error)")
+            }
+            XCTAssertEqual(paths, [authURL.path])
+            guard case InjectedRestoreFailure.afterWrite = underlying else {
+                return XCTFail("Expected injected failure, got \(underlying)")
+            }
+            recoveryDirectory = recovery
+        }
+
+        XCTAssertEqual(try Data(contentsOf: authURL), target)
+        let recovery = try XCTUnwrap(recoveryDirectory)
+        let backups = try FileManager.default.contentsOfDirectory(
+            at: recovery,
+            includingPropertiesForKeys: nil
+        )
+        XCTAssertEqual(backups.count, 1)
+        XCTAssertEqual(try Data(contentsOf: backups[0]), original)
     }
 
     func testClaudeLeaseLossAfterFileWritePreventsUnlockedRollback() throws {
@@ -1065,7 +1827,7 @@ final class CLISwitcherTests: XCTestCase {
 
         var recoveryDirectory: URL?
         XCTAssertThrowsError(
-            try transaction.restore(snapshot, validateRestoredCredentials: {})
+            try transaction.restore(snapshot, validateRestoredCredentials: { _ in })
         ) { error in
             guard case CLISwitcherError.rollbackConflict(
                 let paths,
@@ -1092,6 +1854,79 @@ final class CLISwitcherTests: XCTestCase {
             "target@example.com",
             "The app must not roll Claude files back after losing the lease"
         )
+        let recovery = try XCTUnwrap(recoveryDirectory)
+        let backups = try FileManager.default.contentsOfDirectory(
+            at: recovery,
+            includingPropertiesForKeys: nil
+        )
+        XCTAssertEqual(backups.count, 1)
+        XCTAssertEqual(try Data(contentsOf: backups[0]), original)
+    }
+
+    func testClaudeLeaseLossAfterRollbackWriteRetainsRecoveryMaterial() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let claudeURL = fixture.home.appendingPathComponent(".claude.json")
+        let original = Data(
+            #"{"oauthAccount":{"emailAddress":"original@example.com"}}"#.utf8
+        )
+        let target = Data(
+            #"{"oauthAccount":{"emailAddress":"target@example.com"}}"#.utf8
+        )
+        try original.write(to: claudeURL)
+
+        var validations = 0
+        let transaction = CredentialRestoreTransaction(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            fileManager: .default,
+            claudeCredentialSource: FakeClaudeCLICredentialSource(),
+            hooks: CredentialRestoreHooks(afterDestinationWrite: { _ in
+                throw InjectedRestoreFailure.afterWrite
+            }),
+            validateMutationLease: {
+                validations += 1
+                if validations >= 7 {
+                    throw ClaudeOAuthRefreshCoordinatorError.leaseLost(
+                        lock: .storageWrite
+                    )
+                }
+            }
+        )
+        let snapshot = CredentialSnapshot(provider: .claude, items: [
+            CredentialSnapshotItem(
+                relativePath: ".claude.json",
+                kind: .fullFile,
+                contents: target,
+                posixPermissions: 0o600
+            )
+        ])
+
+        var recoveryDirectory: URL?
+        XCTAssertThrowsError(
+            try transaction.restore(
+                snapshot,
+                validateRestoredCredentials: { _ in }
+            )
+        ) { error in
+            guard case CLISwitcherError.rollbackConflict(
+                let paths,
+                let recovery,
+                let underlying,
+                _
+            ) = error else {
+                return XCTFail("Expected rollbackConflict, got \(error)")
+            }
+            XCTAssertEqual(paths, [claudeURL.path])
+            XCTAssertEqual(
+                underlying as? ClaudeOAuthRefreshCoordinatorError,
+                .leaseLost(lock: .storageWrite)
+            )
+            recoveryDirectory = recovery
+        }
+
+        XCTAssertEqual(validations, 7)
+        XCTAssertEqual(try Data(contentsOf: claudeURL), original)
         let recovery = try XCTUnwrap(recoveryDirectory)
         let backups = try FileManager.default.contentsOfDirectory(
             at: recovery,
@@ -1148,7 +1983,7 @@ final class CLISwitcherTests: XCTestCase {
             try await coordinator.withLease { _ in
                 _ = try transaction.restore(
                     snapshot,
-                    validateRestoredCredentials: {}
+                    validateRestoredCredentials: { _ in }
                 )
             }
         } catch {
@@ -1198,6 +2033,75 @@ final class CLISwitcherTests: XCTestCase {
         }
         XCTAssertEqual(try Data(contentsOf: authURL), original)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.backups.path), [])
+    }
+
+    func testSwitcherPreservesKeychainLockDispositionAfterPostWriteValidation() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let source = fakeClaudeSource(accessToken: "original")
+        let location = testClaudeKeychainLocation(reference: "validation-lock")
+        source.exactLocation = location
+        source.advanceExactLocationAfterWrite = true
+        source.failReadNumber = 3
+        source.failReadError =
+            ClaudeCodeCredentialsKeychainError.securityToolError(
+                .keychainLocked
+            )
+        let originalItem = try XCTUnwrap(source.itemJSON)
+
+        let store = MemoryCredentialStore()
+        let profile = AccountProfile(provider: .claude, label: "Target")
+        try store.save(
+            snapshot: CredentialSnapshot(provider: .claude, items: [
+                CredentialSnapshotItem(
+                    relativePath: CLISwitcher.claudeKeychainItemPath,
+                    kind: .keychainJSONFields,
+                    contents: Data(#"{"accessToken":"target"}"#.utf8),
+                    posixPermissions: nil
+                )
+            ]),
+            for: profile.id
+        )
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: store,
+            claudeCLICredentialSource: source
+        )
+
+        var recoveryDirectory: URL?
+        XCTAssertThrowsError(
+            try switcher.restoreSnapshot(
+                for: profile,
+                accessMode: .nonInteractive
+            )
+        ) { error in
+            guard case CLISwitcherError.rollbackConflict(
+                let paths,
+                let recovery,
+                let underlying,
+                let disposition
+            ) = error else {
+                return XCTFail("Expected rollbackConflict, got \(error)")
+            }
+            XCTAssertEqual(paths, [CLISwitcher.claudeKeychainItemPath])
+            XCTAssertEqual(disposition, .interactionRequired)
+            guard case ClaudeCodeCredentialsKeychainError.securityToolError(
+                .keychainLocked
+            ) = underlying else {
+                return XCTFail("Expected keychainLocked, got \(underlying)")
+            }
+            recoveryDirectory = recovery
+        }
+        XCTAssertEqual(source.writes.count, 1)
+        XCTAssertNotEqual(source.itemJSON, originalItem)
+        let recovery = try XCTUnwrap(recoveryDirectory)
+        let backups = try FileManager.default.contentsOfDirectory(
+            at: recovery,
+            includingPropertiesForKeys: nil
+        )
+        XCTAssertEqual(backups.count, 1)
+        XCTAssertEqual(try Data(contentsOf: backups[0]), originalItem)
     }
 
     func testLabeledProfileRejectsSnapshotThatRestoresDifferentIdentity() throws {
@@ -1279,7 +2183,7 @@ final class CLISwitcherTests: XCTestCase {
             )
         ])
 
-        XCTAssertThrowsError(try transaction.restore(snapshot, validateRestoredCredentials: {})) { error in
+        XCTAssertThrowsError(try transaction.restore(snapshot, validateRestoredCredentials: { _ in })) { error in
             guard case CLISwitcherError.credentialConflict = error else {
                 return XCTFail("Expected credentialConflict, got \(error)")
             }
@@ -1312,7 +2216,7 @@ final class CLISwitcherTests: XCTestCase {
         ])
 
         var recoveryDirectory: URL?
-        XCTAssertThrowsError(try transaction.restore(snapshot, validateRestoredCredentials: {})) { error in
+        XCTAssertThrowsError(try transaction.restore(snapshot, validateRestoredCredentials: { _ in })) { error in
             guard case CLISwitcherError.rollbackConflict(let paths, let recovery, _, _) = error else {
                 return XCTFail("Expected rollbackConflict, got \(error)")
             }
@@ -1507,14 +2411,6 @@ final class CLISwitcherTests: XCTestCase {
                 )
             )
         )
-        let stale = try XCTUnwrap(
-            ClaudeOAuthCredentials(
-                claudeAiOauthJSON: Data(
-                    #"{"accessToken":"stale","refreshToken":"old"}"#.utf8
-                )
-            )
-        )
-
         store.beforeReplace = { accountID in
             store.beforeReplace = nil
             var external = try! XCTUnwrap(store.loadSnapshot(for: accountID))
@@ -1910,13 +2806,27 @@ final class CLISwitcherTests: XCTestCase {
         let fixture = try TemporaryFixture()
         defer { fixture.cleanup() }
         let source = FakeClaudeCLICredentialSource()
+        let location = testClaudeKeychainLocation(
+            reference: "concurrent-mcp-update"
+        )
+        source.exactLocation = location
         source.itemJSON = Data(
             #"{"claudeAiOauth":{"accessToken":"stale","refreshToken":"old"},"mcpOAuth":{"server":{"accessToken":"mcp-old"}}}"#.utf8
         )
-        source.onRead = { source, count in
-            if count == 2 {
+        source.afterRead = { source, count in
+            if count == 1 {
                 source.itemJSON = Data(
                     #"{"claudeAiOauth":{"accessToken":"stale","refreshToken":"old"},"mcpOAuth":{"server":{"accessToken":"mcp-new"}}}"#.utf8
+                )
+                source.exactLocation = ClaudeKeychainItemLocation(
+                    serviceName: location.serviceName,
+                    accountName: location.accountName,
+                    keychainPath: location.keychainPath,
+                    persistentReference: location.persistentReference,
+                    creationDate: location.creationDate,
+                    modificationDate: location.modificationDate
+                        .addingTimeInterval(1),
+                    label: location.label
                 )
             }
         }
@@ -2173,11 +3083,24 @@ private enum InjectedRestoreFailure: Error {
 
 /// In-memory stand-in for the login-keychain item so tests never touch the
 /// real "Claude Code-credentials" entry.
-private final class FakeClaudeCLICredentialSource: ClaudeCLICredentialSource, @unchecked Sendable {
+private final class FakeClaudeCLICredentialSource:
+    ClaudeCLICredentialSource,
+    ClaudeCredentialWriteReporting,
+    @unchecked Sendable
+{
     var itemJSON: Data?
     var readError: Error?
+    var failReadNumber: Int?
+    var failReadError: Error?
     var exactLocation: ClaudeKeychainItemLocation?
     var onRead: ((FakeClaudeCLICredentialSource, Int) -> Void)?
+    var afterRead: ((FakeClaudeCLICredentialSource, Int) -> Void)?
+    var beforeWrite: (() throws -> Void)?
+    var afterHelperStart: (() -> Void)?
+    var errorAfterHelperStart: Error?
+    var failAfterWriteNumber: Int?
+    var errorAfterWrite: Error?
+    var advanceExactLocationAfterWrite = false
     private(set) var writes: [Data] = []
     private(set) var accessModes: [CredentialAccessMode] = []
     private(set) var readCount = 0
@@ -2194,10 +3117,17 @@ private final class FakeClaudeCLICredentialSource: ClaudeCLICredentialSource, @u
         accessModes.append(accessMode)
         readCount += 1
         onRead?(self, readCount)
+        if failReadNumber == readCount, let failReadError {
+            self.failReadNumber = nil
+            self.failReadError = nil
+            throw failReadError
+        }
         if let readError {
             throw readError
         }
-        return itemJSON
+        let result = itemJSON
+        afterRead?(self, readCount)
+        return result
     }
 
     func readLiveItemJSON(
@@ -2208,19 +3138,74 @@ private final class FakeClaudeCLICredentialSource: ClaudeCLICredentialSource, @u
         exactReadLocations.append(location)
         readCount += 1
         onRead?(self, readCount)
+        if failReadNumber == readCount, let failReadError {
+            self.failReadNumber = nil
+            self.failReadError = nil
+            throw failReadError
+        }
         if let readError {
             throw readError
         }
-        guard exactLocation?.identity == location.identity else {
+        guard exactLocation?.modificationStamp == location.modificationStamp else {
             return nil
         }
-        return itemJSON
+        let result = itemJSON
+        afterRead?(self, readCount)
+        return result
     }
 
     func writeLiveItemJSON(_ data: Data, accessMode: CredentialAccessMode) throws {
         accessModes.append(accessMode)
+        try performWrite(data, mutationAttempt: nil)
+    }
+
+    func writeLiveItemJSON(
+        _ data: Data,
+        at location: ClaudeKeychainItemLocation,
+        accessMode: CredentialAccessMode,
+        mutationAttempt: ClaudeCredentialWriteAttempt
+    ) throws {
+        accessModes.append(accessMode)
+        guard exactLocation?.modificationStamp == location.modificationStamp else {
+            throw ClaudeCodeCredentialsKeychainError.securityToolError(.itemChanged)
+        }
+        try performWrite(data, mutationAttempt: mutationAttempt)
+    }
+
+    private func performWrite(
+        _ data: Data,
+        mutationAttempt: ClaudeCredentialWriteAttempt?
+    ) throws {
+        try beforeWrite?()
+        mutationAttempt?.markHelperStarted()
+        afterHelperStart?()
+        if let errorAfterHelperStart {
+            self.errorAfterHelperStart = nil
+            throw errorAfterHelperStart
+        }
         writes.append(data)
         itemJSON = data
+        mutationAttempt?.markHelperSucceeded()
+        if advanceExactLocationAfterWrite, let exactLocation {
+            self.exactLocation = ClaudeKeychainItemLocation(
+                serviceName: exactLocation.serviceName,
+                accountName: exactLocation.accountName,
+                keychainPath: exactLocation.keychainPath,
+                persistentReference: exactLocation.persistentReference,
+                creationDate: exactLocation.creationDate,
+                modificationDate: exactLocation.modificationDate
+                    .addingTimeInterval(1),
+                label: exactLocation.label
+            )
+        }
+        if let errorAfterWrite {
+            self.errorAfterWrite = nil
+            throw errorAfterWrite
+        }
+        if failAfterWriteNumber == writes.count {
+            failAfterWriteNumber = nil
+            throw InjectedRestoreFailure.afterWrite
+        }
     }
 
     func deleteLiveItem(accessMode: CredentialAccessMode) throws {

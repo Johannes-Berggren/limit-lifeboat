@@ -1823,7 +1823,7 @@ final class AppState: ObservableObject {
             try claudeRefreshCoordinator.validateSupportedConfiguration()
             return true
         } catch {
-            let reason = "\(error.localizedDescription) Limit Lifeboat supports Claude Code's default macOS configuration only. Remove the custom CLAUDE_CONFIG_DIR setting and relaunch the app."
+            let reason = "\(error.localizedDescription) Limit Lifeboat supports Claude Code's default macOS configuration only. Unset CLAUDE_CONFIG_DIR, CLAUDE_SECURESTORAGE_CONFIG_DIR, and CLAUDE_CODE_CUSTOM_OAUTH_URL, then relaunch the app."
             for profile in profiles where profile.provider == .claude {
                 refreshStates[profile.id] = .credentialAccessBlocked(
                     source: .claudeCode,
@@ -1885,7 +1885,7 @@ final class AppState: ObservableObject {
             }
         case .authorizing, .failed:
             return .unavailable
-        case .unknown, .ready, .notFound:
+        case .unknown, .ready, .keychainLocked, .notFound:
             return .read(pinnedItem: nil)
         }
     }
@@ -4025,10 +4025,11 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// The sole prompt-capable path for Claude's provider-owned item. macOS
-    /// owns the password UI; choosing Always Allow updates the standard ACL and
-    /// caller partition together. A fresh noninteractive exact-item read is the
-    /// only success condition.
+    /// The sole prompt-capable path for Claude's provider-owned item. It uses
+    /// Claude Code's own `/usr/bin/security` storage identity; choosing Always
+    /// Allow authorizes that shared backend for Conductor, Terminal, IDE
+    /// integrations, and Limit Lifeboat together. A fresh noninteractive
+    /// exact-item read is the only success condition.
     @discardableResult
     func authorizeClaudeKeychainAccess(
         reason: String = "to stop repeated password prompts",
@@ -4049,6 +4050,8 @@ final class AppState: ObservableObject {
                     workflowStatus = disposition == .userCancelled
                         ? "cancelled"
                         : "needs_authorization"
+                case .keychainLocked:
+                    workflowStatus = "keychain_locked"
                 case .notFound:
                     workflowStatus = "not_found"
                 case .failed:
@@ -4153,12 +4156,8 @@ final class AppState: ObservableObject {
 
         claudeKeychainAuthorizationState = .authorizing(location)
         let explanation = NSAlert()
-        explanation.messageText = "Authorize Limit Lifeboat once"
-        if hasNondurableDevelopmentSignature {
-            explanation.informativeText = "macOS will ask for your login password \(reason). This development build is not signed with a stable Apple Development identity, so even Always Allow is valid only for this exact build and may be requested again after rebuilding."
-        } else {
-            explanation.informativeText = "macOS will ask for your login password \(reason). Enter it once, then choose Always Allow. Choosing only Allow will not stop future prompts."
-        }
+        explanation.messageText = "Authorize Claude credential access once"
+        explanation.informativeText = "macOS will ask for your login password \(reason). The system prompt names “security” because Limit Lifeboat now uses Claude Code’s own credential helper. Enter your password once, then choose Always Allow. Choosing only Allow will not stop future prompts."
         explanation.addButton(withTitle: "Continue")
         explanation.addButton(withTitle: "Cancel")
         guard explanation.runModalActivating() == .alertFirstButtonReturn else {
@@ -4195,9 +4194,7 @@ final class AppState: ObservableObject {
                 return false
             }
             claudeKeychainAuthorizationState = .ready(freshLocation)
-            statusMessage = hasNondurableDevelopmentSignature
-                ? "Keychain access authorized for this development build only. Use an Apple Development signature for durable approval."
-                : "Keychain access authorized. Future background checks will not ask for your password."
+            statusMessage = "Claude Keychain access authorized. Future background checks will not ask for your password."
             deferPendingLoginResumeIfNeeded()
             return true
         } catch {
@@ -4407,6 +4404,25 @@ final class AppState: ObservableObject {
         let item = suppliedItem ?? (resolveItemIfNeeded
             ? (try? cliSwitcher.locateClaudeKeychainItem(accessMode: .nonInteractive))
             : nil)
+        if transientClaudeKeychainFailure(in: error) == .itemChanged {
+            // A concurrent Claude login or helper write invalidates the old
+            // generation, including any denial attached to it. Re-resolve on
+            // the next cycle instead of permanently suppressing background
+            // work as a generic failure.
+            claudeKeychainAuthorizationState = .unknown
+            return
+        }
+        if transientClaudeKeychainFailure(in: error) == .keychainLocked {
+            // Do not let a wake/unlock boundary poison this item generation as
+            // an authorization denial. A known ACL denial remains sticky, but
+            // every other state may retry through the prompt-free metadata
+            // and ACL gate on a later background cycle.
+            if case .needsAuthorization = claudeKeychainAuthorizationState {
+                return
+            }
+            claudeKeychainAuthorizationState = .keychainLocked(item)
+            return
+        }
         guard let disposition = credentialAccessDisposition(for: error) else {
             if case .needsAuthorization = claudeKeychainAuthorizationState {
                 return
@@ -4419,6 +4435,96 @@ final class AppState: ObservableObject {
             item: item,
             failureMessage: error.localizedDescription
         )
+    }
+
+    private enum TransientClaudeKeychainFailure: Equatable {
+        case itemChanged
+        case keychainLocked
+    }
+
+    /// Restore, refresh, and usage workflows preserve their root cause inside
+    /// typed wrapper errors. Unwrap only the two transient provider-Keychain
+    /// outcomes that must not become a sticky authorization denial. The depth
+    /// bound also protects this UI-state path from a pathological custom Error
+    /// that wraps itself.
+    private func transientClaudeKeychainFailure(
+        in error: Error,
+        depth: Int = 0
+    ) -> TransientClaudeKeychainFailure? {
+        guard depth < 12 else { return nil }
+        let nextDepth = depth + 1
+
+        if let keychainError = error as? ClaudeCodeCredentialsKeychainError {
+            switch keychainError {
+            case .securityToolError(.itemChanged):
+                return .itemChanged
+            case .securityToolError(.keychainLocked):
+                return .keychainLocked
+            case .credentialAccessUnavailable(let underlying):
+                return transientClaudeKeychainFailure(
+                    in: underlying,
+                    depth: nextDepth
+                )
+            default:
+                return nil
+            }
+        }
+
+        if let switchError = error as? CLISwitcherError {
+            switch switchError {
+            case .backupFailed(_, let underlying),
+                 .rollbackConflict(_, _, let underlying, _):
+                return transientClaudeKeychainFailure(
+                    in: underlying,
+                    depth: nextDepth
+                )
+            default:
+                return nil
+            }
+        }
+
+        if let fetchError = error as? ClaudeAccountUsageFetchError {
+            switch fetchError {
+            case .keychainLocked:
+                return .keychainLocked
+            case .liveCredentialAccessDenied(let underlying, _):
+                return transientClaudeKeychainFailure(
+                    in: underlying,
+                    depth: nextDepth
+                )
+            case .rotationDeferred(let underlying),
+                 .credentialRepairRequired(let underlying),
+                 .credentialRecoveryFailed(let underlying),
+                 .credentialUnavailable(let underlying),
+                 .refreshFailed(let underlying),
+                 .transport(let underlying):
+                return transientClaudeKeychainFailure(
+                    in: underlying,
+                    depth: nextDepth
+                )
+            default:
+                return nil
+            }
+        }
+
+        if let storeError = error as? CredentialStoreError {
+            switch storeError {
+            case .credentialAccessUnavailable(let underlying):
+                return transientClaudeKeychainFailure(
+                    in: underlying,
+                    depth: nextDepth
+                )
+            case .decodeFailed(let underlying?):
+                return transientClaudeKeychainFailure(
+                    in: underlying,
+                    depth: nextDepth
+                )
+            default:
+                return nil
+            }
+        }
+
+        return nil
     }
 
     private func recordClaudeKeychainDisposition(

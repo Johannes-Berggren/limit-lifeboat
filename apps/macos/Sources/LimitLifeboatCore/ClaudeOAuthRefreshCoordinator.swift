@@ -2,17 +2,19 @@ import Darwin
 import Dispatch
 import Foundation
 
-/// Claude Code serializes OAuth mutation with two directory locks. Limit
+/// Claude Code serializes OAuth mutation with three directory locks. Limit
 /// Lifeboat participates in the same protocol so a token exchange cannot race
 /// the CLI or another app process.
 public enum ClaudeOAuthLockKind: String, Sendable, CaseIterable {
     case oauthRefresh
     case claude
+    case storageWrite
 
     public var fileName: String {
         switch self {
         case .oauthRefresh: return ".oauth_refresh.lock"
         case .claude: return ".claude.lock"
+        case .storageWrite: return ".storage-write.lock"
         }
     }
 }
@@ -203,6 +205,7 @@ public struct ClaudeOAuthRefreshCoordinator: Sendable {
     public let claudeDirectory: URL
     public let oauthRefreshLockURL: URL
     public let claudeLockURL: URL
+    public let storageWriteLockURL: URL
 
     private let homeDirectory: URL
     private let fileSystem: any ClaudeOAuthLockFileSystem
@@ -234,6 +237,10 @@ public struct ClaudeOAuthRefreshCoordinator: Sendable {
             ClaudeOAuthLockKind.claude.fileName,
             isDirectory: true
         )
+        self.storageWriteLockURL = claudeDirectory.appendingPathComponent(
+            ClaudeOAuthLockKind.storageWrite.fileName,
+            isDirectory: true
+        )
         self.fileSystem = fileSystem
         self.configuration = configuration
         self.environment = environment
@@ -242,7 +249,8 @@ public struct ClaudeOAuthRefreshCoordinator: Sendable {
         self.jitter = jitter
     }
 
-    /// Acquires `.claude/.oauth_refresh.lock` and then `~/.claude.lock`.
+    /// Acquires `.claude/.oauth_refresh.lock`, `~/.claude.lock`, and then
+    /// `.claude/.storage-write.lock`.
     /// Callers should keep the returned lease across the complete read,
     /// exchange, and durable-write transaction and validate it immediately
     /// before every irreversible credential mutation.
@@ -262,14 +270,24 @@ public struct ClaudeOAuthRefreshCoordinator: Sendable {
                 at: claudeLockURL,
                 retryCount: allowedRetries
             )
-            let lease = ClaudeOAuthRefreshLease(
-                locks: [oauthLock, claudeLock],
-                fileSystem: fileSystem,
-                heartbeatInterval: configuration.heartbeatInterval,
-                now: now
-            )
-            lease.startHeartbeat()
-            return lease
+            do {
+                let storageWriteLock = try await acquireLock(
+                    kind: .storageWrite,
+                    at: storageWriteLockURL,
+                    retryCount: allowedRetries
+                )
+                let lease = ClaudeOAuthRefreshLease(
+                    locks: [oauthLock, claudeLock, storageWriteLock],
+                    fileSystem: fileSystem,
+                    heartbeatInterval: configuration.heartbeatInterval,
+                    now: now
+                )
+                lease.startHeartbeat()
+                return lease
+            } catch {
+                try? removeIfOwned(claudeLock)
+                throw error
+            }
         } catch {
             try? removeIfOwned(oauthLock)
             throw error
@@ -313,16 +331,19 @@ public struct ClaudeOAuthRefreshCoordinator: Sendable {
     }
 
     private func validateDefaultConfiguration() throws {
-        guard let configured = environment["CLAUDE_CONFIG_DIR"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !configured.isEmpty else {
-            return
-        }
-        let configuredURL = URL(fileURLWithPath: configured).standardizedFileURL
-        guard configured.hasPrefix("/"), configuredURL == claudeDirectory else {
-            throw ClaudeOAuthRefreshCoordinatorError.ambiguousConfiguration(
-                "CLAUDE_CONFIG_DIR does not identify the default ~/.claude directory."
-            )
+        for variable in [
+            "CLAUDE_CONFIG_DIR",
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+            "CLAUDE_CODE_CUSTOM_OAUTH_URL"
+        ] {
+            if let configured = environment[variable], !configured.isEmpty {
+                // These overrides select or derive a different credential
+                // backend/service. Only an unset or literally empty variable
+                // selects Claude Code's standard shared macOS item.
+                throw ClaudeOAuthRefreshCoordinatorError.ambiguousConfiguration(
+                    "\(variable) must be unset to use Claude Code's standard macOS credential backend."
+                )
+            }
         }
     }
 
@@ -549,7 +570,7 @@ public final class ClaudeOAuthRefreshLease: @unchecked Sendable {
         timer.activate()
     }
 
-    /// Confirms both paths still refer to the exact directories acquired by
+    /// Confirms all paths still refer to the exact directories acquired by
     /// this process. Call immediately before each credential mutation.
     public func validate() throws {
         operationLock.lock()
@@ -573,7 +594,8 @@ public final class ClaudeOAuthRefreshLease: @unchecked Sendable {
         }
     }
 
-    /// Releases `~/.claude.lock` and then `.claude/.oauth_refresh.lock`.
+    /// Releases `.claude/.storage-write.lock`, `~/.claude.lock`, and then
+    /// `.claude/.oauth_refresh.lock`.
     /// A replaced path is preserved and reported as a lost lease.
     public func release() throws {
         operationLock.lock()

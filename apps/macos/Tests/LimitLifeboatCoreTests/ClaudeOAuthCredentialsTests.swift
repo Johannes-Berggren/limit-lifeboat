@@ -294,29 +294,93 @@ final class ClaudeOAuthCredentialsTests: XCTestCase {
 }
 
 final class ClaudeCodeCredentialsKeychainTests: XCTestCase {
-    func testReadUpdateAndDeleteExistingItem() throws {
+    func testSecurityToolReadsAndUpdatesExistingItemWithoutDeletingIt() throws {
         let disposable = try DisposableKeychainTestSupport()
         let service = "com.limitlifeboat.app.claude-tests.\(UUID().uuidString)"
         let account = "test-\(UUID().uuidString)"
+        let metadataClient = SystemClaudeKeychainSecurityClient(
+            searchList: [disposable.keychain]
+        )
         let keychain = ClaudeCodeCredentialsKeychain(
             serviceName: service,
             accountName: account,
-            securityClient: SystemClaudeKeychainSecurityClient(
-                searchList: [disposable.keychain]
-            )
+            securityClient: AssumeSecurityToolReadyMetadataClient(base: metadataClient),
+            liveCredentialBackend: ClaudeSecurityToolCredentialBackend()
         )
 
-        let first = Data(#"{"claudeAiOauth":{"accessToken":"one"},"mcpOAuth":{"server":"keep"}}"#.utf8)
-        try disposable.addGenericPassword(data: first, service: service, account: account)
+        let first = Data(#"{"claudeAiOauth":{"accessToken":"one"},"mcpOAuth":{"server":"München"}}"#.utf8)
+        let providerLabel = "Custom Claude Provider Label"
+        try disposable.addGenericPasswordUsingSecurityTool(
+            data: first,
+            service: service,
+            account: account,
+            label: providerLabel
+        )
         XCTAssertEqual(try keychain.readLiveItemJSON(), first)
+        XCTAssertEqual(
+            try keychain.locateLiveItem(accessMode: .nonInteractive)?.label,
+            providerLabel
+        )
 
-        let second = Data(#"{"claudeAiOauth":{"accessToken":"two"},"mcpOAuth":{"server":"keep"}}"#.utf8)
+        let second = Data(#"{"claudeAiOauth":{"accessToken":"two"},"mcpOAuth":{"server":"München"}}"#.utf8)
         try keychain.writeLiveItemJSON(second)
         XCTAssertEqual(try keychain.readLiveItemJSON(), second)
 
-        try keychain.deleteLiveItem()
-        XCTAssertNil(try keychain.readLiveItemJSON())
-        XCTAssertNoThrow(try keychain.deleteLiveItem(), "Deleting an already-missing item is idempotent")
+        let third = Data(#"{"claudeAiOauth":{"accessToken":"three"},"mcpOAuth":{"server":"München"}}"#.utf8)
+        try keychain.writeLiveItemJSON(third)
+        XCTAssertEqual(try keychain.readLiveItemJSON(), third)
+        XCTAssertEqual(
+            try keychain.locateLiveItem(accessMode: .nonInteractive)?.label,
+            providerLabel,
+            "security -U must preserve provider-owned label metadata"
+        )
+
+        XCTAssertThrowsError(try keychain.deleteLiveItem()) { error in
+            guard case ClaudeCodeCredentialsKeychainError.unsupportedSecurityToolAccess = error else {
+                return XCTFail("Expected provider-owned deletion refusal, got \(error)")
+            }
+        }
+        XCTAssertEqual(try keychain.readLiveItemJSON(), third)
+    }
+
+    func testDisposableKeychainsRejectDuplicateItemsBeforeSecurityToolRead() throws {
+        let first = try DisposableKeychainTestSupport()
+        let second = try DisposableKeychainTestSupport()
+        let service = "com.limitlifeboat.app.claude-tests.\(UUID().uuidString)"
+        let account = "test-\(UUID().uuidString)"
+        let item = Data(#"{"claudeAiOauth":{"accessToken":"one"}}"#.utf8)
+        try first.addGenericPasswordUsingSecurityTool(
+            data: item,
+            service: service,
+            account: account
+        )
+        try second.addGenericPasswordUsingSecurityTool(
+            data: item,
+            service: service,
+            account: account
+        )
+
+        let keychain = ClaudeCodeCredentialsKeychain(
+            serviceName: service,
+            accountName: account,
+            securityClient: AssumeSecurityToolReadyMetadataClient(
+                base: SystemClaudeKeychainSecurityClient(
+                    searchList: [first.keychain, second.keychain]
+                )
+            ),
+            liveCredentialBackend: ClaudeSecurityToolCredentialBackend()
+        )
+
+        XCTAssertThrowsError(
+            try keychain.readLiveItemJSON(accessMode: .nonInteractive)
+        ) { error in
+            guard case ClaudeCodeCredentialsKeychainError.duplicateLiveItems(
+                let items
+            ) = error else {
+                return XCTFail("Expected duplicateLiveItems, got \(error)")
+            }
+            XCTAssertEqual(items.count, 2)
+        }
     }
 
     func testDisposableCustomKeychainDiscoveryAndPinnedAccessIntegration() throws {
@@ -328,16 +392,22 @@ final class ClaudeCodeCredentialsKeychainTests: XCTestCase {
         let disposable = try DisposableKeychainTestSupport()
         let service = "com.limitlifeboat.app.claude-tests.\(UUID().uuidString)"
         let account = "test-\(UUID().uuidString)"
+        let metadataClient = SystemClaudeKeychainSecurityClient(
+            searchList: [disposable.keychain]
+        )
         let keychain = ClaudeCodeCredentialsKeychain(
             serviceName: service,
             accountName: account,
-            securityClient: SystemClaudeKeychainSecurityClient(
-                searchList: [disposable.keychain]
-            )
+            securityClient: AssumeSecurityToolReadyMetadataClient(base: metadataClient),
+            liveCredentialBackend: ClaudeSecurityToolCredentialBackend()
         )
 
         let item = Data(#"{"claudeAiOauth":{"accessToken":"one"},"mcpOAuth":{"server":"keep"}}"#.utf8)
-        try disposable.addGenericPassword(data: item, service: service, account: account)
+        try disposable.addGenericPasswordUsingSecurityTool(
+            data: item,
+            service: service,
+            account: account
+        )
 
         let location = try XCTUnwrap(keychain.locateLiveItem(accessMode: .nonInteractive))
         XCTAssertEqual(
@@ -359,7 +429,8 @@ final class ClaudeCodeCredentialsKeychainTests: XCTestCase {
             accountName: account,
             securityClient: SystemClaudeKeychainSecurityClient(
                 searchList: [disposable.keychain]
-            )
+            ),
+            liveCredentialBackend: ClaudeSecurityToolCredentialBackend()
         )
 
         XCTAssertThrowsError(try keychain.writeLiveItemJSON(Data("{}".utf8))) { error in

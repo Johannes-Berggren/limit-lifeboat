@@ -58,7 +58,7 @@ final class ClaudeKeychainItemLocatorTests: XCTestCase {
         )
     }
 
-    func testResolvedCustomKeychainItemPinsReadWriteAndDelete() throws {
+    func testResolvedCustomKeychainItemPinsReadAndWrite() throws {
         let location = makeLocation(path: "/Volumes/Test/custom.keychain-db")
         let client = FakeClaudeKeychainSecurityClient(items: [location])
         client.data = Data("one".utf8)
@@ -67,17 +67,15 @@ final class ClaudeKeychainItemLocatorTests: XCTestCase {
         XCTAssertEqual(try keychain.locateLiveItem(accessMode: .nonInteractive), location)
         XCTAssertEqual(try keychain.readLiveItemJSON(accessMode: .nonInteractive), client.data)
         try keychain.writeLiveItemJSON(Data("two".utf8), accessMode: .userInitiated)
-        try keychain.deleteLiveItem(accessMode: .nonInteractive)
 
-        XCTAssertEqual(client.locateCalls.count, 4)
-        XCTAssertEqual(client.readCalls.map(\.location), [location])
+        XCTAssertEqual(client.locateCalls.count, 10)
+        XCTAssertEqual(client.readCalls.map(\.location), [location, location])
         XCTAssertEqual(client.updateCalls.map(\.location), [location])
-        XCTAssertEqual(client.deleteCalls.map(\.location), [location])
     }
 
-    func testExactItemMethodsDoNotRepeatBroadDiscovery() throws {
+    func testExactItemMethodsRevalidatePersistentIdentityAroundDataAccess() throws {
         let location = makeLocation()
-        let client = FakeClaudeKeychainSecurityClient(items: [])
+        let client = FakeClaudeKeychainSecurityClient(items: [location])
         client.data = Data("secret".utf8)
         let keychain = makeKeychain(client: client)
 
@@ -90,12 +88,13 @@ final class ClaudeKeychainItemLocatorTests: XCTestCase {
             at: location,
             accessMode: .userInitiated
         )
-        try keychain.deleteLiveItem(at: location, accessMode: .nonInteractive)
+        XCTAssertThrowsError(
+            try keychain.deleteLiveItem(at: location, accessMode: .nonInteractive)
+        )
 
-        XCTAssertTrue(client.locateCalls.isEmpty)
-        XCTAssertEqual(client.readCalls.map(\.location), [location])
+        XCTAssertEqual(client.locateCalls.count, 7)
+        XCTAssertEqual(client.readCalls.map(\.location), [location, location])
         XCTAssertEqual(client.updateCalls.map(\.location), [location])
-        XCTAssertEqual(client.deleteCalls.map(\.location), [location])
     }
 
     func testDuplicateItemsAreRejectedBeforeSecretAccessOrMutation() {
@@ -117,7 +116,6 @@ final class ClaudeKeychainItemLocatorTests: XCTestCase {
 
         XCTAssertTrue(client.readCalls.isEmpty)
         XCTAssertTrue(client.updateCalls.isEmpty)
-        XCTAssertTrue(client.deleteCalls.isEmpty)
     }
 
     func testMismatchedExactLocationIsRejectedBeforeSecretAccess() {
@@ -162,8 +160,8 @@ final class ClaudeKeychainItemLocatorTests: XCTestCase {
         XCTAssertThrowsError(
             try keychain.writeLiveItemJSON(Data("replacement-race".utf8), accessMode: .nonInteractive)
         ) { error in
-            guard case ClaudeCodeCredentialsKeychainError.missingLiveItem = error else {
-                return XCTFail("Expected missingLiveItem after replacement, got \(error)")
+            guard case ClaudeCodeCredentialsKeychainError.securityToolError(.itemChanged) = error else {
+                return XCTFail("Expected itemChanged after replacement, got \(error)")
             }
         }
     }
@@ -194,6 +192,185 @@ final class ClaudeKeychainItemLocatorTests: XCTestCase {
         XCTAssertFalse(state.suppressesAutomaticDataRead(currentItem: replaced))
     }
 
+    func testBackgroundAccessGateNeverInvokesLiveBackendWhenAuthorizationIsMissing() throws {
+        let location = makeLocation()
+        let client = FakeClaudeKeychainSecurityClient(items: [location])
+        client.data = Data("secret".utf8)
+        client.accessStatus = .needsAuthorization
+        let keychain = makeKeychain(client: client)
+
+        XCTAssertThrowsError(
+            try keychain.readLiveItemJSON(accessMode: .nonInteractive)
+        ) { error in
+            guard case ClaudeCodeCredentialsKeychainError.securityToolError(
+                .authorizationDenied
+            ) = error else {
+                return XCTFail("Expected authorizationDenied, got \(error)")
+            }
+        }
+        XCTAssertTrue(client.readCalls.isEmpty)
+
+        XCTAssertEqual(
+            try keychain.readLiveItemJSON(accessMode: .userInitiated),
+            client.data
+        )
+        XCTAssertEqual(client.readCalls.count, 1)
+    }
+
+    func testBackgroundAccessGateNeverInvokesLiveBackendWhenKeychainIsLocked() {
+        let location = makeLocation()
+        let client = FakeClaudeKeychainSecurityClient(items: [location])
+        client.data = Data("secret".utf8)
+        client.accessStatus = .keychainLocked
+        let keychain = makeKeychain(client: client)
+
+        XCTAssertThrowsError(
+            try keychain.readLiveItemJSON(accessMode: .nonInteractive)
+        ) { error in
+            guard case ClaudeCodeCredentialsKeychainError.securityToolError(
+                .keychainLocked
+            ) = error else {
+                return XCTFail("Expected keychainLocked, got \(error)")
+            }
+        }
+        XCTAssertTrue(client.readCalls.isEmpty)
+    }
+
+    func testWriteVerifiesCompleteStoredValueAfterHelperSuccess() {
+        let location = makeLocation()
+        let client = FakeClaudeKeychainSecurityClient(items: [location])
+        client.data = Data("before".utf8)
+        client.corruptDataAfterUpdate = true
+        let keychain = makeKeychain(client: client)
+
+        XCTAssertThrowsError(
+            try keychain.writeLiveItemJSON(
+                Data("expected".utf8),
+                accessMode: .nonInteractive
+            )
+        ) { error in
+            guard case ClaudeCodeCredentialsKeychainError.securityToolError(
+                .verificationFailed
+            ) = error else {
+                return XCTFail("Expected verificationFailed, got \(error)")
+            }
+        }
+        XCTAssertEqual(client.updateCalls.count, 1)
+        XCTAssertEqual(client.readCalls.count, 1)
+    }
+
+    func testWriteRevalidatesMutationLeaseAfterAccessPreflight() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "LimitLifeboat-KeychainLease-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        let home = root.appendingPathComponent("home", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: home,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let coordinator = ClaudeOAuthRefreshCoordinator(
+            homeDirectory: home,
+            configuration: .init(heartbeatInterval: 60),
+            environment: [:]
+        )
+        let location = makeLocation()
+        let client = FakeClaudeKeychainSecurityClient(items: [location])
+        let displacedLock = root.appendingPathComponent(
+            "original-storage-write-lock",
+            isDirectory: true
+        )
+        client.accessStatusHook = {
+            try FileManager.default.moveItem(
+                at: coordinator.storageWriteLockURL,
+                to: displacedLock
+            )
+            try FileManager.default.createDirectory(
+                at: coordinator.storageWriteLockURL,
+                withIntermediateDirectories: false
+            )
+        }
+        let keychain = makeKeychain(client: client)
+
+        var caught: Error?
+        do {
+            try await coordinator.withLease { _ in
+                try keychain.writeLiveItemJSON(
+                    Data("must-not-write".utf8),
+                    at: location,
+                    accessMode: .nonInteractive
+                )
+            }
+        } catch {
+            caught = error
+        }
+
+        XCTAssertEqual(
+            caught as? ClaudeOAuthRefreshCoordinatorError,
+            .leaseLost(lock: .storageWrite)
+        )
+        XCTAssertTrue(client.updateCalls.isEmpty)
+    }
+
+    func testWriteRevalidatesMutationLeaseAfterHelperReturns() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "LimitLifeboat-KeychainPostLease-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        let home = root.appendingPathComponent("home", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: home,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let coordinator = ClaudeOAuthRefreshCoordinator(
+            homeDirectory: home,
+            configuration: .init(heartbeatInterval: 60),
+            environment: [:]
+        )
+        let location = makeLocation()
+        let client = FakeClaudeKeychainSecurityClient(items: [location])
+        let displacedLock = root.appendingPathComponent(
+            "original-storage-write-lock",
+            isDirectory: true
+        )
+        client.afterUpdateHook = {
+            try FileManager.default.moveItem(
+                at: coordinator.storageWriteLockURL,
+                to: displacedLock
+            )
+            try FileManager.default.createDirectory(
+                at: coordinator.storageWriteLockURL,
+                withIntermediateDirectories: false
+            )
+        }
+        let keychain = makeKeychain(client: client)
+
+        var caught: Error?
+        do {
+            try await coordinator.withLease { _ in
+                try keychain.writeLiveItemJSON(
+                    Data("write-completed-before-lease-loss".utf8),
+                    at: location,
+                    accessMode: .nonInteractive
+                )
+            }
+        } catch {
+            caught = error
+        }
+
+        XCTAssertEqual(
+            caught as? ClaudeOAuthRefreshCoordinatorError,
+            .leaseLost(lock: .storageWrite)
+        )
+        XCTAssertEqual(client.updateCalls.count, 1)
+    }
+
     func testUnanchoredDenialAndFailedStateAreFailClosed() {
         let current = makeLocation()
 
@@ -213,6 +390,10 @@ final class ClaudeKeychainItemLocatorTests: XCTestCase {
         )
         XCTAssertFalse(
             ClaudeKeychainAuthorizationState.notFound
+                .suppressesAutomaticDataRead(currentItem: current)
+        )
+        XCTAssertFalse(
+            ClaudeKeychainAuthorizationState.keychainLocked(current)
                 .suppressesAutomaticDataRead(currentItem: current)
         )
     }
@@ -236,6 +417,41 @@ final class ClaudeKeychainItemLocatorTests: XCTestCase {
         XCTAssertEqual(CredentialAccessDisposition(status: errSecDecode), .other(errSecDecode))
     }
 
+    func testPartitionACLDescriptionDecoderIsStrictAndPreservesUnknownEntries() throws {
+        let plist = try PropertyListSerialization.data(
+            fromPropertyList: [
+                "Partitions": [
+                    "apple-tool:",
+                    "teamid:3DQ7YC2YH2",
+                    "future-client:opaque"
+                ],
+                "FutureKey": ["preserve": true]
+            ],
+            format: .xml,
+            options: 0
+        )
+        let encoded = plist.map { String(format: "%02x", $0) }.joined()
+
+        XCTAssertEqual(
+            ClaudeSecurityToolPartitionList.decode(encoded),
+            ["apple-tool:", "teamid:3DQ7YC2YH2", "future-client:opaque"]
+        )
+        XCTAssertNil(ClaudeSecurityToolPartitionList.decode("0"))
+        XCTAssertNil(ClaudeSecurityToolPartitionList.decode("zz"))
+        XCTAssertNil(ClaudeSecurityToolPartitionList.decode("é"))
+
+        let missingPartitions = try PropertyListSerialization.data(
+            fromPropertyList: ["Other": true],
+            format: .xml,
+            options: 0
+        )
+        XCTAssertNil(
+            ClaudeSecurityToolPartitionList.decode(
+                missingPartitions.map { String(format: "%02x", $0) }.joined()
+            )
+        )
+    }
+
     func testCoreErrorsPreserveTypedCredentialDisposition() {
         let cancelled = ClaudeCodeCredentialsKeychainError.keychainError(errSecUserCanceled)
         XCTAssertEqual(cancelled.credentialAccessDisposition, .userCancelled)
@@ -248,6 +464,11 @@ final class ClaudeKeychainItemLocatorTests: XCTestCase {
         let replaced = RunningExecutableIntegrityError.replaced(path: "/tmp/app")
         let integrity = CredentialStoreError.credentialAccessUnavailable(underlying: replaced)
         XCTAssertEqual(integrity.credentialAccessDisposition, .codeSignatureInvalid)
+
+        let mismatch = ClaudeCodeCredentialsKeychainError.securityToolError(
+            .verificationFailed
+        )
+        XCTAssertEqual(mismatch.credentialAccessDisposition, .unavailable)
     }
 
     func testAuthorizationStateAndLocationsAreSendable() {
@@ -263,7 +484,8 @@ final class ClaudeKeychainItemLocatorTests: XCTestCase {
         ClaudeCodeCredentialsKeychain(
             serviceName: service,
             accountName: account,
-            securityClient: client
+            securityClient: client,
+            liveCredentialBackend: client
         )
     }
 
@@ -290,7 +512,11 @@ final class ClaudeKeychainItemLocatorTests: XCTestCase {
     private func assertSendable<T: Sendable>(_ type: T.Type) {}
 }
 
-private final class FakeClaudeKeychainSecurityClient: @unchecked Sendable, ClaudeKeychainSecurityClient {
+private final class FakeClaudeKeychainSecurityClient:
+    @unchecked Sendable,
+    ClaudeKeychainSecurityClient,
+    ClaudeLiveCredentialBackend
+{
     struct LocateCall {
         let serviceName: String
         let accountName: String
@@ -311,10 +537,13 @@ private final class FakeClaudeKeychainSecurityClient: @unchecked Sendable, Claud
     var items: [ClaudeKeychainItemLocation]
     var data: Data?
     var updateSucceeds = true
+    var corruptDataAfterUpdate = false
+    var accessStatus = ClaudeSecurityToolAccessStatus.ready
+    var accessStatusHook: (() throws -> Void)?
+    var afterUpdateHook: (() throws -> Void)?
     private(set) var locateCalls: [LocateCall] = []
     private(set) var readCalls: [ItemCall] = []
     private(set) var updateCalls: [UpdateCall] = []
-    private(set) var deleteCalls: [ItemCall] = []
 
     init(items: [ClaudeKeychainItemLocation]) {
         self.items = items
@@ -335,29 +564,53 @@ private final class FakeClaudeKeychainSecurityClient: @unchecked Sendable, Claud
         return items
     }
 
+    func securityToolAccessStatus(
+        at location: ClaudeKeychainItemLocation
+    ) throws -> ClaudeSecurityToolAccessStatus {
+        try accessStatusHook?()
+        return accessStatus
+    }
+
     func readData(
         at location: ClaudeKeychainItemLocation,
-        accessMode: CredentialAccessMode
-    ) throws -> Data? {
+        accessMode: CredentialAccessMode,
+        authorizeAccess: @Sendable (CredentialAccessMode) throws -> Void,
+        verifyBefore: @Sendable () throws -> Bool,
+        verifyAfter: @Sendable () throws -> Bool
+    ) throws -> Data {
+        try authorizeAccess(accessMode)
+        guard try verifyBefore() else {
+            throw ClaudeSecurityToolCredentialError.itemChanged
+        }
         readCalls.append(ItemCall(location: location, accessMode: accessMode))
-        return data
+        guard try verifyAfter() else {
+            throw ClaudeSecurityToolCredentialError.itemChanged
+        }
+        return data ?? Data()
     }
 
     func updateData(
         _ data: Data,
         at location: ClaudeKeychainItemLocation,
-        accessMode: CredentialAccessMode
-    ) throws -> Bool {
+        accessMode: CredentialAccessMode,
+        authorizeAccess: @Sendable (CredentialAccessMode) throws -> Void,
+        verifyBefore: @Sendable () throws -> Bool,
+        verifyAfter: @Sendable () throws -> Bool,
+        mutationAttempt: ClaudeCredentialWriteAttempt?
+    ) throws {
+        try authorizeAccess(accessMode)
+        guard try verifyBefore() else {
+            throw ClaudeSecurityToolCredentialError.itemChanged
+        }
+        mutationAttempt?.markHelperStarted()
         updateCalls.append(
             UpdateCall(data: data, location: location, accessMode: accessMode)
         )
-        return updateSucceeds
-    }
-
-    func deleteItem(
-        at location: ClaudeKeychainItemLocation,
-        accessMode: CredentialAccessMode
-    ) throws {
-        deleteCalls.append(ItemCall(location: location, accessMode: accessMode))
+        mutationAttempt?.markHelperSucceeded()
+        try afterUpdateHook?()
+        guard updateSucceeds, try verifyAfter() else {
+            throw ClaudeSecurityToolCredentialError.itemChanged
+        }
+        self.data = corruptDataAfterUpdate ? Data("corrupt".utf8) : data
     }
 }
