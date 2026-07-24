@@ -348,7 +348,7 @@ public struct ClaudeUsageAPIClient: Sendable {
 
     private func message(for windows: [ClaudeAPIUsageWindow]) -> String {
         let parts = windows.map { window in
-            "\(messageLabel(for: window)) \(Int(window.usedPercent.rounded()))%"
+            "\(messageLabel(for: window)) \(UsagePercent.text(window.usedPercent))"
         }
         return "Anthropic usage API reports " + parts.joined(separator: " - ")
     }
@@ -363,10 +363,7 @@ public struct ClaudeUsageAPIClient: Sendable {
         guard let date else {
             return nil
         }
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
-        return formatter.string(from: date)
+        return AbsoluteTimestamp.text(date)
     }
 
 }

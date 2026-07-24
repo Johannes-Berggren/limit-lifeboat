@@ -338,7 +338,7 @@ final class CredentialRestoreTransaction {
             try validateRestoredCredentials(currentClaudeKeychainItemLocation)
         } catch {
             let originalError = error
-            var rollbackDisposition = credentialDisposition(from: originalError)
+            var rollbackDisposition = accessDisposition(from: originalError)
             var rollbackFailure: Error?
             var rollbackConflicts: [String] = []
             for destination in touched.reversed() {
@@ -397,7 +397,7 @@ final class CredentialRestoreTransaction {
                     rollbackConflicts.append(destination.path)
                 } catch let rollbackError {
                     rollbackDisposition =
-                        credentialDisposition(from: rollbackError)
+                        accessDisposition(from: rollbackError)
                         ?? rollbackDisposition
                     rollbackFailure = rollbackFailure ?? rollbackError
                     rollbackConflicts.append(destination.path)
@@ -440,7 +440,7 @@ final class CredentialRestoreTransaction {
                     }
                 } catch let rollbackError {
                     rollbackDisposition =
-                        credentialDisposition(from: rollbackError)
+                        accessDisposition(from: rollbackError)
                         ?? rollbackDisposition
                     rollbackFailure = rollbackFailure ?? rollbackError
                     rollbackConflicts.append(CLISwitcher.claudeKeychainItemPath)
@@ -470,7 +470,7 @@ final class CredentialRestoreTransaction {
                     }
                 } catch let rollbackError {
                     rollbackDisposition =
-                        credentialDisposition(from: rollbackError)
+                        accessDisposition(from: rollbackError)
                         ?? rollbackDisposition
                     rollbackFailure = rollbackFailure ?? rollbackError
                     rollbackConflicts.append(
@@ -585,19 +585,6 @@ final class CredentialRestoreTransaction {
         } else {
             try claudeCredentialSource.writeLiveItemJSON(data, accessMode: accessMode)
         }
-    }
-
-    private func credentialDisposition(from error: Error) -> CredentialAccessDisposition? {
-        if let error = error as? ClaudeCodeCredentialsKeychainError {
-            return error.credentialAccessDisposition
-        }
-        if let error = error as? CredentialStoreError {
-            return error.credentialAccessDisposition
-        }
-        if let error = error as? CLISwitcherError {
-            return error.credentialAccessDisposition
-        }
-        return nil
     }
 
     private enum KeychainWriteOutcome {

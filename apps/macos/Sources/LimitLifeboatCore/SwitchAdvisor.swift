@@ -302,7 +302,7 @@ public struct SwitchAdvisor: Sendable {
         if target.resetElapsed {
             return "\(target.candidate.label)'s limit window has reset"
         }
-        let percent = Int(target.score.rounded())
+        let percent = UsagePercent.rounded(target.score)
         return "\(target.candidate.label) has ~\(percent)% of its \(phrase(for: target.limitingWindow)) left"
     }
 
@@ -312,7 +312,7 @@ public struct SwitchAdvisor: Sendable {
         if target.resetElapsed {
             return "its limit window has reset"
         }
-        let percent = Int(target.score.rounded())
+        let percent = UsagePercent.rounded(target.score)
         return "has ~\(percent)% of its \(phrase(for: target.limitingWindow)) left"
     }
 

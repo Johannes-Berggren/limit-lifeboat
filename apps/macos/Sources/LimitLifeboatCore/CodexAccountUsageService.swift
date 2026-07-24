@@ -480,7 +480,7 @@ public struct CodexAccountUsageService {
         let selected = reading.windows.max(by: { $0.usedPercent < $1.usedPercent })
         var messageParts: [String] = []
         if let selected {
-            messageParts.append("Codex reports \(Int(selected.usedPercent.rounded()))% used")
+            messageParts.append("Codex reports \(UsagePercent.text(selected.usedPercent)) used")
         } else {
             messageParts.append("Codex returned no rate-limit windows")
         }

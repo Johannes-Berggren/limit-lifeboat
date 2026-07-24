@@ -2618,13 +2618,13 @@ final class AppState: ObservableObject {
             "This asks OpenAI to reset the eligible Codex rate-limit windows and cannot be undone."
         ]
         if let window = snapshots[current.id]?.mostConstrainedWindow {
-            details.append("Current \(window.label.lowercased()) usage is \(Int(window.usedPercent.rounded()))%.")
+            details.append("Current \(window.label.lowercased()) usage is \(UsagePercent.text(window.usedPercent)).")
         }
         if let expiry = availability.credits?
             .filter({ $0.status == "available" })
             .compactMap(\.expiresAt)
             .min() {
-            details.append("The earliest listed reset expires \(expiry.formatted(date: .abbreviated, time: .shortened)).")
+            details.append("The earliest listed reset expires \(AbsoluteTimestamp.text(expiry)).")
         }
         details.append("OpenAI will select which available reset to use.")
         alert.informativeText = details.joined(separator: " ")

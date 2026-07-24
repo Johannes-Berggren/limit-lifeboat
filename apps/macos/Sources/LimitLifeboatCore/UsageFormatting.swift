@@ -33,6 +33,30 @@ public enum FlexibleISO8601 {
     }
 }
 
+/// Shared whole-number percent rendering. Quota percentages are 0-100 and
+/// every surface — gauges, menu-bar title, notifications, digests — rounds
+/// them the same way, so two surfaces can never disagree by a point.
+public enum UsagePercent {
+    /// A 0-100 percentage rounded to a whole number.
+    public static func rounded(_ percent: Double) -> Int {
+        Int(percent.rounded())
+    }
+
+    /// A 0-100 percentage as "83%".
+    public static func text(_ percent: Double) -> String {
+        "\(rounded(percent))%"
+    }
+}
+
+/// A short absolute local timestamp ("Jul 8, 2026 at 1:49 AM"). Every surface
+/// that prints an instant goes through this, so reset and depletion times read
+/// identically everywhere and no call site allocates its own DateFormatter.
+public enum AbsoluteTimestamp {
+    public static func text(_ date: Date) -> String {
+        date.formatted(date: .abbreviated, time: .shortened)
+    }
+}
+
 /// Shared "how long until" phrasing so every surface rounds the same way.
 public enum DurationPhrase {
     /// A compact single-unit duration ("3m", "5h", "2d") rounded up so a

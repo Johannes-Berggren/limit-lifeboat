@@ -1,18 +1,5 @@
 import Foundation
 
-private func accessDisposition(from error: Error) -> CredentialAccessDisposition? {
-    if let error = error as? ClaudeCodeCredentialsKeychainError {
-        return error.credentialAccessDisposition
-    }
-    if let error = error as? CredentialStoreError {
-        return error.credentialAccessDisposition
-    }
-    if let error = error as? CLISwitcherError {
-        return error.credentialAccessDisposition
-    }
-    return nil
-}
-
 private func isTransientClaudeProviderKeychainFailure(
     _ error: Error,
     depth: Int = 0
