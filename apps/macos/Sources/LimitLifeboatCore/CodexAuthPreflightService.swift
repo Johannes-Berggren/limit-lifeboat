@@ -227,88 +227,24 @@ struct CodexAppServerProcessRunner: CodexAppServerRunning {
         codexHome: URL,
         timeout: TimeInterval
     ) -> CodexAppServerRefreshOutcome {
-        let process = Process()
-        process.executableURL = executableURL
-        process.arguments = [
-            "app-server",
-            "--stdio",
-            "-c", "cli_auth_credentials_store=\"file\"",
-            "-c", "analytics.enabled=false",
-            "-c", "check_for_update_on_startup=false"
-        ]
-        var environment = ProcessInfo.processInfo.environment
-        environment["CODEX_HOME"] = codexHome.path
-        environment["RUST_LOG"] = "error"
-        process.environment = environment
-
-        let input = Pipe()
-        let output = Pipe()
-        let errors = Pipe()
-        process.standardInput = input
-        process.standardOutput = output
-        process.standardError = errors
-
         let accumulator = CodexAppServerResponseAccumulator()
-        let completed = DispatchSemaphore(value: 0)
-        output.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if data.isEmpty || accumulator.append(data) {
-                completed.signal()
-            }
-        }
-        // Drain diagnostics so a noisy subprocess cannot fill its stderr pipe.
-        errors.fileHandleForReading.readabilityHandler = { handle in
-            _ = handle.availableData
-        }
-        process.terminationHandler = { _ in completed.signal() }
+        let ended = CodexAppServerSession.run(
+            executableURL: executableURL,
+            codexHome: codexHome,
+            timeout: timeout,
+            requests: [
+                ["method": "account/read", "id": 2, "params": ["refreshToken": true]]
+            ],
+            consume: accumulator.append
+        )
 
-        do {
-            try process.run()
-        } catch {
-            output.fileHandleForReading.readabilityHandler = nil
-            errors.fileHandleForReading.readabilityHandler = nil
+        if ended == .launchFailed {
             return .unavailable(reason: "Could not start Codex account verification.")
         }
-
-        let messages: [[String: Any]] = [
-            [
-                "method": "initialize",
-                "id": 1,
-                "params": [
-                    "clientInfo": [
-                        "name": "limit_lifeboat",
-                        "title": "Limit Lifeboat",
-                        "version": "1"
-                    ],
-                    "capabilities": [:]
-                ]
-            ],
-            ["method": "initialized", "params": [:]],
-            ["method": "account/read", "id": 2, "params": ["refreshToken": true]]
-        ]
-        for message in messages {
-            guard let data = try? JSONSerialization.data(withJSONObject: message) else { continue }
-            input.fileHandleForWriting.write(data)
-            input.fileHandleForWriting.write(Data([0x0a]))
-        }
-
-        let waitResult = completed.wait(timeout: .now() + timeout)
-        input.fileHandleForWriting.closeFile()
-        output.fileHandleForReading.readabilityHandler = nil
-        errors.fileHandleForReading.readabilityHandler = nil
-        if process.isRunning {
-            process.terminate()
-            usleep(100_000)
-            if process.isRunning {
-                kill(process.processIdentifier, SIGKILL)
-            }
-        }
-        process.waitUntilExit()
-
         if let outcome = accumulator.outcome {
             return outcome
         }
-        if waitResult == .timedOut {
+        if ended == .timedOut {
             return .unavailable(reason: "Codex account verification timed out.")
         }
         return .unavailable(reason: "Codex account verification ended before returning a result.")
