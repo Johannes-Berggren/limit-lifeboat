@@ -18,10 +18,20 @@ final class SettingsWindowController {
                     applicationSupportDirectory: state.applicationSupportDirectory
                 )
             )
+            // Only enforce a minimum size from the content; without this the
+            // hosting controller pins the window to the view's full ideal
+            // height, which defeats scrolling and can exceed the screen.
+            hosting.sizingOptions = [.minSize]
             let window = NSWindow(contentViewController: hosting)
             window.title = "Limit Lifeboat Settings"
-            window.styleMask = [.titled, .closable]
+            window.styleMask = [.titled, .closable, .resizable]
             window.isReleasedWhenClosed = false
+            // Open at a comfortable height that always fits on screen; the
+            // window isn't placed yet so `window.screen` is nil here.
+            let visibleHeight = NSScreen.main?.visibleFrame.height ?? 800
+            let defaultHeight = min(760, visibleHeight - 80)
+            window.setContentSize(NSSize(width: 520, height: defaultHeight))
+            window.contentMinSize = NSSize(width: 460, height: 360)
             window.center()
             // Drop the window on close so the next open builds a fresh view —
             // otherwise @State (such as the login-item toggle) keeps
@@ -231,8 +241,7 @@ struct SettingsView: View {
                 .scrollContentBackground(.hidden)
             }
         }
-        .frame(width: 520)
-        .fixedSize(horizontal: false, vertical: true)
+        .frame(minWidth: 460, idealWidth: 520, minHeight: 360)
         .tint(DS.accent)
         .animation(reduceMotion ? nil : DS.Motion.standard, value: launchAtLoginMessage)
         .animation(reduceMotion ? nil : DS.Motion.standard, value: updater.availableVersion)
