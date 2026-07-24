@@ -27,9 +27,6 @@ let package = Package(
                 "LimitLifeboatAppWorkflows",
                 .product(name: "Sparkle", package: "Sparkle")
             ],
-            resources: [
-                .copy("Resources/ProviderMarks")
-            ],
             linkerSettings: [
                 .unsafeFlags([
                     "-Xlinker", "-rpath",
