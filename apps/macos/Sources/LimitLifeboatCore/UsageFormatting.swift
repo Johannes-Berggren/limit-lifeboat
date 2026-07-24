@@ -50,10 +50,31 @@ public enum UsagePercent {
 
 /// A short absolute local timestamp ("Jul 8, 2026 at 1:49 AM"). Every surface
 /// that prints an instant goes through this, so reset and depletion times read
-/// identically everywhere and no call site allocates its own DateFormatter.
+/// identically everywhere.
+///
+/// Deliberately DateFormatter rather than `Date.formatted(date:time:)`: only
+/// DateFormatter honours a regional format override, so a user whose language
+/// is en_US but whose region is Norway sees "5 Jul 2026 at 02:49" — matching
+/// the rest of macOS — where `formatted` would force "Jul 5, 2026 at 2:49".
+///
+/// The formatter is cached because the menu re-renders often, and rebuilt when
+/// the current locale changes so the cache cannot pin a stale region.
 public enum AbsoluteTimestamp {
+    private static let lock = NSLock()
+    private nonisolated(unsafe) static var cached: (locale: Locale, formatter: DateFormatter)?
+
     public static func text(_ date: Date) -> String {
-        date.formatted(date: .abbreviated, time: .shortened)
+        lock.withLock {
+            let locale = Locale.current
+            if let cached, cached.locale == locale {
+                return cached.formatter.string(from: date)
+            }
+            let formatter = DateFormatter()
+            formatter.dateStyle = .medium
+            formatter.timeStyle = .short
+            cached = (locale, formatter)
+            return formatter.string(from: date)
+        }
     }
 }
 
