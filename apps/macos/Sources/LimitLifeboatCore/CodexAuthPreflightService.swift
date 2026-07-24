@@ -298,6 +298,10 @@ struct CodexAppServerProcessRunner: CodexAppServerRunning {
         errors.fileHandleForReading.readabilityHandler = nil
         if process.isRunning {
             process.terminate()
+            usleep(100_000)
+            if process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+            }
         }
         process.waitUntilExit()
 

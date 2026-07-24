@@ -508,7 +508,8 @@ final class CredentialRestoreTransaction {
               let current = try claudeCredentialSource.locateLiveItem(
                   accessMode: accessMode
               ),
-              current.identity == expected.identity else {
+              current.identity == expected.identity,
+              current.label == expected.label else {
             throw ClaudeCodeCredentialsKeychainError.securityToolError(
                 .itemChanged
             )
