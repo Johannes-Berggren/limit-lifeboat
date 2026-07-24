@@ -200,7 +200,7 @@ final class ClaudeSecurityToolCredentialBackendTests: XCTestCase {
         }
     }
 
-    func testInteractiveCommandAccepts4096BytesIncludingLFAndNULAndRejects4097() throws {
+    func testUsesStdinAt4096AndFallsBackToDirectArgvAt4097() throws {
         var location = makeLocation(service: "s", account: "a", path: "/k")
         var baseCommand = expectedUpdateCommand(data: Data(), location: location)
         var baseByteCount = baseCommand.utf8.count + 1
@@ -232,24 +232,113 @@ final class ClaudeSecurityToolCredentialBackendTests: XCTestCase {
             ClaudeSecurityToolCredentialBackend.interactiveCommandBufferByteLimit
         )
 
+        // One byte over the interactive buffer switches transport to a direct
+        // argv invocation rather than failing.
         let oneByteLargerLocation = makeLocation(
             service: location.serviceName,
             account: location.accountName,
             label: location.label,
             path: location.keychainPath + "x"
         )
+        try updateData(payload, using: backend, at: oneByteLargerLocation)
+
+        XCTAssertEqual(runner.invocations.count, 2)
+        let fallback = try XCTUnwrap(runner.invocations.last)
+        XCTAssertNil(fallback.standardInput)
+        XCTAssertFalse(fallback.arguments.contains("-i"))
+        XCTAssertEqual(
+            fallback.arguments,
+            expectedDirectArguments(
+                data: payload,
+                location: oneByteLargerLocation
+            )
+        )
+    }
+
+    func testOversizedUpdateUsesDirectArgvWithUnescapedArguments() throws {
+        // Fields carry characters that the interactive path escapes; the argv
+        // path must pass them verbatim (security's tokenizer would otherwise
+        // unquote the escaped form back to these same raw values).
+        let location = makeLocation(
+            service: #"Claude "Code"-credentials"#,
+            account: #"test\user"#,
+            label: #"Claude "Shared" Credential"#,
+            path: #"/tmp/back\slash.keychain-db"#
+        )
+        let payload = Data(repeating: 0xab, count: 3_000) // 6000 hex bytes >> 4096
+        let runner = RecordingClaudeSecurityToolRunner()
+        let backend = ClaudeSecurityToolCredentialBackend(runner: runner)
+        let verificationCount = LockedCounter()
+
+        try updateData(
+            payload,
+            using: backend,
+            at: location,
+            verifyBefore: {
+                _ = verificationCount.increment()
+                return true
+            },
+            verifyAfter: {
+                _ = verificationCount.increment()
+                return true
+            }
+        )
+
+        let invocation = try XCTUnwrap(runner.invocations.first)
+        XCTAssertEqual(runner.invocations.count, 1)
+        XCTAssertNil(invocation.standardInput)
+        XCTAssertEqual(invocation.arguments[0], "add-generic-password")
+        XCTAssertFalse(invocation.arguments.contains("-i"))
+        XCTAssertEqual(invocation.arguments[3], #"test\user"#)
+        XCTAssertEqual(
+            invocation.arguments,
+            expectedDirectArguments(data: payload, location: location)
+        )
+        XCTAssertEqual(verificationCount.value, 2)
+    }
+
+    func testOversizedUpdateDescriptionRedactsArgvSecret() throws {
+        let location = makeLocation(service: "s", account: "a", path: "/k")
+        let secret = Data("distinctive-secret".utf8)
+        let payload = secret + Data(repeating: 0xab, count: 3_000)
+        let hex = payload.map { String(format: "%02x", $0) }.joined()
+        let runner = RecordingClaudeSecurityToolRunner()
+        let backend = ClaudeSecurityToolCredentialBackend(runner: runner)
+
+        try updateData(payload, using: backend, at: location)
+
+        let invocation = try XCTUnwrap(runner.invocations.first)
+        XCTAssertNil(invocation.standardInput)
+        let description = String(describing: invocation)
+        XCTAssertTrue(description.contains("<redacted"))
+        XCTAssertFalse(description.contains(hex))
+        XCTAssertFalse(description.contains("distinctive-secret"))
+    }
+
+    func testPayloadBeyondDirectCeilingStillThrowsBeforeRunningTool() {
+        let location = makeLocation(service: "s", account: "a", path: "/k")
+        let payload = Data(
+            repeating: 0xab,
+            count: ClaudeSecurityToolCredentialBackend
+                .directCommandArgumentByteLimit / 2 + 1
+        )
+        let runner = RecordingClaudeSecurityToolRunner()
+        let backend = ClaudeSecurityToolCredentialBackend(runner: runner)
+
         XCTAssertThrowsError(
-            try updateData(payload, using: backend, at: oneByteLargerLocation)
+            try updateData(payload, using: backend, at: location)
         ) { error in
+            guard case .payloadTooLarge(_, let maximumByteCount)? =
+                error as? ClaudeSecurityToolCredentialError else {
+                return XCTFail("expected payloadTooLarge, got \(error)")
+            }
             XCTAssertEqual(
-                error as? ClaudeSecurityToolCredentialError,
-                .payloadTooLarge(
-                    commandByteCount: 4_097,
-                    maximumByteCount: 4_096
-                )
+                maximumByteCount,
+                ClaudeSecurityToolCredentialBackend
+                    .directCommandArgumentByteLimit
             )
         }
-        XCTAssertEqual(runner.invocations.count, 1)
+        XCTAssertTrue(runner.invocations.isEmpty)
     }
 
     func testUpdateDetectsItemChangeBeforeAndAfterToolCall() {
@@ -456,6 +545,21 @@ final class ClaudeSecurityToolCredentialBackendTests: XCTestCase {
             + " -l \"\(location.label)\""
             + " -X \"\(hex)\""
             + " \"\(location.keychainPath)\"\n"
+    }
+
+    private func expectedDirectArguments(
+        data: Data,
+        location: ClaudeKeychainItemLocation
+    ) -> [String] {
+        let hex = data.map { String(format: "%02x", $0) }.joined()
+        return [
+            "add-generic-password", "-U",
+            "-a", location.accountName,
+            "-s", location.serviceName,
+            "-l", location.label,
+            "-X", hex,
+            location.keychainPath
+        ]
     }
 
     private func readData(

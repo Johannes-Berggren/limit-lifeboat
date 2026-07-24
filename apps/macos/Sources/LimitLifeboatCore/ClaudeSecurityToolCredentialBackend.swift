@@ -3,9 +3,13 @@ import Foundation
 
 /// One invocation of Apple's bundled Keychain command-line tool.
 ///
-/// The environment is deliberately not configurable: credential bytes are
-/// passed only through standard input and can never be placed in argv or an
-/// environment variable by this backend.
+/// The environment is deliberately not configurable. Credential bytes are
+/// normally passed only through standard input and never appear in argv or an
+/// environment variable. The sole exception is the oversized-credential
+/// fallback (see `updateInvocation`): a credential too large for `security`'s
+/// fixed interactive command buffer is passed as an `add-generic-password`
+/// argv element, which is bounded only by `ARG_MAX`. `description` redacts
+/// those bytes so they never reach a log.
 struct ClaudeSecurityToolInvocation:
     Equatable,
     Sendable,
@@ -31,10 +35,31 @@ struct ClaudeSecurityToolInvocation:
             "<redacted \($0.count) bytes>"
         } ?? "none"
         return "ClaudeSecurityToolInvocation(executablePath: \(executablePath), "
-            + "arguments: \(arguments), standardInput: \(inputDescription))"
+            + "arguments: \(redactedArguments), standardInput: \(inputDescription))"
     }
 
     var debugDescription: String { description }
+
+    /// The oversized-credential fallback carries the secret as the argv element
+    /// following `-X` (hex) or `-w`/`-p` (raw). Redact that element so logging
+    /// an invocation can never leak credential bytes, mirroring how
+    /// `standardInput` is redacted for the interactive path.
+    private var redactedArguments: [String] {
+        var redacted = arguments
+        var index = redacted.startIndex
+        while index < redacted.endIndex {
+            if ["-X", "-w", "-p"].contains(redacted[index]),
+               redacted.index(after: index) < redacted.endIndex {
+                let secretIndex = redacted.index(after: index)
+                redacted[secretIndex] =
+                    "<redacted \(redacted[secretIndex].utf8.count) bytes>"
+                index = redacted.index(after: secretIndex)
+            } else {
+                index = redacted.index(after: index)
+            }
+        }
+        return redacted
+    }
 }
 
 struct ClaudeSecurityToolResult:
@@ -149,6 +174,12 @@ public enum ClaudeSecurityToolCredentialError: Error, Equatable, Sendable, Local
 struct ClaudeSecurityToolCredentialBackend: ClaudeLiveCredentialBackend, Sendable {
     static let executablePath = "/usr/bin/security"
     static let interactiveCommandBufferByteLimit = 4_096
+    /// Ceiling for the oversized-credential fallback, which passes the hex
+    /// secret as an argv element. `ARG_MAX` is 1 MiB and the runner clears the
+    /// environment, so 512 KiB leaves a 2x margin for the argv pointer array
+    /// and kernel reservation while capping the raw credential near ~256 KiB —
+    /// far above realistic `mcpOAuth`-inflated credential growth.
+    static let directCommandArgumentByteLimit = 524_288
 
     private let runner: any ClaudeSecurityToolRunning
 
@@ -240,60 +271,110 @@ struct ClaudeSecurityToolCredentialBackend: ClaudeLiveCredentialBackend, Sendabl
         data: Data,
         location: ClaudeKeychainItemLocation
     ) throws -> ClaudeSecurityToolInvocation {
-        let account = try quotedInteractiveArgument(
+        // Validate the raw field values once, up front. Validity is
+        // independent of the transport chosen below.
+        let rawAccount = try validatedRawArgument(
             location.accountName,
             field: .accountName
         )
-        let service = try quotedInteractiveArgument(
+        let rawService = try validatedRawArgument(
             location.serviceName,
             field: .serviceName
         )
-        let label = try quotedInteractiveArgument(
+        let rawLabel = try validatedRawArgument(
             location.label,
             field: .label
         )
-        let keychain = try quotedInteractiveArgument(
+        let rawKeychain = try validatedRawArgument(
             location.keychainPath,
             field: .keychainPath
         )
+
+        let (hexByteCount, hexOverflow) = data.count.multipliedReportingOverflow(
+            by: 2
+        )
+
+        // Preferred transport: pipe the whole command over stdin so no secret
+        // byte ever reaches argv. This only works while the command fits
+        // security's fixed interactive command buffer.
+        let account = escapedInteractiveArgument(rawAccount)
+        let service = escapedInteractiveArgument(rawService)
+        let label = escapedInteractiveArgument(rawLabel)
+        let keychain = escapedInteractiveArgument(rawKeychain)
         let commandPrefix = "add-generic-password -U"
             + " -a \(account)"
             + " -s \(service)"
             + " -l \(label)"
             + " -X \""
         let commandSuffix = "\" \(keychain)\n"
-        let (hexByteCount, hexOverflow) = data.count.multipliedReportingOverflow(
-            by: 2
-        )
         let fixedByteCount = commandPrefix.utf8.count
             + commandSuffix.utf8.count
             + 1 // security's terminating NUL
         let (commandByteCount, commandOverflow) =
             fixedByteCount.addingReportingOverflow(hexByteCount)
 
-        guard !hexOverflow,
-              !commandOverflow,
-              commandByteCount <= interactiveCommandBufferByteLimit else {
-            throw ClaudeSecurityToolCredentialError.payloadTooLarge(
-                commandByteCount: hexOverflow || commandOverflow
-                    ? Int.max
-                    : commandByteCount,
-                maximumByteCount: interactiveCommandBufferByteLimit
+        if !hexOverflow,
+           !commandOverflow,
+           commandByteCount <= interactiveCommandBufferByteLimit {
+            // Avoid materializing a second copy of the credential. The complete
+            // command, LF, and security's NUL fit the fixed interactive buffer.
+            let command = commandPrefix + lowercaseHex(data) + commandSuffix
+            return ClaudeSecurityToolInvocation(
+                executablePath: executablePath,
+                arguments: ["-i"],
+                standardInput: Data(command.utf8)
             )
         }
 
-        // Avoid materializing a second copy of an oversized credential. The
-        // complete command, LF, and security's NUL have already been proven
-        // to fit the fixed 4096-byte interactive buffer.
-        let command = commandPrefix + lowercaseHex(data) + commandSuffix
+        // Fallback for a credential too large for the interactive buffer (the
+        // provider blob grows with preserved sibling keys such as mcpOAuth).
+        // Invoke security directly and pass the hex secret as an argv element,
+        // which is bounded by ARG_MAX rather than the interactive buffer. Same
+        // executable, so the item ACL and apple-tool: partition trust still
+        // apply and the write stays prompt-free. The secret is briefly visible
+        // in the process argument list; `description` redacts it for logs.
+        let argumentFixedByteCount =
+            "add-generic-password".utf8.count
+            + "-U".utf8.count
+            + "-a".utf8.count + rawAccount.utf8.count
+            + "-s".utf8.count + rawService.utf8.count
+            + "-l".utf8.count + rawLabel.utf8.count
+            + "-X".utf8.count
+            + rawKeychain.utf8.count
+        let (argumentByteCount, argumentOverflow) =
+            argumentFixedByteCount.addingReportingOverflow(hexByteCount)
+
+        guard !hexOverflow,
+              !argumentOverflow,
+              argumentByteCount <= directCommandArgumentByteLimit else {
+            throw ClaudeSecurityToolCredentialError.payloadTooLarge(
+                commandByteCount: hexOverflow || argumentOverflow
+                    ? Int.max
+                    : argumentByteCount,
+                maximumByteCount: directCommandArgumentByteLimit
+            )
+        }
+
         return ClaudeSecurityToolInvocation(
             executablePath: executablePath,
-            arguments: ["-i"],
-            standardInput: Data(command.utf8)
+            arguments: [
+                "add-generic-password", "-U",
+                "-a", rawAccount,
+                "-s", rawService,
+                "-l", rawLabel,
+                "-X", lowercaseHex(data),
+                rawKeychain
+            ],
+            standardInput: nil
         )
     }
 
-    private static func quotedInteractiveArgument(
+    /// Rejects bytes that cannot be carried safely to the Keychain tool by
+    /// either transport, and returns the value unchanged. A NUL would truncate
+    /// an argv element (argv is a NUL-terminated C string); LF/CR would split
+    /// an interactive command line. Enforcing both on every path keeps a given
+    /// location's validity independent of the credential size.
+    private static func validatedRawArgument(
         _ value: String,
         field: ClaudeSecurityToolArgumentField
     ) throws -> String {
@@ -302,7 +383,14 @@ struct ClaudeSecurityToolCredentialBackend: ClaudeLiveCredentialBackend, Sendabl
         }) else {
             throw ClaudeSecurityToolCredentialError.invalidArgument(field: field)
         }
+        return value
+    }
 
+    /// Escapes and double-quotes an already-validated value for embedding in a
+    /// `security -i` interactive command line. The interactive tokenizer
+    /// unquotes this back to the original value, so the argv fallback passes
+    /// the unescaped value instead.
+    private static func escapedInteractiveArgument(_ value: String) -> String {
         let escaped = value
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
