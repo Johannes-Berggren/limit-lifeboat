@@ -98,26 +98,6 @@ enum DS {
     static func providerSymbol(_ provider: Provider) -> String {
         provider == .claude ? "sparkles" : "terminal"
     }
-
-    private static var markImageCache: [Provider: NSImage] = [:]
-
-    /// The provider's brand mark as a tintable template image, or nil if the
-    /// bundled asset is missing. Callers fall back to text so the menu bar never
-    /// renders blank. Loaded once per provider and cached.
-    static func providerMarkImage(_ provider: Provider) -> NSImage? {
-        if let cached = markImageCache[provider] {
-            return cached
-        }
-        let resourceName = provider == .claude ? "claude" : "codex"
-        guard let image = ProviderMarkResourceResolver().image(named: resourceName) else {
-            return nil
-        }
-        // Template = the menu bar tints it to its own foreground color and adapts
-        // to light/dark, matching the surrounding text.
-        image.isTemplate = true
-        markImageCache[provider] = image
-        return image
-    }
 }
 
 struct ProviderLabel: View {

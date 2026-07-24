@@ -31,34 +31,8 @@ LICENSE_FILE="$REPO_ROOT/LICENSE"
 BUNDLED_LICENSE="$RESOURCES_DIR/LICENSE.txt"
 SPARKLE_LICENSE_FILE="$APP_ROOT/Packaging/Sparkle-LICENSE.txt"
 BUNDLED_SPARKLE_LICENSE="$RESOURCES_DIR/ThirdPartyLicenses/Sparkle.txt"
-PROVIDER_MARKS_SOURCE_DIR="$APP_ROOT/Sources/LimitLifeboat/Resources/ProviderMarks"
-RESOURCE_BUNDLE_NAME="LimitLifeboat_LimitLifeboat.bundle"
-BUILD_RESOURCE_BUNDLE=""
-APP_RESOURCE_BUNDLE="$RESOURCES_DIR/$RESOURCE_BUNDLE_NAME"
 SPARKLE_PUBLIC_KEY="sByqwP3sYWWv46jT+x7vgv7tt+iujcezHs7WX+gyP7g="
 SPARKLE_FEED_URL="https://github.com/Johannes-Berggren/limit-lifeboat/releases/latest/download/appcast.xml"
-
-assert_matching_provider_marks() {
-  local expected_dir="$1"
-  local actual_dir="$2"
-  local label="$3"
-  local provider_mark
-
-  for provider_mark in claude.pdf codex.pdf; do
-    [[ -s "$expected_dir/$provider_mark" ]] || {
-      echo "Expected nonempty provider mark at $expected_dir/$provider_mark" >&2
-      exit 1
-    }
-    [[ -s "$actual_dir/$provider_mark" ]] || {
-      echo "$label is missing nonempty ProviderMarks/$provider_mark at $actual_dir/$provider_mark" >&2
-      exit 1
-    }
-    cmp -s "$expected_dir/$provider_mark" "$actual_dir/$provider_mark" || {
-      echo "$label ProviderMarks/$provider_mark does not match $expected_dir/$provider_mark" >&2
-      exit 1
-    }
-  done
-}
 
 case "$APP_VARIANT" in
   development)
@@ -132,28 +106,6 @@ fi
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$FRAMEWORKS_DIR" "$RESOURCES_DIR/ThirdPartyLicenses"
 cp "$BUILD_BIN" "$APP_EXECUTABLE"
-# SwiftPM emits the provider-mark bundle next to the build binary. The manually
-# assembled app keeps that code-free bundle in Contents/Resources, where the
-# app's nonfatal resource resolver can find it and codesign accepts the layout.
-BUILD_RESOURCE_BUNDLE="$BUILD_DIR/$RESOURCE_BUNDLE_NAME"
-if [[ ! -d "$BUILD_RESOURCE_BUNDLE" ]]; then
-  echo "Expected the SPM resource bundle at $BUILD_RESOURCE_BUNDLE" >&2
-  exit 1
-fi
-assert_matching_provider_marks \
-  "$PROVIDER_MARKS_SOURCE_DIR" \
-  "$BUILD_RESOURCE_BUNDLE/ProviderMarks" \
-  "SwiftPM build resource bundle"
-mkdir -p "$RESOURCES_DIR"
-ditto "$BUILD_RESOURCE_BUNDLE" "$APP_RESOURCE_BUNDLE"
-assert_matching_provider_marks \
-  "$PROVIDER_MARKS_SOURCE_DIR" \
-  "$APP_RESOURCE_BUNDLE/ProviderMarks" \
-  "Packaged app resource bundle"
-assert_matching_provider_marks \
-  "$BUILD_RESOURCE_BUNDLE/ProviderMarks" \
-  "$APP_RESOURCE_BUNDLE/ProviderMarks" \
-  "Packaged app resource bundle copy"
 ditto "$SPARKLE_SOURCE" "$SPARKLE_FRAMEWORK"
 # Limit Lifeboat is not sandboxed, so Sparkle's sandbox-only XPC services are
 # unnecessary. Removing both the real directory and top-level symlink also

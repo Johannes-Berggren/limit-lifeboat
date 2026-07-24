@@ -81,14 +81,15 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         button.toolTip = "Limit Lifeboat\n\(summary.accessibilityText)"
         button.setAccessibilityLabel("Limit Lifeboat. \(summary.accessibilityText)")
         button.contentTintColor = nil
-        button.attributedTitle = attributedTitle(summary: summary)
+        button.attributedTitle = MenuBarTitleFormatter.attributedTitle(summary: summary)
     }
+}
 
-    private func attributedTitle(summary: MenuBarSummary) -> NSAttributedString {
+enum MenuBarTitleFormatter {
+    static func attributedTitle(summary: MenuBarSummary) -> NSAttributedString {
         let providerAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 9, weight: .semibold),
-            .foregroundColor: NSColor.secondaryLabelColor,
-            .kern: 0.55
+            .font: NSFont.systemFont(ofSize: 9, weight: .bold),
+            .foregroundColor: NSColor.secondaryLabelColor
         ]
         let limitLabelAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 10, weight: .medium),
@@ -100,7 +101,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         ]
 
         guard !summary.activeProviderLimits.isEmpty else {
-            let title = NSMutableAttributedString(string: " LIMIT ", attributes: providerAttributes)
+            let title = NSMutableAttributedString(string: "LIMIT ", attributes: providerAttributes)
             title.append(valueString(summary.compactValue, riskLevel: summary.riskLevel))
             return title
         }
@@ -108,9 +109,12 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         let title = NSMutableAttributedString()
         for (providerIndex, group) in summary.activeProviderLimits.enumerated() {
             if providerIndex > 0 {
-                title.append(NSAttributedString(string: "  ·  ", attributes: separatorAttributes))
+                title.append(NSAttributedString(string: " · ", attributes: separatorAttributes))
             }
-            title.append(providerMark(for: group.provider, textAttributes: providerAttributes))
+            title.append(NSAttributedString(
+                string: "\(providerAbbreviation(for: group.provider)) ",
+                attributes: providerAttributes
+            ))
 
             if group.limits.isEmpty {
                 title.append(valueString("?", riskLevel: .unknown))
@@ -119,7 +123,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
 
             for (limitIndex, limit) in group.limits.enumerated() {
                 if limitIndex > 0 {
-                    title.append(NSAttributedString(string: "  ", attributes: separatorAttributes))
+                    title.append(NSAttributedString(string: " ", attributes: separatorAttributes))
                 }
                 title.append(NSAttributedString(
                     string: "\(limit.label) ",
@@ -131,48 +135,16 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         return title
     }
 
-    /// The provider's brand mark as an inline image, wrapped in the same spacing
-    /// the provider text used. Falls back to the uppercased name when the asset
-    /// is unavailable so the bar never renders blank.
-    private func providerMark(
-        for provider: Provider,
-        textAttributes: [NSAttributedString.Key: Any]
-    ) -> NSAttributedString {
-        guard let image = DS.providerMarkImage(provider) else {
-            return ProviderMarkTitleFallback.attributedString(
-                for: provider,
-                textAttributes: textAttributes
-            )
+    static func providerAbbreviation(for provider: Provider) -> String {
+        switch provider {
+        case .claude:
+            return "CL"
+        case .codex:
+            return "CX"
         }
-
-        let markHeight: CGFloat = 13
-        // Center the square mark on the cap band of the adjacent percentages.
-        let referenceFont = NSFont.systemFont(ofSize: 11, weight: .semibold)
-        let attachment = NSTextAttachment()
-        attachment.image = image
-        attachment.bounds = CGRect(
-            x: 0,
-            y: referenceFont.capHeight / 2 - markHeight / 2,
-            width: markHeight,
-            height: markHeight
-        )
-
-        let markColor = (textAttributes[.foregroundColor] as? NSColor) ?? .labelColor
-        let result = NSMutableAttributedString(string: " ")
-        let markString = NSMutableAttributedString(attachment: attachment)
-        // Tint the template mark to match the muted provider label it replaces;
-        // labelColor variants resolve per menu-bar appearance (light/dark).
-        markString.addAttribute(
-            .foregroundColor,
-            value: markColor,
-            range: NSRange(location: 0, length: markString.length)
-        )
-        result.append(markString)
-        result.append(NSAttributedString(string: " "))
-        return result
     }
 
-    private func valueString(_ value: String, riskLevel: RiskLevel) -> NSAttributedString {
+    private static func valueString(_ value: String, riskLevel: RiskLevel) -> NSAttributedString {
         NSAttributedString(
             string: value,
             attributes: [
@@ -184,7 +156,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
 
     /// The status-item glyph tint for a risk level, or nil to stay monochrome
     /// (template) and follow the menu-bar appearance.
-    private func paletteColor(for riskLevel: RiskLevel) -> NSColor? {
+    private static func paletteColor(for riskLevel: RiskLevel) -> NSColor? {
         switch riskLevel {
         case .depleted:
             return .systemRed
@@ -197,18 +169,5 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         case .unknown:
             return nil
         }
-    }
-
-}
-
-enum ProviderMarkTitleFallback {
-    static func attributedString(
-        for provider: Provider,
-        textAttributes: [NSAttributedString.Key: Any]
-    ) -> NSAttributedString {
-        NSAttributedString(
-            string: " \(provider.displayName.uppercased()) ",
-            attributes: textAttributes
-        )
     }
 }
