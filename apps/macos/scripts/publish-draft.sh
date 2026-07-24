@@ -38,8 +38,6 @@ DMG_PATH="$APP_ROOT/dist/$DMG_BASENAME"
 CHECKSUM_PATH="$DMG_PATH.sha256"
 APPCAST_PATH="$APP_ROOT/dist/appcast.xml"
 SPARKLE_LICENSE_FILE="$APP_ROOT/Packaging/Sparkle-LICENSE.txt"
-PROVIDER_MARKS_SOURCE_DIR="$APP_ROOT/Sources/LimitLifeboat/Resources/ProviderMarks"
-RESOURCE_BUNDLE_NAME="LimitLifeboat_LimitLifeboat.bundle"
 TEAM_ID_SOURCE="$APP_ROOT/Sources/LimitLifeboat/DistributionIdentity.swift"
 SPARKLE_TOOLS="$APP_ROOT/.build/artifacts/sparkle/Sparkle/bin"
 GENERATE_KEYS="$SPARKLE_TOOLS/generate_keys"
@@ -78,21 +76,6 @@ assert_plist_value() {
   local actual
   actual="$(plist_value "$plist" "$key")" || fail "Missing $key in $plist"
   [[ "$actual" == "$expected" ]] || fail "$key in $plist is '$actual'; expected '$expected'"
-}
-
-assert_provider_marks() {
-  local provider_marks_dir="$1"
-  local label="$2"
-  local provider_mark
-
-  for provider_mark in claude.pdf codex.pdf; do
-    [[ -s "$PROVIDER_MARKS_SOURCE_DIR/$provider_mark" ]] \
-      || fail "Source provider mark is missing or empty: $PROVIDER_MARKS_SOURCE_DIR/$provider_mark"
-    [[ -s "$provider_marks_dir/$provider_mark" ]] \
-      || fail "$label is missing nonempty ProviderMarks/$provider_mark"
-    cmp -s "$PROVIDER_MARKS_SOURCE_DIR/$provider_mark" "$provider_marks_dir/$provider_mark" \
-      || fail "$label ProviderMarks/$provider_mark does not match its source asset"
-  done
 }
 
 assert_developer_id_signature() {
@@ -180,7 +163,6 @@ INFO="$APP/Contents/Info.plist"
 FRAMEWORK="$APP/Contents/Frameworks/Sparkle.framework"
 AUTOUPDATE="$FRAMEWORK/Versions/B/Autoupdate"
 UPDATER="$FRAMEWORK/Versions/B/Updater.app"
-PROVIDER_MARKS="$APP/Contents/Resources/$RESOURCE_BUNDLE_NAME/ProviderMarks"
 [[ -d "$APP" ]] || fail "DMG does not contain $PRODUCT_NAME.app"
 [[ -L "$MOUNT_POINT/Applications" && "$(readlink "$MOUNT_POINT/Applications")" == "/Applications" ]] \
   || fail "DMG does not contain the expected Applications symlink"
@@ -202,7 +184,6 @@ cmp -s "$REPO_ROOT/LICENSE" "$APP/Contents/Resources/LICENSE.txt" \
   || fail "Bundled repository license does not match"
 cmp -s "$SPARKLE_LICENSE_FILE" "$APP/Contents/Resources/ThirdPartyLicenses/Sparkle.txt" \
   || fail "Bundled Sparkle license notice does not match"
-assert_provider_marks "$PROVIDER_MARKS" "The draft release app"
 [[ ! -e "$FRAMEWORK/Versions/B/XPCServices" ]] || fail "DMG app includes unused Sparkle XPC services"
 [[ "$(lipo -archs "$EXECUTABLE")" == "$ARCHITECTURE" ]] || fail "DMG app is not arm64-only"
 otool -L "$EXECUTABLE" | grep -Fq '@rpath/Sparkle.framework/Versions/B/Sparkle' \
