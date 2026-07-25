@@ -463,7 +463,7 @@ final class AppState: ObservableObject {
             deferredFullRefresh = true
             return
         }
-        await refreshClaudeUsage()
+        await refreshUsage(provider: .claude)
         finishCredentialMutation(for: .claude, owner: claudeMutation)
         await drainScheduledClaudeRecoveries()
 
@@ -472,7 +472,7 @@ final class AppState: ObservableObject {
             deferredFullRefresh = true
             return
         }
-        await refreshCodexUsage()
+        await refreshUsage(provider: .codex)
         finishCredentialMutation(for: .codex, owner: codexMutation)
         notifyElapsedResets()
         updateSwitchAdvice()
@@ -805,17 +805,25 @@ final class AppState: ObservableObject {
     /// Polls every Claude account through the usage API (active first, so its
     /// numbers land even if an inactive account's refresh stalls). The slow
     /// expect-probe of the CLI remains the fallback for the active account.
-    private func refreshClaudeUsage() async {
-        guard validateClaudeNativeConfiguration() else { return }
+    /// Scheduled usage refresh for one provider, wrapped in Keychain I/O
+    /// accounting. Both providers share this shell; only the Claude preflight
+    /// and the per-provider body differ.
+    private func refreshUsage(provider: Provider) async {
+        if provider == .claude, !validateClaudeNativeConfiguration() { return }
         let counter = CredentialKeychainIOCounter()
         await CredentialAccess.counting(counter) {
-            await refreshClaudeUsageImpl()
+            switch provider {
+            case .claude:
+                await refreshClaudeUsageImpl()
+            case .codex:
+                await refreshCodexUsageImpl()
+            }
             logCredentialWorkflow(
                 workflow: "usage",
-                provider: .claude,
+                provider: provider,
                 origin: "scheduled_refresh",
                 access: "noninteractive",
-                status: usageWorkflowStatus(provider: .claude),
+                status: usageWorkflowStatus(provider: provider),
                 counts: counter.snapshot
             )
         }
@@ -1280,13 +1288,7 @@ final class AppState: ObservableObject {
             } catch {
                 // A malformed or mismatched saved item is neither absent nor
                 // evidence that its cached login expiry is trustworthy.
-                storedSnapshotStatuses[profile.id] = .unreadable(
-                    reason: "The saved credential snapshot could not be decoded. Relaunch the installed app or repair this saved login."
-                )
-                storedCredentialSummaries[profile.id] = nil
-                if profile.provider == .claude {
-                    claudeLoginExpirations[profile.id] = nil
-                }
+                markStoredCredentialUnreadable(profile.id, provider: profile.provider)
                 throw error
             }
         }
@@ -1329,13 +1331,7 @@ final class AppState: ObservableObject {
                 storedSnapshotStatuses[profile.id] = .locked
                 throw error
             } catch {
-                storedSnapshotStatuses[profile.id] = .unreadable(
-                    reason: "The saved credential snapshot could not be decoded. Relaunch the installed app or repair this saved login."
-                )
-                storedCredentialSummaries[profile.id] = nil
-                if provider == .claude {
-                    claudeLoginExpirations[profile.id] = nil
-                }
+                markStoredCredentialUnreadable(profile.id, provider: provider)
                 throw error
             }
         }
@@ -2026,21 +2022,6 @@ final class AppState: ObservableObject {
     /// Polls every captured Codex account through the stable app-server rate
     /// limit API. Accounts are serialized (active first) so copied refresh
     /// tokens are never used concurrently by this app.
-    private func refreshCodexUsage() async {
-        let counter = CredentialKeychainIOCounter()
-        await CredentialAccess.counting(counter) {
-            await refreshCodexUsageImpl()
-            logCredentialWorkflow(
-                workflow: "usage",
-                provider: .codex,
-                origin: "scheduled_refresh",
-                access: "noninteractive",
-                status: usageWorkflowStatus(provider: .codex),
-                counts: counter.snapshot
-            )
-        }
-    }
-
     private func refreshCodexUsageImpl() async {
         lastCodexRefreshAttempt = Date()
         let codexProfiles = profiles
@@ -3154,11 +3135,7 @@ final class AppState: ObservableObject {
                 statusMessage = "Switch stopped because the saved login could not be re-read under the Claude credential lock."
                 return false
             } catch {
-                storedSnapshotStatuses[profile.id] = .unreadable(
-                    reason: "The saved credential snapshot could not be decoded. Relaunch the installed app or repair this saved login."
-                )
-                storedCredentialSummaries[profile.id] = nil
-                claudeLoginExpirations[profile.id] = nil
+                markStoredCredentialUnreadable(profile.id, provider: .claude)
                 refreshStates[profile.id] = .credentialAccessBlocked(
                     source: .savedAccount,
                     disposition: .other(errSecDecode),
@@ -4617,7 +4594,7 @@ final class AppState: ObservableObject {
                         providerLocked = true
                     } catch {
                         statuses[profile.id] = .unreadable(
-                            reason: "The saved credential snapshot could not be decoded. Relaunch the installed app or repair this saved login."
+                            reason: Self.unreadableStoredCredentialReason
                         )
                     }
                 }
@@ -4970,9 +4947,7 @@ final class AppState: ObservableObject {
         } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
             return .locked
         } catch {
-            return .unreadable(
-                reason: "The saved credential snapshot could not be decoded. Relaunch the installed app or repair this saved login."
-            )
+            return .unreadable(reason: Self.unreadableStoredCredentialReason)
         }
     }
 
@@ -6731,6 +6706,24 @@ final class AppState: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    /// Copy for a saved credential item that exists but cannot be decoded. It
+    /// is neither absent nor evidence that its cached login expiry is
+    /// trustworthy, so every read path reports it the same way.
+    static let unreadableStoredCredentialReason = "The saved credential snapshot could not be decoded. Relaunch the installed app or repair this saved login."
+
+    /// Marks a saved credential unreadable and drops the caches that a
+    /// successful read populates, so a stale summary or login expiry cannot
+    /// outlive a failed decode.
+    private func markStoredCredentialUnreadable(_ profileID: UUID, provider: Provider) {
+        storedSnapshotStatuses[profileID] = .unreadable(
+            reason: Self.unreadableStoredCredentialReason
+        )
+        storedCredentialSummaries[profileID] = nil
+        if provider == .claude {
+            claudeLoginExpirations[profileID] = nil
+        }
+    }
 
     private func persistProfiles() {
         do {
