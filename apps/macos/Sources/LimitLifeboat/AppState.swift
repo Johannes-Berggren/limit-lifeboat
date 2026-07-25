@@ -895,7 +895,7 @@ final class AppState: ObservableObject {
                     AppLog.usage.error("Usage fetch failed for account \(profile.id, privacy: .public): \(fetchError.localizedDescription, privacy: .public)")
                 }
                 recordClaudeCredentialOutcome(
-                    Self.credentialOutcome(for: fetchError),
+                    ClaudeCredentialOutcomePolicy.outcome(for: fetchError),
                     for: profile,
                     codePath: "background"
                 )
@@ -1101,59 +1101,6 @@ final class AppState: ObservableObject {
                 warnedSharedAccountProfiles.insert(id)
             }
             AppLog.credentials.notice("Two or more profiles share one Claude account (\(ids.count, privacy: .public) profiles); their logins share a single rotating refresh-token chain.")
-        }
-    }
-
-    /// Maps a fetch failure to a durable credential outcome, or nil for
-    /// transient noise (network, absent token) that should not disturb a
-    /// profile's recorded episode.
-    private static func credentialOutcome(for error: ClaudeAccountUsageFetchError) -> AppEvent.CredentialOutcome? {
-        switch error {
-        case .interactiveRefreshRequired:
-            return .rotationDeferred
-        case .accountActiveElsewhere:
-            return .switchRequired
-        case .rotationDeferred(let underlying):
-            if let coordinatorError = underlying as? ClaudeOAuthRefreshCoordinatorError {
-                switch coordinatorError {
-                case .busy:
-                    return .rotationBusy
-                case .leaseLost, .leaseReleased, .missingLease:
-                    return .leaseLost
-                case .ambiguousConfiguration, .unsafePath, .fileSystem:
-                    return .rotationDeferred
-                }
-            }
-            return .rotationDeferred
-        case .credentialRepairRequired:
-            return .repairRequired
-        case .credentialRecoveryFailed:
-            return .persistenceFailed
-        case .unauthorized:
-            return .unauthorized
-        case .forbidden:
-            return .forbidden
-        case .refreshFailed(let underlying):
-            if let coordinatorError = underlying as? ClaudeOAuthRefreshCoordinatorError {
-                switch coordinatorError {
-                case .busy:
-                    return .rotationBusy
-                case .leaseLost, .leaseReleased, .missingLease:
-                    return .leaseLost
-                case .ambiguousConfiguration, .unsafePath, .fileSystem:
-                    return .rotationDeferred
-                }
-            }
-            if let oauth = underlying as? ClaudeOAuthError, oauth.requiresLogin {
-                return .invalidGrant
-            }
-            return .refreshFailed
-        // A locked/denied keychain or unusable provider credential is an access
-        // problem, not a credential outcome — it's surfaced via the keychain row
-        // state and its own logging, so it isn't recorded as a refresh event.
-        case .keychainLocked, .liveCredentialAccessDenied, .credentialUnavailable,
-             .noCredentials, .transport:
-            return nil
         }
     }
 
@@ -3538,7 +3485,7 @@ final class AppState: ObservableObject {
             } catch let error as ClaudeOAuthRefreshCoordinatorError {
                 refreshStates[profile.id] = .rotationDeferred(reason: error.localizedDescription)
                 recordClaudeCredentialOutcome(
-                    Self.credentialOutcome(for: .rotationDeferred(error)),
+                    ClaudeCredentialOutcomePolicy.outcome(for: .rotationDeferred(error)),
                     for: profile,
                     codePath: automatic ? "automaticSwitch" : "userSwitch"
                 )
@@ -4437,7 +4384,7 @@ final class AppState: ObservableObject {
         let item = suppliedItem ?? (resolveItemIfNeeded
             ? (try? cliSwitcher.locateClaudeKeychainItem(accessMode: .nonInteractive))
             : nil)
-        if transientClaudeKeychainFailure(in: error) == .itemChanged {
+        if ClaudeKeychainFailurePolicy.transientFailure(in: error) == .itemChanged {
             // A concurrent Claude login or helper write invalidates the old
             // generation, including any denial attached to it. Re-resolve on
             // the next cycle instead of permanently suppressing background
@@ -4445,7 +4392,7 @@ final class AppState: ObservableObject {
             claudeKeychainAuthorizationState = .unknown
             return
         }
-        if transientClaudeKeychainFailure(in: error) == .keychainLocked {
+        if ClaudeKeychainFailurePolicy.transientFailure(in: error) == .keychainLocked {
             // Do not let a wake/unlock boundary poison this item generation as
             // an authorization denial. A known ACL denial remains sticky, but
             // every other state may retry through the prompt-free metadata
@@ -4468,96 +4415,6 @@ final class AppState: ObservableObject {
             item: item,
             failureMessage: error.localizedDescription
         )
-    }
-
-    private enum TransientClaudeKeychainFailure: Equatable {
-        case itemChanged
-        case keychainLocked
-    }
-
-    /// Restore, refresh, and usage workflows preserve their root cause inside
-    /// typed wrapper errors. Unwrap only the two transient provider-Keychain
-    /// outcomes that must not become a sticky authorization denial. The depth
-    /// bound also protects this UI-state path from a pathological custom Error
-    /// that wraps itself.
-    private func transientClaudeKeychainFailure(
-        in error: Error,
-        depth: Int = 0
-    ) -> TransientClaudeKeychainFailure? {
-        guard depth < 12 else { return nil }
-        let nextDepth = depth + 1
-
-        if let keychainError = error as? ClaudeCodeCredentialsKeychainError {
-            switch keychainError {
-            case .securityToolError(.itemChanged):
-                return .itemChanged
-            case .securityToolError(.keychainLocked):
-                return .keychainLocked
-            case .credentialAccessUnavailable(let underlying):
-                return transientClaudeKeychainFailure(
-                    in: underlying,
-                    depth: nextDepth
-                )
-            default:
-                return nil
-            }
-        }
-
-        if let switchError = error as? CLISwitcherError {
-            switch switchError {
-            case .backupFailed(_, let underlying),
-                 .rollbackConflict(_, _, let underlying, _):
-                return transientClaudeKeychainFailure(
-                    in: underlying,
-                    depth: nextDepth
-                )
-            default:
-                return nil
-            }
-        }
-
-        if let fetchError = error as? ClaudeAccountUsageFetchError {
-            switch fetchError {
-            case .keychainLocked:
-                return .keychainLocked
-            case .liveCredentialAccessDenied(let underlying, _):
-                return transientClaudeKeychainFailure(
-                    in: underlying,
-                    depth: nextDepth
-                )
-            case .rotationDeferred(let underlying),
-                 .credentialRepairRequired(let underlying),
-                 .credentialRecoveryFailed(let underlying),
-                 .credentialUnavailable(let underlying),
-                 .refreshFailed(let underlying),
-                 .transport(let underlying):
-                return transientClaudeKeychainFailure(
-                    in: underlying,
-                    depth: nextDepth
-                )
-            default:
-                return nil
-            }
-        }
-
-        if let storeError = error as? CredentialStoreError {
-            switch storeError {
-            case .credentialAccessUnavailable(let underlying):
-                return transientClaudeKeychainFailure(
-                    in: underlying,
-                    depth: nextDepth
-                )
-            case .decodeFailed(let underlying?):
-                return transientClaudeKeychainFailure(
-                    in: underlying,
-                    depth: nextDepth
-                )
-            default:
-                return nil
-            }
-        }
-
-        return nil
     }
 
     private func recordClaudeKeychainDisposition(
@@ -5349,7 +5206,7 @@ final class AppState: ObservableObject {
                         reason: error.localizedDescription
                     )
                     recordClaudeCredentialOutcome(
-                        Self.credentialOutcome(for: .rotationDeferred(error)),
+                        ClaudeCredentialOutcomePolicy.outcome(for: .rotationDeferred(error)),
                         for: profile,
                         codePath: source.credentialCodePath
                     )
@@ -5571,7 +5428,7 @@ final class AppState: ObservableObject {
                     )
                 }
                 recordClaudeCredentialOutcome(
-                    Self.credentialOutcome(for: fetchError),
+                    ClaudeCredentialOutcomePolicy.outcome(for: fetchError),
                     for: profile,
                     codePath: source.credentialCodePath
                 )
