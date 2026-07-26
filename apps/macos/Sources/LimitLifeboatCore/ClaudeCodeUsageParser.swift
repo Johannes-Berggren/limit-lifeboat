@@ -75,7 +75,7 @@ public struct ClaudeCodeUsageReport: Equatable, Sendable {
 
     private var message: String {
         let parts = limits.map { limit in
-            "\(messageLabel(for: limit.name)) \(Int(limit.usedPercent.rounded()))%"
+            "\(messageLabel(for: limit.name)) \(UsagePercent.text(limit.usedPercent))"
         }
         return "Claude Code /usage reports " + parts.joined(separator: " - ")
     }

@@ -156,18 +156,7 @@ enum MenuBarTitleFormatter {
 
     /// The status-item glyph tint for a risk level, or nil to stay monochrome
     /// (template) and follow the menu-bar appearance.
-    private static func paletteColor(for riskLevel: RiskLevel) -> NSColor? {
-        switch riskLevel {
-        case .depleted:
-            return .systemRed
-        case .warning:
-            return .systemOrange
-        case .healthy:
-            return .systemBlue
-        case .stale:
-            return .systemYellow
-        case .unknown:
-            return nil
-        }
+    static func paletteColor(for riskLevel: RiskLevel) -> NSColor? {
+        DS.riskNSColor(riskLevel)
     }
 }

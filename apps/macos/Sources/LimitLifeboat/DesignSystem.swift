@@ -38,25 +38,33 @@ enum DS {
     }
 
     /// systemYellow is near-invisible on light backgrounds, so light mode gets a darker amber.
-    static let staleAmber = Color(nsColor: NSColor(name: nil) { appearance in
+    static let staleAmberNSColor = NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             ? .systemYellow
             : NSColor(srgbRed: 0.70, green: 0.52, blue: 0.03, alpha: 1)
-    })
+    }
 
-    static func riskColor(_ level: RiskLevel) -> Color {
+    static let staleAmber = Color(nsColor: staleAmberNSColor)
+
+    /// The tint for a risk level, or nil when the surface should stay monochrome
+    /// (the menu bar uses nil to follow the status-bar appearance as a template).
+    static func riskNSColor(_ level: RiskLevel) -> NSColor? {
         switch level {
         case .healthy:
-            return accent
+            return .systemBlue
         case .warning:
-            return warning
+            return .systemOrange
         case .depleted:
-            return danger
+            return .systemRed
         case .stale:
-            return staleAmber
+            return staleAmberNSColor
         case .unknown:
-            return .gray
+            return nil
         }
+    }
+
+    static func riskColor(_ level: RiskLevel) -> Color {
+        riskNSColor(level).map(Color.init(nsColor:)) ?? .gray
     }
 
     static func billingColor(_ mode: BillingUsageMode) -> Color {

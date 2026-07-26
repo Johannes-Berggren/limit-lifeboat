@@ -125,7 +125,7 @@ public enum MenuBarSummaryProjector {
 
     private static func percentValue(_ window: UsageWindow?) -> String {
         guard let window else { return "–" }
-        return "\(Int(window.usedPercent.rounded()))%"
+        return UsagePercent.text(window.usedPercent)
     }
 
     private static func activeProviderLimits(
@@ -145,7 +145,7 @@ public enum MenuBarSummaryProjector {
             let limits = snapshot.orderedDisplayWindows.map { window in
                 MenuBarLimitValue(
                     label: shortLabel(for: window),
-                    usedPercent: Int(window.usedPercent.rounded()),
+                    usedPercent: UsagePercent.rounded(window.usedPercent),
                     riskLevel: isStale
                         ? .stale
                         : min(
@@ -279,7 +279,7 @@ public enum MenuBarSummaryProjector {
             let usage = windows.isEmpty
                 ? "usage unavailable"
                 : windows.map {
-                    "\($0.label) \(Int($0.usedPercent.rounded())) percent used"
+                    "\($0.label) \(UsagePercent.rounded($0.usedPercent)) percent used"
                 }.joined(separator: ", ")
             var entry = "\(provider.displayName) active account \(profile.label): \(usage), \(mode)"
             if snapshot.isStale(asOf: now) {

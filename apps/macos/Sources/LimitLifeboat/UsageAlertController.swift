@@ -90,15 +90,11 @@ final class UsageAlertController {
             date: alert.resetDate ?? Date()
         )
 
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
-
         var parts = [
-            "At the current pace, \(provider.displayName) \(alert.windowLabel) usage runs out around \(formatter.string(from: alert.projectedDepletion))."
+            "At the current pace, \(provider.displayName) \(alert.windowLabel) usage runs out around \(AbsoluteTimestamp.text(alert.projectedDepletion))."
         ]
         if let reset = alert.resetDate {
-            parts.append("The window resets \(formatter.string(from: reset)).")
+            parts.append("The window resets \(AbsoluteTimestamp.text(reset)).")
         }
         postNotification(
             identifier: "pace-\(alert.profileID.uuidString)-\(alert.windowID)-\(Int(alert.projectedDepletion.timeIntervalSince1970))",
@@ -337,7 +333,7 @@ final class UsageAlertController {
         if alert.riskLevel == .depleted {
             return "\(profile.label): \(alert.windowLabel) limit reached"
         }
-        return "\(profile.label): \(alert.windowLabel) \(Int(alert.usedPercent.rounded()))% used"
+        return "\(profile.label): \(alert.windowLabel) \(UsagePercent.text(alert.usedPercent)) used"
     }
 
     private func notificationBody(alert: ThresholdAlert, snapshot: UsageSnapshot, profile: AccountProfile) -> String {

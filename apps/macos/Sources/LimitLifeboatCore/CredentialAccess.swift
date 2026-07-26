@@ -256,3 +256,19 @@ public enum CredentialAccess {
         return CredentialAccessSession(mode: mode).authenticationContext
     }
 }
+
+/// The access disposition an error implies, across the three error types that
+/// can surface a Keychain denial. Callers in the switch and restore paths both
+/// classify failures this way, so the mapping lives in one place.
+func accessDisposition(from error: Error) -> CredentialAccessDisposition? {
+    if let error = error as? ClaudeCodeCredentialsKeychainError {
+        return error.credentialAccessDisposition
+    }
+    if let error = error as? CredentialStoreError {
+        return error.credentialAccessDisposition
+    }
+    if let error = error as? CLISwitcherError {
+        return error.credentialAccessDisposition
+    }
+    return nil
+}

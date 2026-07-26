@@ -845,10 +845,10 @@ struct AccountRowView: View {
 
     private func paceHelp(_ forecast: PaceForecast) -> String {
         var parts = [
-            "At the recent pace, the \(forecast.windowLabel) limit runs out around \(forecast.depletesAt.formatted(date: .abbreviated, time: .shortened))."
+            "At the recent pace, the \(forecast.windowLabel) limit runs out around \(AbsoluteTimestamp.text(forecast.depletesAt))."
         ]
         if let reset = forecast.resetDate {
-            parts.append("The window resets \(reset.formatted(date: .abbreviated, time: .shortened)).")
+            parts.append("The window resets \(AbsoluteTimestamp.text(reset)).")
         }
         return parts.joined(separator: " ")
     }
@@ -857,7 +857,7 @@ struct AccountRowView: View {
         if Calendar.current.isDate(forecast.depletesAt, inSameDayAs: Date()) {
             return forecast.depletesAt.formatted(date: .omitted, time: .shortened)
         }
-        return forecast.depletesAt.formatted(date: .abbreviated, time: .shortened)
+        return AbsoluteTimestamp.text(forecast.depletesAt)
     }
 }
 
@@ -903,7 +903,7 @@ private struct CodexResetStatusView: View {
                                         .foregroundStyle(.secondary)
                                 }
                                 if let expiry = credit.expiresAt {
-                                    Text("Expires \(expiry.formatted(date: .abbreviated, time: .shortened))")
+                                    Text("Expires \(AbsoluteTimestamp.text(expiry))")
                                         .font(.caption2)
                                         .foregroundStyle(.tertiary)
                                 }
@@ -1122,7 +1122,7 @@ struct BillingStatusView: View {
 
     private func includedUsageText(_ snapshot: UsageSnapshot, prefix: String) -> String {
         if let used = snapshot.usedFraction {
-            return "\(prefix): \(Int((used * 100).rounded()))% used."
+            return "\(prefix): \(UsagePercent.text(used * 100)) used."
         }
         if let remaining = snapshot.includedRemaining, let limit = snapshot.includedLimit {
             return "\(prefix): \(format(remaining)) / \(format(limit)) remaining."
@@ -1209,7 +1209,7 @@ struct UsageGauge: View {
 
     private var resetHelp: String? {
         if let date = window.resetDate {
-            return "Resets \(date.formatted(date: .abbreviated, time: .shortened))"
+            return "Resets \(AbsoluteTimestamp.text(date))"
         }
         return window.resetDescription.map { "Resets \($0)" }
     }
@@ -1223,7 +1223,7 @@ struct UsageGauge: View {
     }
 
     private var usageValue: String {
-        "\(Int(window.usedPercent.rounded()))%"
+        UsagePercent.text(window.usedPercent)
     }
 
     private func accessibilityValue(now: Date) -> String {
@@ -1254,7 +1254,7 @@ struct UsageGauge: View {
     }
 
     static func longClock(_ date: Date) -> String {
-        date.formatted(date: .abbreviated, time: .shortened)
+        AbsoluteTimestamp.text(date)
     }
 }
 

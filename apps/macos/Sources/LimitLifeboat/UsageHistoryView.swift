@@ -94,7 +94,7 @@ struct UsageHistoryChartView: View {
                                             .font(.caption)
                                             .foregroundStyle(.secondary)
                                             .lineLimit(1)
-                                        Text("\(Int(value.usedPercent.rounded()))%")
+                                        Text(UsagePercent.text(value.usedPercent))
                                             .font(.caption.monospacedDigit().weight(.semibold))
                                     }
                                 }
@@ -231,7 +231,7 @@ struct UsageHistoryChartView: View {
     }
 
     private func trendText(window: UsageWindow, trend: UsageTrend) -> String {
-        let current = Int(trend.currentUsedPercent.rounded())
+        let current = UsagePercent.rounded(trend.currentUsedPercent)
         guard let relative = trend.relativeChange else {
             let delta = Int(trend.deltaPercentagePoints.rounded())
             if abs(delta) < 2 {
@@ -239,7 +239,7 @@ struct UsageHistoryChartView: View {
             }
             return "\(window.label): \(current)% used — \(delta > 0 ? "+" : "")\(delta) pts vs last week"
         }
-        let percent = Int((abs(relative) * 100).rounded())
+        let percent = UsagePercent.rounded(abs(relative) * 100)
         if percent < 5 {
             return "\(window.label): \(current)% used — about the same pace as last week"
         }

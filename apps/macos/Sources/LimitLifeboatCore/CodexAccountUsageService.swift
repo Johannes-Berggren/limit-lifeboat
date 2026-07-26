@@ -480,7 +480,7 @@ public struct CodexAccountUsageService {
         let selected = reading.windows.max(by: { $0.usedPercent < $1.usedPercent })
         var messageParts: [String] = []
         if let selected {
-            messageParts.append("Codex reports \(Int(selected.usedPercent.rounded()))% used")
+            messageParts.append("Codex reports \(UsagePercent.text(selected.usedPercent)) used")
         } else {
             messageParts.append("Codex returned no rate-limit windows")
         }
@@ -850,88 +850,25 @@ struct CodexUsageAppServerProcessRunner: CodexUsageAppServerRunning {
         forceRefresh: Bool,
         timeout: TimeInterval
     ) -> CodexUsageAppServerOutcome {
-        let process = Process()
-        process.executableURL = executableURL
-        process.arguments = [
-            "app-server",
-            "--stdio",
-            "-c", "cli_auth_credentials_store=\"file\"",
-            "-c", "analytics.enabled=false",
-            "-c", "check_for_update_on_startup=false"
-        ]
-        var environment = ProcessInfo.processInfo.environment
-        environment["CODEX_HOME"] = codexHome.path
-        environment["RUST_LOG"] = "error"
-        process.environment = environment
-
-        let input = Pipe()
-        let output = Pipe()
-        let errors = Pipe()
-        process.standardInput = input
-        process.standardOutput = output
-        process.standardError = errors
-
         let accumulator = CodexUsageAppServerResponseAccumulator()
-        let completed = DispatchSemaphore(value: 0)
-        output.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if data.isEmpty || accumulator.append(data) {
-                completed.signal()
-            }
-        }
-        errors.fileHandleForReading.readabilityHandler = { handle in
-            _ = handle.availableData
-        }
-        process.terminationHandler = { _ in completed.signal() }
+        let ended = CodexAppServerSession.run(
+            executableURL: executableURL,
+            codexHome: codexHome,
+            timeout: timeout,
+            requests: [
+                ["method": "account/read", "id": 2, "params": ["refreshToken": forceRefresh]],
+                ["method": "account/rateLimits/read", "id": 3]
+            ],
+            consume: accumulator.append
+        )
 
-        do {
-            try process.run()
-        } catch {
-            output.fileHandleForReading.readabilityHandler = nil
-            errors.fileHandleForReading.readabilityHandler = nil
+        if ended == .launchFailed {
             return .unavailable(reason: "Could not start Codex for a live usage check.")
         }
-
-        let messages: [[String: Any]] = [
-            [
-                "method": "initialize",
-                "id": 1,
-                "params": [
-                    "clientInfo": [
-                        "name": "limit_lifeboat",
-                        "title": "Limit Lifeboat",
-                        "version": "1"
-                    ],
-                    "capabilities": [:]
-                ]
-            ],
-            ["method": "initialized", "params": [:]],
-            ["method": "account/read", "id": 2, "params": ["refreshToken": forceRefresh]],
-            ["method": "account/rateLimits/read", "id": 3]
-        ]
-        for message in messages {
-            guard let data = try? JSONSerialization.data(withJSONObject: message) else { continue }
-            input.fileHandleForWriting.write(data)
-            input.fileHandleForWriting.write(Data([0x0a]))
-        }
-
-        let waitResult = completed.wait(timeout: .now() + timeout)
-        input.fileHandleForWriting.closeFile()
-        output.fileHandleForReading.readabilityHandler = nil
-        errors.fileHandleForReading.readabilityHandler = nil
-        if process.isRunning {
-            process.terminate()
-            usleep(100_000)
-            if process.isRunning {
-                kill(process.processIdentifier, SIGKILL)
-            }
-        }
-        process.waitUntilExit()
-
         if let outcome = accumulator.outcome {
             return outcome
         }
-        if waitResult == .timedOut {
+        if ended == .timedOut {
             return .unavailable(reason: "Codex live usage check timed out.")
         }
         return .unavailable(reason: "Codex live usage check ended before returning a result.")
@@ -1098,20 +1035,10 @@ struct CodexUsageAppServerProcessRunner: CodexUsageAppServerRunning {
     }
 
     private func configuredProcess(executableURL: URL, codexHome: URL) -> Process {
-        let process = Process()
-        process.executableURL = executableURL
-        process.arguments = [
-            "app-server",
-            "--stdio",
-            "-c", "cli_auth_credentials_store=\"file\"",
-            "-c", "analytics.enabled=false",
-            "-c", "check_for_update_on_startup=false"
-        ]
-        var environment = ProcessInfo.processInfo.environment
-        environment["CODEX_HOME"] = codexHome.path
-        environment["RUST_LOG"] = "error"
-        process.environment = environment
-        return process
+        CodexAppServerSession.configuredProcess(
+            executableURL: executableURL,
+            codexHome: codexHome
+        )
     }
 
     private func writeMessage(_ message: [String: Any], to handle: FileHandle) {

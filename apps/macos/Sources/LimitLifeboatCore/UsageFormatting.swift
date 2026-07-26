@@ -33,6 +33,51 @@ public enum FlexibleISO8601 {
     }
 }
 
+/// Shared whole-number percent rendering. Quota percentages are 0-100 and
+/// every surface — gauges, menu-bar title, notifications, digests — rounds
+/// them the same way, so two surfaces can never disagree by a point.
+public enum UsagePercent {
+    /// A 0-100 percentage rounded to a whole number.
+    public static func rounded(_ percent: Double) -> Int {
+        Int(percent.rounded())
+    }
+
+    /// A 0-100 percentage as "83%".
+    public static func text(_ percent: Double) -> String {
+        "\(rounded(percent))%"
+    }
+}
+
+/// A short absolute local timestamp ("Jul 8, 2026 at 1:49 AM"). Every surface
+/// that prints an instant goes through this, so reset and depletion times read
+/// identically everywhere.
+///
+/// Deliberately DateFormatter rather than `Date.formatted(date:time:)`: only
+/// DateFormatter honours a regional format override, so a user whose language
+/// is en_US but whose region is Norway sees "5 Jul 2026 at 02:49" — matching
+/// the rest of macOS — where `formatted` would force "Jul 5, 2026 at 2:49".
+///
+/// The formatter is cached because the menu re-renders often, and rebuilt when
+/// the current locale changes so the cache cannot pin a stale region.
+public enum AbsoluteTimestamp {
+    private static let lock = NSLock()
+    private nonisolated(unsafe) static var cached: (locale: Locale, formatter: DateFormatter)?
+
+    public static func text(_ date: Date) -> String {
+        lock.withLock {
+            let locale = Locale.current
+            if let cached, cached.locale == locale {
+                return cached.formatter.string(from: date)
+            }
+            let formatter = DateFormatter()
+            formatter.dateStyle = .medium
+            formatter.timeStyle = .short
+            cached = (locale, formatter)
+            return formatter.string(from: date)
+        }
+    }
+}
+
 /// Shared "how long until" phrasing so every surface rounds the same way.
 public enum DurationPhrase {
     /// A compact single-unit duration ("3m", "5h", "2d") rounded up so a

@@ -463,7 +463,7 @@ final class AppState: ObservableObject {
             deferredFullRefresh = true
             return
         }
-        await refreshClaudeUsage()
+        await refreshUsage(provider: .claude)
         finishCredentialMutation(for: .claude, owner: claudeMutation)
         await drainScheduledClaudeRecoveries()
 
@@ -472,7 +472,7 @@ final class AppState: ObservableObject {
             deferredFullRefresh = true
             return
         }
-        await refreshCodexUsage()
+        await refreshUsage(provider: .codex)
         finishCredentialMutation(for: .codex, owner: codexMutation)
         notifyElapsedResets()
         updateSwitchAdvice()
@@ -805,17 +805,25 @@ final class AppState: ObservableObject {
     /// Polls every Claude account through the usage API (active first, so its
     /// numbers land even if an inactive account's refresh stalls). The slow
     /// expect-probe of the CLI remains the fallback for the active account.
-    private func refreshClaudeUsage() async {
-        guard validateClaudeNativeConfiguration() else { return }
+    /// Scheduled usage refresh for one provider, wrapped in Keychain I/O
+    /// accounting. Both providers share this shell; only the Claude preflight
+    /// and the per-provider body differ.
+    private func refreshUsage(provider: Provider) async {
+        if provider == .claude, !validateClaudeNativeConfiguration() { return }
         let counter = CredentialKeychainIOCounter()
         await CredentialAccess.counting(counter) {
-            await refreshClaudeUsageImpl()
+            switch provider {
+            case .claude:
+                await refreshClaudeUsageImpl()
+            case .codex:
+                await refreshCodexUsageImpl()
+            }
             logCredentialWorkflow(
                 workflow: "usage",
-                provider: .claude,
+                provider: provider,
                 origin: "scheduled_refresh",
                 access: "noninteractive",
-                status: usageWorkflowStatus(provider: .claude),
+                status: usageWorkflowStatus(provider: provider),
                 counts: counter.snapshot
             )
         }
@@ -895,7 +903,7 @@ final class AppState: ObservableObject {
                     AppLog.usage.error("Usage fetch failed for account \(profile.id, privacy: .public): \(fetchError.localizedDescription, privacy: .public)")
                 }
                 recordClaudeCredentialOutcome(
-                    Self.credentialOutcome(for: fetchError),
+                    ClaudeCredentialOutcomePolicy.outcome(for: fetchError),
                     for: profile,
                     codePath: "background"
                 )
@@ -1104,59 +1112,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Maps a fetch failure to a durable credential outcome, or nil for
-    /// transient noise (network, absent token) that should not disturb a
-    /// profile's recorded episode.
-    private static func credentialOutcome(for error: ClaudeAccountUsageFetchError) -> AppEvent.CredentialOutcome? {
-        switch error {
-        case .interactiveRefreshRequired:
-            return .rotationDeferred
-        case .accountActiveElsewhere:
-            return .switchRequired
-        case .rotationDeferred(let underlying):
-            if let coordinatorError = underlying as? ClaudeOAuthRefreshCoordinatorError {
-                switch coordinatorError {
-                case .busy:
-                    return .rotationBusy
-                case .leaseLost, .leaseReleased, .missingLease:
-                    return .leaseLost
-                case .ambiguousConfiguration, .unsafePath, .fileSystem:
-                    return .rotationDeferred
-                }
-            }
-            return .rotationDeferred
-        case .credentialRepairRequired:
-            return .repairRequired
-        case .credentialRecoveryFailed:
-            return .persistenceFailed
-        case .unauthorized:
-            return .unauthorized
-        case .forbidden:
-            return .forbidden
-        case .refreshFailed(let underlying):
-            if let coordinatorError = underlying as? ClaudeOAuthRefreshCoordinatorError {
-                switch coordinatorError {
-                case .busy:
-                    return .rotationBusy
-                case .leaseLost, .leaseReleased, .missingLease:
-                    return .leaseLost
-                case .ambiguousConfiguration, .unsafePath, .fileSystem:
-                    return .rotationDeferred
-                }
-            }
-            if let oauth = underlying as? ClaudeOAuthError, oauth.requiresLogin {
-                return .invalidGrant
-            }
-            return .refreshFailed
-        // A locked/denied keychain or unusable provider credential is an access
-        // problem, not a credential outcome — it's surfaced via the keychain row
-        // state and its own logging, so it isn't recorded as a refresh event.
-        case .keychainLocked, .liveCredentialAccessDenied, .credentialUnavailable,
-             .noCredentials, .transport:
-            return nil
-        }
-    }
-
     /// Appends a credential-refresh event only when a profile's outcome changes,
     /// so the durable log is a compact transition trail (episode start and
     /// recovery) rather than one line per five-minute cycle.
@@ -1333,13 +1288,7 @@ final class AppState: ObservableObject {
             } catch {
                 // A malformed or mismatched saved item is neither absent nor
                 // evidence that its cached login expiry is trustworthy.
-                storedSnapshotStatuses[profile.id] = .unreadable(
-                    reason: "The saved credential snapshot could not be decoded. Relaunch the installed app or repair this saved login."
-                )
-                storedCredentialSummaries[profile.id] = nil
-                if profile.provider == .claude {
-                    claudeLoginExpirations[profile.id] = nil
-                }
+                markStoredCredentialUnreadable(profile.id, provider: profile.provider)
                 throw error
             }
         }
@@ -1382,13 +1331,7 @@ final class AppState: ObservableObject {
                 storedSnapshotStatuses[profile.id] = .locked
                 throw error
             } catch {
-                storedSnapshotStatuses[profile.id] = .unreadable(
-                    reason: "The saved credential snapshot could not be decoded. Relaunch the installed app or repair this saved login."
-                )
-                storedCredentialSummaries[profile.id] = nil
-                if provider == .claude {
-                    claudeLoginExpirations[profile.id] = nil
-                }
+                markStoredCredentialUnreadable(profile.id, provider: provider)
                 throw error
             }
         }
@@ -2079,21 +2022,6 @@ final class AppState: ObservableObject {
     /// Polls every captured Codex account through the stable app-server rate
     /// limit API. Accounts are serialized (active first) so copied refresh
     /// tokens are never used concurrently by this app.
-    private func refreshCodexUsage() async {
-        let counter = CredentialKeychainIOCounter()
-        await CredentialAccess.counting(counter) {
-            await refreshCodexUsageImpl()
-            logCredentialWorkflow(
-                workflow: "usage",
-                provider: .codex,
-                origin: "scheduled_refresh",
-                access: "noninteractive",
-                status: usageWorkflowStatus(provider: .codex),
-                counts: counter.snapshot
-            )
-        }
-    }
-
     private func refreshCodexUsageImpl() async {
         lastCodexRefreshAttempt = Date()
         let codexProfiles = profiles
@@ -2618,13 +2546,13 @@ final class AppState: ObservableObject {
             "This asks OpenAI to reset the eligible Codex rate-limit windows and cannot be undone."
         ]
         if let window = snapshots[current.id]?.mostConstrainedWindow {
-            details.append("Current \(window.label.lowercased()) usage is \(Int(window.usedPercent.rounded()))%.")
+            details.append("Current \(window.label.lowercased()) usage is \(UsagePercent.text(window.usedPercent)).")
         }
         if let expiry = availability.credits?
             .filter({ $0.status == "available" })
             .compactMap(\.expiresAt)
             .min() {
-            details.append("The earliest listed reset expires \(expiry.formatted(date: .abbreviated, time: .shortened)).")
+            details.append("The earliest listed reset expires \(AbsoluteTimestamp.text(expiry)).")
         }
         details.append("OpenAI will select which available reset to use.")
         alert.informativeText = details.joined(separator: " ")
@@ -3207,11 +3135,7 @@ final class AppState: ObservableObject {
                 statusMessage = "Switch stopped because the saved login could not be re-read under the Claude credential lock."
                 return false
             } catch {
-                storedSnapshotStatuses[profile.id] = .unreadable(
-                    reason: "The saved credential snapshot could not be decoded. Relaunch the installed app or repair this saved login."
-                )
-                storedCredentialSummaries[profile.id] = nil
-                claudeLoginExpirations[profile.id] = nil
+                markStoredCredentialUnreadable(profile.id, provider: .claude)
                 refreshStates[profile.id] = .credentialAccessBlocked(
                     source: .savedAccount,
                     disposition: .other(errSecDecode),
@@ -3538,7 +3462,7 @@ final class AppState: ObservableObject {
             } catch let error as ClaudeOAuthRefreshCoordinatorError {
                 refreshStates[profile.id] = .rotationDeferred(reason: error.localizedDescription)
                 recordClaudeCredentialOutcome(
-                    Self.credentialOutcome(for: .rotationDeferred(error)),
+                    ClaudeCredentialOutcomePolicy.outcome(for: .rotationDeferred(error)),
                     for: profile,
                     codePath: automatic ? "automaticSwitch" : "userSwitch"
                 )
@@ -4437,7 +4361,7 @@ final class AppState: ObservableObject {
         let item = suppliedItem ?? (resolveItemIfNeeded
             ? (try? cliSwitcher.locateClaudeKeychainItem(accessMode: .nonInteractive))
             : nil)
-        if transientClaudeKeychainFailure(in: error) == .itemChanged {
+        if ClaudeKeychainFailurePolicy.transientFailure(in: error) == .itemChanged {
             // A concurrent Claude login or helper write invalidates the old
             // generation, including any denial attached to it. Re-resolve on
             // the next cycle instead of permanently suppressing background
@@ -4445,7 +4369,7 @@ final class AppState: ObservableObject {
             claudeKeychainAuthorizationState = .unknown
             return
         }
-        if transientClaudeKeychainFailure(in: error) == .keychainLocked {
+        if ClaudeKeychainFailurePolicy.transientFailure(in: error) == .keychainLocked {
             // Do not let a wake/unlock boundary poison this item generation as
             // an authorization denial. A known ACL denial remains sticky, but
             // every other state may retry through the prompt-free metadata
@@ -4468,96 +4392,6 @@ final class AppState: ObservableObject {
             item: item,
             failureMessage: error.localizedDescription
         )
-    }
-
-    private enum TransientClaudeKeychainFailure: Equatable {
-        case itemChanged
-        case keychainLocked
-    }
-
-    /// Restore, refresh, and usage workflows preserve their root cause inside
-    /// typed wrapper errors. Unwrap only the two transient provider-Keychain
-    /// outcomes that must not become a sticky authorization denial. The depth
-    /// bound also protects this UI-state path from a pathological custom Error
-    /// that wraps itself.
-    private func transientClaudeKeychainFailure(
-        in error: Error,
-        depth: Int = 0
-    ) -> TransientClaudeKeychainFailure? {
-        guard depth < 12 else { return nil }
-        let nextDepth = depth + 1
-
-        if let keychainError = error as? ClaudeCodeCredentialsKeychainError {
-            switch keychainError {
-            case .securityToolError(.itemChanged):
-                return .itemChanged
-            case .securityToolError(.keychainLocked):
-                return .keychainLocked
-            case .credentialAccessUnavailable(let underlying):
-                return transientClaudeKeychainFailure(
-                    in: underlying,
-                    depth: nextDepth
-                )
-            default:
-                return nil
-            }
-        }
-
-        if let switchError = error as? CLISwitcherError {
-            switch switchError {
-            case .backupFailed(_, let underlying),
-                 .rollbackConflict(_, _, let underlying, _):
-                return transientClaudeKeychainFailure(
-                    in: underlying,
-                    depth: nextDepth
-                )
-            default:
-                return nil
-            }
-        }
-
-        if let fetchError = error as? ClaudeAccountUsageFetchError {
-            switch fetchError {
-            case .keychainLocked:
-                return .keychainLocked
-            case .liveCredentialAccessDenied(let underlying, _):
-                return transientClaudeKeychainFailure(
-                    in: underlying,
-                    depth: nextDepth
-                )
-            case .rotationDeferred(let underlying),
-                 .credentialRepairRequired(let underlying),
-                 .credentialRecoveryFailed(let underlying),
-                 .credentialUnavailable(let underlying),
-                 .refreshFailed(let underlying),
-                 .transport(let underlying):
-                return transientClaudeKeychainFailure(
-                    in: underlying,
-                    depth: nextDepth
-                )
-            default:
-                return nil
-            }
-        }
-
-        if let storeError = error as? CredentialStoreError {
-            switch storeError {
-            case .credentialAccessUnavailable(let underlying):
-                return transientClaudeKeychainFailure(
-                    in: underlying,
-                    depth: nextDepth
-                )
-            case .decodeFailed(let underlying?):
-                return transientClaudeKeychainFailure(
-                    in: underlying,
-                    depth: nextDepth
-                )
-            default:
-                return nil
-            }
-        }
-
-        return nil
     }
 
     private func recordClaudeKeychainDisposition(
@@ -4760,7 +4594,7 @@ final class AppState: ObservableObject {
                         providerLocked = true
                     } catch {
                         statuses[profile.id] = .unreadable(
-                            reason: "The saved credential snapshot could not be decoded. Relaunch the installed app or repair this saved login."
+                            reason: Self.unreadableStoredCredentialReason
                         )
                     }
                 }
@@ -5113,9 +4947,7 @@ final class AppState: ObservableObject {
         } catch let error as CredentialStoreError where error.isKeychainAccessDenied {
             return .locked
         } catch {
-            return .unreadable(
-                reason: "The saved credential snapshot could not be decoded. Relaunch the installed app or repair this saved login."
-            )
+            return .unreadable(reason: Self.unreadableStoredCredentialReason)
         }
     }
 
@@ -5349,7 +5181,7 @@ final class AppState: ObservableObject {
                         reason: error.localizedDescription
                     )
                     recordClaudeCredentialOutcome(
-                        Self.credentialOutcome(for: .rotationDeferred(error)),
+                        ClaudeCredentialOutcomePolicy.outcome(for: .rotationDeferred(error)),
                         for: profile,
                         codePath: source.credentialCodePath
                     )
@@ -5571,7 +5403,7 @@ final class AppState: ObservableObject {
                     )
                 }
                 recordClaudeCredentialOutcome(
-                    Self.credentialOutcome(for: fetchError),
+                    ClaudeCredentialOutcomePolicy.outcome(for: fetchError),
                     for: profile,
                     codePath: source.credentialCodePath
                 )
@@ -6874,6 +6706,24 @@ final class AppState: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    /// Copy for a saved credential item that exists but cannot be decoded. It
+    /// is neither absent nor evidence that its cached login expiry is
+    /// trustworthy, so every read path reports it the same way.
+    static let unreadableStoredCredentialReason = "The saved credential snapshot could not be decoded. Relaunch the installed app or repair this saved login."
+
+    /// Marks a saved credential unreadable and drops the caches that a
+    /// successful read populates, so a stale summary or login expiry cannot
+    /// outlive a failed decode.
+    private func markStoredCredentialUnreadable(_ profileID: UUID, provider: Provider) {
+        storedSnapshotStatuses[profileID] = .unreadable(
+            reason: Self.unreadableStoredCredentialReason
+        )
+        storedCredentialSummaries[profileID] = nil
+        if provider == .claude {
+            claudeLoginExpirations[profileID] = nil
+        }
+    }
 
     private func persistProfiles() {
         do {

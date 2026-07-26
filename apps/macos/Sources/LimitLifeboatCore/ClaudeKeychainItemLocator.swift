@@ -479,7 +479,7 @@ struct SystemClaudeKeychainSecurityClient: ClaudeKeychainSecurityClient, @unchec
 
 enum ClaudeSecurityToolPartitionList {
     static func decode(_ encoded: String) -> [String]? {
-        guard let plistData = Data(strictHexEncoded: encoded),
+        guard let plistData = Data(strictASCIIHex: encoded),
               let plist = try? PropertyListSerialization.propertyList(
                   from: plistData,
                   options: [],
@@ -494,35 +494,3 @@ enum ClaudeSecurityToolPartitionList {
     }
 }
 
-private extension Data {
-    init?(strictHexEncoded string: String) {
-        let encoded = Array(string.utf8)
-        guard encoded.count.isMultiple(of: 2) else {
-            return nil
-        }
-
-        var bytes: [UInt8] = []
-        bytes.reserveCapacity(encoded.count / 2)
-        for index in stride(from: 0, to: encoded.count, by: 2) {
-            guard let high = Self.hexNibble(encoded[index]),
-                  let low = Self.hexNibble(encoded[index + 1]) else {
-                return nil
-            }
-            bytes.append((high << 4) | low)
-        }
-        self.init(bytes)
-    }
-
-    private static func hexNibble(_ byte: UInt8) -> UInt8? {
-        switch byte {
-        case 0x30...0x39:
-            return byte - 0x30
-        case 0x41...0x46:
-            return byte - 0x41 + 10
-        case 0x61...0x66:
-            return byte - 0x61 + 10
-        default:
-            return nil
-        }
-    }
-}

@@ -188,7 +188,7 @@ public struct PayAsYouGoSpend: Codable, Equatable, Sendable {
         }
         if let utilization {
             let percent = utilization <= 1 ? utilization * 100 : utilization
-            return "Extra usage at \(Int(percent.rounded()))% of this month's cap"
+            return "Extra usage at \(UsagePercent.text(percent)) of this month's cap"
         }
         return nil
     }

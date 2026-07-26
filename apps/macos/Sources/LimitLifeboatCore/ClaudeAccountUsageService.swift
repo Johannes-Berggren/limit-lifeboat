@@ -325,8 +325,8 @@ public struct ClaudeAccountUsageService {
     private let credentials: ClaudeOAuthCredentialProviding
     private let refreshCoordinator: ClaudeOAuthRefreshCoordinator
     private let recoveryStore: (any ClaudeRotationRecoveryStoring)?
-    private let liveRepairs: ClaudeLiveRepairRegistry
-    private let storedRepairs: ClaudeStoredRepairRegistry
+    private let liveRepairs: ClaudeRepairRegistry<ClaudeLiveRepair>
+    private let storedRepairs: ClaudeRepairRegistry<ClaudeStoredRepair>
 
     public init(
         apiClient: ClaudeUsageAPIClient = ClaudeUsageAPIClient(),
@@ -340,8 +340,8 @@ public struct ClaudeAccountUsageService {
         self.credentials = credentials
         self.refreshCoordinator = refreshCoordinator
         self.recoveryStore = recoveryStore
-        self.liveRepairs = ClaudeLiveRepairRegistry()
-        self.storedRepairs = ClaudeStoredRepairRegistry()
+        self.liveRepairs = ClaudeRepairRegistry()
+        self.storedRepairs = ClaudeRepairRegistry()
     }
 
     /// True when this process holds a fresh generation that still needs a
@@ -2799,12 +2799,14 @@ public struct ClaudeAccountUsageService {
             if storedPersisted,
                let staleLiveAccessToken = resolution.liveAccessTokenAtRead {
                 liveRepairs.record(
-                    recoveryFingerprint: rotatedCredentialFingerprint(refreshed),
-                    staleLiveAccessTokenFingerprint: accessTokenFingerprint(
-                        staleLiveAccessToken
-                    ),
-                    staleLiveItemFingerprint: itemLocationFingerprint(
-                        resolution.liveItemLocationAtRead
+                    ClaudeLiveRepair(
+                        recoveryFingerprint: rotatedCredentialFingerprint(refreshed),
+                        staleLiveAccessTokenFingerprint: accessTokenFingerprint(
+                            staleLiveAccessToken
+                        ),
+                        staleLiveItemFingerprint: itemLocationFingerprint(
+                            resolution.liveItemLocationAtRead
+                        )
                     ),
                     for: profile.id
                 )
@@ -2831,13 +2833,15 @@ public struct ClaudeAccountUsageService {
         guard storedPersisted || storedSuperseded else {
             let reason = "Claude refreshed this login, but its saved account copy still needs repair. Retry to finish saving it without rotating again."
             storedRepairs.record(
-                credentials: primaryStoredCredentials,
-                staleStoredAccessTokenFingerprint: resolution.storedAccessTokenAtRead.map(
-                    accessTokenFingerprint
+                ClaudeStoredRepair(
+                    credentials: primaryStoredCredentials,
+                    staleStoredAccessTokenFingerprint: resolution.storedAccessTokenAtRead.map(
+                        accessTokenFingerprint
+                    ),
+                    requiresFreshLiveCredential: resolution.liveOwnerMustBeUpdated
+                        && livePersisted
                 ),
-                requiresFreshLiveCredential: resolution.liveOwnerMustBeUpdated
-                    && livePersisted,
-                for: profile.id,
+                for: profile.id
             )
             if let storedWriteError {
                 AppLog.credentials.error("Stored Claude credential repair is pending for account \(profile.id, privacy: .public): \(storedWriteError.localizedDescription, privacy: .public)")
@@ -3338,13 +3342,26 @@ public struct ClaudeAccountUsageService {
     }
 }
 
-private final class ClaudeLiveRepairRegistry: @unchecked Sendable {
-    struct Entry {
-        var recoveryFingerprint: String
-        var staleLiveAccessTokenFingerprint: String
-        var staleLiveItemFingerprint: String?
-    }
+private struct ClaudeLiveRepair: Sendable {
+    var recoveryFingerprint: String
+    var staleLiveAccessTokenFingerprint: String
+    var staleLiveItemFingerprint: String?
+}
 
+/// A newly issued generation held only while its app-owned snapshot is
+/// incomplete. This is intentionally service-local; the durable recovery
+/// journal owns crash recovery, while the registry prevents a second token
+/// exchange during the current process lifetime.
+private struct ClaudeStoredRepair: Sendable {
+    var credentials: ClaudeOAuthCredentials
+    var staleStoredAccessTokenFingerprint: String?
+    var requiresFreshLiveCredential: Bool
+}
+
+/// Process-local, per-profile repair state behind a lock. Both the live and
+/// stored repair paths need exactly this, so they share one implementation
+/// and differ only in the entry they carry.
+private final class ClaudeRepairRegistry<Entry: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [UUID: Entry] = [:]
 
@@ -3356,66 +3373,11 @@ private final class ClaudeLiveRepairRegistry: @unchecked Sendable {
         lock.withLock { !entries.isEmpty }
     }
 
-    func record(
-        recoveryFingerprint: String,
-        staleLiveAccessTokenFingerprint: String,
-        staleLiveItemFingerprint: String?,
-        for profileID: UUID
-    ) {
-        lock.withLock {
-            entries[profileID] = Entry(
-                recoveryFingerprint: recoveryFingerprint,
-                staleLiveAccessTokenFingerprint: staleLiveAccessTokenFingerprint,
-                staleLiveItemFingerprint: staleLiveItemFingerprint
-            )
-        }
+    func record(_ entry: Entry, for profileID: UUID) {
+        lock.withLock { entries[profileID] = entry }
     }
 
     func clear(for profileID: UUID) {
         _ = lock.withLock { entries.removeValue(forKey: profileID) }
-    }
-}
-
-/// Holds a newly issued generation only while its app-owned snapshot is
-/// incomplete. This is intentionally service-local; the durable recovery
-/// journal owns crash recovery, while this registry prevents a second token
-/// exchange during the current process lifetime.
-private final class ClaudeStoredRepairRegistry: @unchecked Sendable {
-    struct Entry {
-        var credentials: ClaudeOAuthCredentials
-        var staleStoredAccessTokenFingerprint: String?
-        var requiresFreshLiveCredential: Bool
-    }
-
-    private let lock = NSLock()
-    private var entries: [UUID: Entry] = [:]
-
-    func entry(for profileID: UUID) -> Entry? {
-        lock.withLock { entries[profileID] }
-    }
-
-    var hasEntries: Bool {
-        lock.withLock { !entries.isEmpty }
-    }
-
-    func record(
-        credentials: ClaudeOAuthCredentials,
-        staleStoredAccessTokenFingerprint: String?,
-        requiresFreshLiveCredential: Bool,
-        for profileID: UUID
-    ) {
-        lock.withLock {
-            entries[profileID] = Entry(
-                credentials: credentials,
-                staleStoredAccessTokenFingerprint: staleStoredAccessTokenFingerprint,
-                requiresFreshLiveCredential: requiresFreshLiveCredential
-            )
-        }
-    }
-
-    func clear(for profileID: UUID) {
-        _ = lock.withLock {
-            entries.removeValue(forKey: profileID)
-        }
     }
 }

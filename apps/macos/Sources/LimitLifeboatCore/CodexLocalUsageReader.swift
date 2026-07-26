@@ -181,7 +181,7 @@ public struct CodexLocalUsageReader {
     }
 
     private func message(for limit: CodexRateLimit, event: RateLimitEvent) -> String {
-        var parts = ["Codex CLI reports \(Int(limit.usedPercent.rounded()))% used"]
+        var parts = ["Codex CLI reports \(UsagePercent.text(limit.usedPercent)) used"]
         if let windowMinutes = limit.windowMinutes {
             parts.append("on \(windowLabel(minutes: windowMinutes))")
         }
