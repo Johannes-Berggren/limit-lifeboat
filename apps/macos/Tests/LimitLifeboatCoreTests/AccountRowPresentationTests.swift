@@ -531,15 +531,21 @@ final class AccountRowPresentationTests: XCTestCase {
         XCTAssertTrue(presentation.billingBadge?.help.contains("extra usage may be billed") == true)
     }
 
-    func testPayAsYouGoBadgeHelpEmbedsSpendWhenReported() {
+    func testPayAsYouGoBadgeHelpEmbedsSpendWhenReported() throws {
         let profile = AccountProfile(provider: .claude, label: "Overage")
+        let spend = PayAsYouGoSpend(
+            monthlyLimit: 5000,
+            usedCredits: 1250,
+            currency: "USD",
+            decimalPlaces: 2
+        )
         let snapshot = UsageSnapshot(
             accountID: profile.id,
             provider: .claude,
             riskLevel: .depleted,
             source: "test",
             payAsYouGoState: .enabledActive,
-            payAsYouGoSpend: PayAsYouGoSpend(monthlyLimit: 50, usedCredits: 12.5)
+            payAsYouGoSpend: spend
         )
         let presentation = AccountRowPresentation(
             profile: profile,
@@ -549,9 +555,14 @@ final class AccountRowPresentationTests: XCTestCase {
             adviceReason: nil
         )
 
+        // Asserts the composition, not the currency rendering: the badge builds
+        // its help from the same `summaryText` the popover shows. Scaling and
+        // currency are covered by `testPayAsYouGoSpendSummaryTextScalesMinorUnits`,
+        // which pins a locale — this string would otherwise depend on the
+        // machine's region.
         XCTAssertEqual(
             presentation.billingBadge?.help,
-            "Included usage appears depleted — $12.50 of $50 extra usage this month. Click for details."
+            "Included usage appears depleted — \(try XCTUnwrap(spend.summaryText)). Click for details."
         )
     }
 

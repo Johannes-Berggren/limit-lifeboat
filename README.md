@@ -1,17 +1,30 @@
 # Limit Lifeboat
 
-[Limit Lifeboat](https://limitlifeboat.com) is the safe Claude Code and Codex
-account switcher for Mac, with usage for every work and personal account. The
-native menu-bar app shows each account's remaining usage and can switch Claude
-Code or the Codex CLI to another saved account without replacing unrelated CLI
-or MCP settings. When OpenAI supplies earned Codex rate-limit resets, the app
-also shows the authoritative available count for each Codex account.
+[Limit Lifeboat](https://limitlifeboat.com) switches Claude Code and Codex CLI
+logins between your accounts on macOS, without breaking the rest of your setup.
+
+Most account switchers copy a credential file and leave you to find out what
+else changed. This one treats a switch as a transaction: it captures the
+current login, stages rollback material, restores **only** the authentication
+fields, then verifies which account it actually landed on. If another process
+rewrites a credential while the switch is running, that external change wins
+and the switch aborts rather than overwriting it. When a safe rollback is not
+possible it keeps a protected recovery directory and says so, instead of
+guessing.
+
+`settings.json`, MCP server definitions, hooks, permissions, and local history
+are never touched.
+
+The menu-bar app also shows what every saved account has left — session,
+weekly, and model-scoped windows for Claude, the 7-day window for Codex — so
+you can see which account to move to before you move. When OpenAI supplies
+earned Codex rate-limit resets, it shows the authoritative available count for
+each Codex account.
 
 Switching is manual by default; optional switching from a depleted account is
-off until you explicitly enable it. Both paths change only the selected CLI
-login, verify the restored identity, and roll back if verification fails.
-Browser and desktop-app sessions remain separate, and Limit Lifeboat does not
-merge accounts or bypass provider limits.
+off until you explicitly enable it. Browser and desktop-app sessions are
+separate and unaffected. Quotas stay separate and provider-enforced: nothing is
+pooled, merged, or extended.
 
 This monorepo contains the macOS app and its static Astro marketing site:
 
@@ -96,6 +109,41 @@ Per-account web dashboards can be opened from the account menu in isolated web
 contexts. If a provider rejects an embedded login, open the dashboard in your
 normal browser and use the app's browser-text import flow instead.
 
+## Command-line companion
+
+The package also builds `limit-lifeboat`, a read-only CLI that prints what the
+app last recorded:
+
+```bash
+swift build --package-path apps/macos -c release --product limit-lifeboat
+limit-lifeboat status
+limit-lifeboat status --json | jq '.accounts[] | select(.isActive)'
+```
+
+`status` lists every saved account with its windows, `list` omits usage,
+`active` shows only the account each provider's CLI is logged into, and
+`--json` emits a versioned schema meant for status lines, tmux, and bar
+widgets. Every reading carries `ageSeconds`, because a cached number is only
+useful next to how old it is.
+
+`statusline` prints one compact line — `claude 85%! · codex 6%` — where `!`
+means warning or depleted and `?` means the reading is over 30 minutes old.
+Wire it into Claude Code's own status line in `~/.claude/settings.json`:
+
+```json
+{ "statusLine": { "type": "command", "command": "limit-lifeboat statusline" } }
+```
+
+It deliberately does not read stdin, so it cannot block a shell prompt that
+hands it a descriptor nobody closes.
+
+It never contacts a provider and never writes to the store: a status line
+redraws on every shell prompt, so it has to be cheap and incapable of spending
+quota to report on quota. It also does not switch accounts. Switching needs
+Claude Code's provider-owned Keychain item, whose access control trusts
+specific code signatures, and a second process writing credentials beside the
+app is the exact failure this project exists to prevent. Use the app to switch.
+
 ## Privacy and security
 
 Limit Lifeboat has no analytics, advertising, or product telemetry. Account
@@ -109,9 +157,19 @@ The app discovers Claude Code's provider-owned `Claude Code-credentials`
 Keychain item through Security.framework, then reads and updates its secret
 through the same hardcoded `/usr/bin/security` path used by Claude Code. It
 never intentionally creates or deletes that item, takes ownership of it, or
-rewrites its partition list, and credential bytes are passed to updates only
-through standard input. Because Apple's `-U` operation is an upsert, the app
-brackets every update with complete item-identity and value checks. A detected
+rewrites its partition list, and credential bytes are normally passed to
+updates only through standard input. There is one exception: `security`'s
+interactive reader has a fixed ~4096-byte line buffer, so a merged credential
+larger than that — routinely the case when sibling keys such as `mcpOAuth` are
+preserved — is written by a direct `add-generic-password -U … -X <hex>` call
+instead, which carries the secret as an argv element. On macOS argv is visible
+to other processes running as the same user, so that fallback trades a
+same-user exposure window for the ability to switch at all; `security` is the
+only writer the item's ACL trusts, and a native `SecItemUpdate` would prompt on
+every switch. Logged invocations redact the secret in both paths.
+
+Because Apple's `-U` operation is an upsert, the app brackets every update
+with complete item-identity and value checks. A detected
 external replacement aborts without retrying or rolling back over the outside
 change. The command-line helper cannot atomically target a persistent Keychain
 reference, so a replacement in the narrow interval between the precheck and

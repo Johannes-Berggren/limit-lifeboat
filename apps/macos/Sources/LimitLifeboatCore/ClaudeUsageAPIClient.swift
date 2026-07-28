@@ -61,20 +61,30 @@ public struct ClaudeAPIUsageWindow: Equatable, Sendable {
 public struct ClaudeAPIExtraUsage: Equatable, Sendable {
     /// Whether overage / usage-credit billing is turned on for the account.
     public var isEnabled: Bool
+    /// Minor units, as the API sends them — see `CreditAmount`.
     public var monthlyLimit: Double?
+    /// Minor units, as the API sends them — see `CreditAmount`.
     public var usedCredits: Double?
     public var utilization: Double?
+    /// The `currency` the amounts are billed in, when reported.
+    public var currency: String?
+    /// The `decimal_places` the amounts are scaled by, when reported.
+    public var decimalPlaces: Int?
 
     public init(
         isEnabled: Bool,
         monthlyLimit: Double? = nil,
         usedCredits: Double? = nil,
-        utilization: Double? = nil
+        utilization: Double? = nil,
+        currency: String? = nil,
+        decimalPlaces: Int? = nil
     ) {
         self.isEnabled = isEnabled
         self.monthlyLimit = monthlyLimit
         self.usedCredits = usedCredits
         self.utilization = utilization
+        self.currency = currency
+        self.decimalPlaces = decimalPlaces
     }
 }
 
@@ -203,7 +213,9 @@ public struct ClaudeUsageAPIClient: Sendable {
         return PayAsYouGoSpend(
             monthlyLimit: extra.monthlyLimit,
             usedCredits: extra.usedCredits,
-            utilization: extra.utilization
+            utilization: extra.utilization,
+            currency: extra.currency,
+            decimalPlaces: extra.decimalPlaces
         )
     }
 
@@ -295,7 +307,9 @@ public struct ClaudeUsageAPIClient: Sendable {
             isEnabled: (extra["is_enabled"] as? Bool) ?? false,
             monthlyLimit: number(extra["monthly_limit"]),
             usedCredits: number(extra["used_credits"]),
-            utilization: number(extra["utilization"])
+            utilization: number(extra["utilization"]),
+            currency: extra["currency"] as? String,
+            decimalPlaces: number(extra["decimal_places"]).map { Int($0) }
         )
     }
 

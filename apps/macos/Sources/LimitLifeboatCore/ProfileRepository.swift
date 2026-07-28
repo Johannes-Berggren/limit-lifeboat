@@ -52,6 +52,30 @@ public final class ProfileRepository {
         return sanitized
     }
 
+    /// Profiles without any write. `loadProfiles()` creates the directory and
+    /// persists sanitized identities, which is right for the app that owns the
+    /// store and wrong for anything reading it from another process: the CLI
+    /// must not race the app's writes, and must not recreate a directory the
+    /// user just deleted. Sanitizing in memory keeps both readers agreeing on
+    /// what a stale identity means.
+    public func readProfiles() throws -> [AccountProfile] {
+        guard fileManager.fileExists(atPath: profilesURL.path) else {
+            return []
+        }
+        let data = try Data(contentsOf: profilesURL)
+        return sanitizeProfiles(try JSONDecoder.appDecoder.decode([AccountProfile].self, from: data))
+    }
+
+    /// Usage snapshots without any write; see `readProfiles()`.
+    public func readUsageSnapshots() throws -> [UUID: UsageSnapshot] {
+        guard fileManager.fileExists(atPath: usageSnapshotsURL.path) else {
+            return [:]
+        }
+        let data = try Data(contentsOf: usageSnapshotsURL)
+        let snapshots = try JSONDecoder.appDecoder.decode([UsageSnapshot].self, from: data)
+        return Dictionary(uniqueKeysWithValues: snapshots.map { ($0.accountID, $0) })
+    }
+
     public func saveProfiles(_ profiles: [AccountProfile]) throws {
         try ensureDirectory()
         let data = try JSONEncoder.appEncoder.encode(profiles)
@@ -60,13 +84,7 @@ public final class ProfileRepository {
 
     public func loadUsageSnapshots() throws -> [UUID: UsageSnapshot] {
         try ensureDirectory()
-        guard fileManager.fileExists(atPath: usageSnapshotsURL.path) else {
-            return [:]
-        }
-
-        let data = try Data(contentsOf: usageSnapshotsURL)
-        let snapshots = try JSONDecoder.appDecoder.decode([UsageSnapshot].self, from: data)
-        return Dictionary(uniqueKeysWithValues: snapshots.map { ($0.accountID, $0) })
+        return try readUsageSnapshots()
     }
 
     public func saveUsageSnapshots(_ snapshots: [UUID: UsageSnapshot]) throws {

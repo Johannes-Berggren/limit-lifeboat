@@ -29,6 +29,19 @@ of that handling are worth stating explicitly:
   credentials can be restored manually, rather than being deleted. In that case
   the `0600` rollback files remain on disk under Application Support until you
   remove them.
+- **Credential bytes in argv, for oversized writes only.** Updates to Claude
+  Code's Keychain item normally pipe the secret to `/usr/bin/security` through
+  standard input. Apple's interactive reader has a fixed ~4096-byte line buffer,
+  and a merged credential that preserves sibling keys such as `mcpOAuth`
+  routinely exceeds it, so those writes fall back to a direct
+  `add-generic-password -U … -X <hex>` invocation that carries the secret as an
+  argv element. Process arguments on macOS are readable by other processes
+  running as the same user (and by root), so during that call the credential is
+  exposed to same-uid and root observers. It is not exposed to other users on
+  the machine. `security` is the only writer the item's ACL trusts, so a native
+  `SecItemUpdate` is not an alternative — it would prompt on every switch.
+  Logged and printed invocations redact the secret in both the stdin and argv
+  paths.
 
 These files are protected by POSIX permissions rather than Keychain encryption
 while they exist. Consider excluding the Application Support directory from

@@ -1,7 +1,7 @@
 {
   "name": "Limit Lifeboat",
   "short_name": "Limit Lifeboat",
-  "description": "See AI coding account usage and safely switch CLI accounts from the macOS menu bar.",
+  "description": "Switch Claude Code and Codex CLI logins between your accounts, from the macOS menu bar.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#f8f8fc",

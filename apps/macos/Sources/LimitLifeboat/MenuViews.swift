@@ -1299,7 +1299,12 @@ struct AccountCardPreviewGallery: View {
                     ],
                     risk: .depleted,
                     payAsYouGoState: .enabledActive,
-                    payAsYouGoSpend: PayAsYouGoSpend(monthlyLimit: 50, usedCredits: 12.5)
+                    payAsYouGoSpend: PayAsYouGoSpend(
+                        monthlyLimit: 5000,
+                        usedCredits: 1250,
+                        currency: "USD",
+                        decimalPlaces: 2
+                    )
                 )
 
                 previewRow(

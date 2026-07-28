@@ -166,8 +166,11 @@ public enum ClaudeSecurityToolCredentialError: Error, Equatable, Sendable, Local
 /// Reads and updates an existing Claude credential through `/usr/bin/security`.
 ///
 /// There is intentionally no API to request creation or deletion. Updating
-/// uses `security -i` so credential bytes are never visible in the process
-/// argument list. Apple's `-U` operation is an upsert and cannot atomically
+/// prefers `security -i` so credential bytes stay out of the process argument
+/// list; a credential too large for `interactiveCommandBufferByteLimit` falls
+/// back to a direct invocation that does put them there, bounded by
+/// `directCommandArgumentByteLimit` (see `ClaudeSecurityToolInvocation` and
+/// SECURITY.md). Apple's `-U` operation is an upsert and cannot atomically
 /// target a persistent reference, so callers must also hold the cooperative
 /// storage lock; `verifyCurrentItem` detects a non-cooperating replacement
 /// immediately before and after the tool call.
