@@ -129,6 +129,41 @@ public struct CLIUsageWindow: Codable, Equatable, Sendable {
     }
 }
 
+/// One line, for a shell prompt, a Claude Code status line, tmux, or a bar
+/// widget.
+///
+/// Shows the active account per provider and the window that will block it
+/// first, because that is the only number a one-line surface has room for.
+/// Staleness is marked rather than hidden: a status line that silently keeps
+/// showing 34% while the app has been asleep for six hours is worse than no
+/// status line.
+public enum CLIStatusLine {
+    /// Readings older than this are marked with `?`. Matched to the app's own
+    /// stale threshold so both surfaces call the same reading stale.
+    public static let staleAfter: TimeInterval = 30 * 60
+
+    public static func text(for report: CLIStatusReport) -> String {
+        let segments = report.accounts
+            .filter(\.isActive)
+            .compactMap(segment(for:))
+
+        return segments.isEmpty ? "no active account" : segments.joined(separator: " · ")
+    }
+
+    private static func segment(for account: CLIAccountStatus) -> String? {
+        guard let reading = account.reading else {
+            return "\(account.provider) —"
+        }
+        guard let percent = reading.mostConstrainedPercent else {
+            return nil
+        }
+
+        let stale = TimeInterval(reading.ageSeconds) > staleAfter ? "?" : ""
+        let alert = (reading.risk == "depleted" || reading.risk == "warning") ? "!" : ""
+        return "\(account.provider) \(percent)%\(alert)\(stale)"
+    }
+}
+
 public enum CLIStatusReportBuilder {
     /// Projects saved profiles and their stored snapshots into the report.
     ///

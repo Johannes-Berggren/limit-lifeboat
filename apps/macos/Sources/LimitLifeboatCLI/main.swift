@@ -40,6 +40,7 @@ COMMANDS
   status     Every saved account with its most recent usage reading
   list       Saved accounts, without usage
   active     Only the account each provider's CLI is currently logged into
+  statusline One compact line for a shell prompt, tmux, or Claude Code
   version    Print the version
 
 OPTIONS
@@ -56,6 +57,10 @@ EXAMPLES
   limit-lifeboat status
   limit-lifeboat status --json | jq '.accounts[] | select(.isActive)'
   limit-lifeboat active --json | jq -r '.accounts[0].reading.mostConstrainedPercent'
+
+  # Claude Code statusLine, in ~/.claude/settings.json:
+  #   "statusLine": { "type": "command", "command": "limit-lifeboat statusline" }
+  # A trailing ! means warning or depleted, ? means the reading is over 30m old.
 """
 
 var arguments = Array(CommandLine.arguments.dropFirst())
@@ -81,7 +86,7 @@ if command == "version" || command == "--version" {
     exit(ExitCode.success.rawValue)
 }
 
-guard ["status", "list", "active"].contains(command) else {
+guard ["status", "list", "active", "statusline"].contains(command) else {
     fail("unknown command '\(command)'. Run --help.", .usage)
 }
 
@@ -100,6 +105,18 @@ do {
     )
 } catch {
     fail("could not read the account store: \(error.localizedDescription)", .unavailable)
+}
+
+if command == "statusline" {
+    // Deliberately does not read stdin, even though Claude Code pipes its
+    // session JSON in. Draining it would block until EOF, and a status line
+    // gets invoked from shell prompts, tmux, and bar widgets that hand over an
+    // inherited descriptor nobody ever closes — one hung read there freezes the
+    // user's prompt. The payload has nothing this needs anyway: the missing
+    // piece is the cross-account view, which it does not carry. Claude Code
+    // tolerates an unread stdin.
+    print(CLIStatusLine.text(for: report))
+    exit(ExitCode.success.rawValue)
 }
 
 let accounts = command == "active" ? report.accounts.filter(\.isActive) : report.accounts

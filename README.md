@@ -126,6 +126,17 @@ limit-lifeboat status --json | jq '.accounts[] | select(.isActive)'
 widgets. Every reading carries `ageSeconds`, because a cached number is only
 useful next to how old it is.
 
+`statusline` prints one compact line — `claude 85%! · codex 6%` — where `!`
+means warning or depleted and `?` means the reading is over 30 minutes old.
+Wire it into Claude Code's own status line in `~/.claude/settings.json`:
+
+```json
+{ "statusLine": { "type": "command", "command": "limit-lifeboat statusline" } }
+```
+
+It deliberately does not read stdin, so it cannot block a shell prompt that
+hands it a descriptor nobody closes.
+
 It never contacts a provider and never writes to the store: a status line
 redraws on every shell prompt, so it has to be cheap and incapable of spending
 quota to report on quota. It also does not switch accounts. Switching needs

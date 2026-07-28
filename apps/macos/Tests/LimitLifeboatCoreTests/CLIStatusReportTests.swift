@@ -191,6 +191,71 @@ final class CLIStatusReportTests: XCTestCase {
         )
     }
 
+    // MARK: - Status line
+
+    func testStatusLineShowsOnlyActiveAccountsWithTheirTightestWindow() {
+        let claude = profile("Work", .claude, active: true)
+        let idle = profile("Personal", .claude)
+        let codex = profile("Codex", .codex, active: true)
+
+        let report = CLIStatusReportBuilder.report(
+            profiles: [claude, idle, codex],
+            snapshots: [
+                claude.id: snapshot(claude.id, .claude, percents: [("Session", 34), ("Weekly", 85)]),
+                idle.id: snapshot(idle.id, .claude, percents: [("Session", 99)]),
+                codex.id: snapshot(codex.id, .codex, percents: [("Weekly", 6)]),
+            ],
+            now: now
+        )
+
+        // The idle account's 99% must not appear: it is not what is billing.
+        XCTAssertEqual(CLIStatusLine.text(for: report), "claude 85% · codex 6%")
+    }
+
+    func testStatusLineMarksWarningAndDepleted() {
+        let account = profile("Work", .claude, active: true)
+        for risk in [RiskLevel.warning, .depleted] {
+            let report = CLIStatusReportBuilder.report(
+                profiles: [account],
+                snapshots: [account.id: snapshot(account.id, .claude, percents: [("Weekly", 91)], risk: risk)],
+                now: now
+            )
+            XCTAssertEqual(CLIStatusLine.text(for: report), "claude 91%!", "risk \(risk)")
+        }
+    }
+
+    /// A status line that keeps showing a number while nothing has refreshed
+    /// for hours is worse than showing none, so age has to be visible.
+    func testStatusLineMarksStaleReadings() {
+        let account = profile("Work", .claude, active: true)
+        let report = CLIStatusReportBuilder.report(
+            profiles: [account],
+            snapshots: [account.id: snapshot(
+                account.id,
+                .claude,
+                percents: [("Weekly", 40)],
+                ageSeconds: CLIStatusLine.staleAfter + 1
+            )],
+            now: now
+        )
+        XCTAssertEqual(CLIStatusLine.text(for: report), "claude 40%?")
+    }
+
+    func testStatusLineWithNoActiveAccountSaysSoRatherThanPrintingNothing() {
+        let report = CLIStatusReportBuilder.report(
+            profiles: [profile("Idle", .claude)],
+            snapshots: [:],
+            now: now
+        )
+        XCTAssertEqual(CLIStatusLine.text(for: report), "no active account")
+    }
+
+    func testStatusLineHandlesActiveAccountWithNoReadingYet() {
+        let account = profile("Fresh", .claude, active: true)
+        let report = CLIStatusReportBuilder.report(profiles: [account], snapshots: [:], now: now)
+        XCTAssertEqual(CLIStatusLine.text(for: report), "claude —")
+    }
+
     func testEmptyStoreProducesAnEmptyReportRatherThanFailing() {
         let report = CLIStatusReportBuilder.report(profiles: [], snapshots: [:], now: now)
         XCTAssertTrue(report.accounts.isEmpty)
