@@ -109,9 +109,19 @@ The app discovers Claude Code's provider-owned `Claude Code-credentials`
 Keychain item through Security.framework, then reads and updates its secret
 through the same hardcoded `/usr/bin/security` path used by Claude Code. It
 never intentionally creates or deletes that item, takes ownership of it, or
-rewrites its partition list, and credential bytes are passed to updates only
-through standard input. Because Apple's `-U` operation is an upsert, the app
-brackets every update with complete item-identity and value checks. A detected
+rewrites its partition list, and credential bytes are normally passed to
+updates only through standard input. There is one exception: `security`'s
+interactive reader has a fixed ~4096-byte line buffer, so a merged credential
+larger than that — routinely the case when sibling keys such as `mcpOAuth` are
+preserved — is written by a direct `add-generic-password -U … -X <hex>` call
+instead, which carries the secret as an argv element. On macOS argv is visible
+to other processes running as the same user, so that fallback trades a
+same-user exposure window for the ability to switch at all; `security` is the
+only writer the item's ACL trusts, and a native `SecItemUpdate` would prompt on
+every switch. Logged invocations redact the secret in both paths.
+
+Because Apple's `-U` operation is an upsert, the app brackets every update
+with complete item-identity and value checks. A detected
 external replacement aborts without retrying or rolling back over the outside
 change. The command-line helper cannot atomically target a persistent Keychain
 reference, so a replacement in the narrow interval between the precheck and
