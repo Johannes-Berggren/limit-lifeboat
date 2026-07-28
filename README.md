@@ -109,6 +109,30 @@ Per-account web dashboards can be opened from the account menu in isolated web
 contexts. If a provider rejects an embedded login, open the dashboard in your
 normal browser and use the app's browser-text import flow instead.
 
+## Command-line companion
+
+The package also builds `limit-lifeboat`, a read-only CLI that prints what the
+app last recorded:
+
+```bash
+swift build --package-path apps/macos -c release --product limit-lifeboat
+limit-lifeboat status
+limit-lifeboat status --json | jq '.accounts[] | select(.isActive)'
+```
+
+`status` lists every saved account with its windows, `list` omits usage,
+`active` shows only the account each provider's CLI is logged into, and
+`--json` emits a versioned schema meant for status lines, tmux, and bar
+widgets. Every reading carries `ageSeconds`, because a cached number is only
+useful next to how old it is.
+
+It never contacts a provider and never writes to the store: a status line
+redraws on every shell prompt, so it has to be cheap and incapable of spending
+quota to report on quota. It also does not switch accounts. Switching needs
+Claude Code's provider-owned Keychain item, whose access control trusts
+specific code signatures, and a second process writing credentials beside the
+app is the exact failure this project exists to prevent. Use the app to switch.
+
 ## Privacy and security
 
 Limit Lifeboat has no analytics, advertising, or product telemetry. Account
