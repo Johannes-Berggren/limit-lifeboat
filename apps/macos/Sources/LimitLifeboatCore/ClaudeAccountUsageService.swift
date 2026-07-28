@@ -173,6 +173,10 @@ public enum ClaudeAccountUsageFetchError: Error, LocalizedError {
     /// must never trigger a CLI fallback.
     case credentialUnavailable(Error)
     case refreshFailed(Error)
+    /// The final OAuth credential belongs to a different saved Claude
+    /// identity. Usage from this credential must never be attributed to the
+    /// requested profile.
+    case accountMismatch
     case unauthorized
     case forbidden
     case transport(Error)
@@ -199,6 +203,8 @@ public enum ClaudeAccountUsageFetchError: Error, LocalizedError {
             return "The shared Claude credential could not be used safely (\(underlying.localizedDescription))."
         case .refreshFailed(let underlying):
             return "Could not refresh the access token (\(underlying.localizedDescription))."
+        case .accountMismatch:
+            return "This saved Claude login belongs to a different account."
         case .unauthorized:
             return "The Anthropic usage API rejected the account's tokens."
         case .forbidden:
@@ -274,10 +280,16 @@ public struct ClaudeRotationDeferredError: Error, LocalizedError, Sendable {
 public struct ClaudeAccountUsageFetchResult: Sendable {
     public var snapshot: UsageSnapshot
     public var credentials: ClaudeOAuthCredentials
+    public var accountInfo: ClaudeAPIAccountInfo?
 
-    public init(snapshot: UsageSnapshot, credentials: ClaudeOAuthCredentials) {
+    public init(
+        snapshot: UsageSnapshot,
+        credentials: ClaudeOAuthCredentials,
+        accountInfo: ClaudeAPIAccountInfo? = nil
+    ) {
         self.snapshot = snapshot
         self.credentials = credentials
+        self.accountInfo = accountInfo
     }
 }
 
@@ -472,8 +484,9 @@ public struct ClaudeAccountUsageService {
         additionalRecoveryDestinations: Set<ClaudeRotationRecoveryDestination> = [],
         liveCredentialReadPolicy: ClaudeLiveCredentialReadPolicy = .read,
         liveCredentialAccessDenied: ((CredentialAccessDisposition) -> Void)? = nil,
-        credentialDidResolve: ((ClaudeOAuthCredentials) -> Void)? = nil
-    ) async throws -> UsageSnapshot {
+        credentialDidResolve: ((ClaudeOAuthCredentials) -> Void)? = nil,
+        expectedIdentity: AccountIdentity? = nil
+    ) async throws -> ClaudeAccountUsageFetchResult {
         try await fetchSnapshotResult(
             for: profile,
             isActiveCLI: isActiveCLI,
@@ -486,8 +499,9 @@ public struct ClaudeAccountUsageService {
             liveCredentialAccessDenied: liveCredentialAccessDenied,
             storedCredentialSource: .provider,
             credentialDidPersist: nil,
-            credentialDidResolve: credentialDidResolve
-        ).snapshot
+            credentialDidResolve: credentialDidResolve,
+            expectedIdentity: expectedIdentity
+        )
     }
 
     /// Switch-only overload that consumes the record already decoded at the
@@ -503,7 +517,8 @@ public struct ClaudeAccountUsageService {
         additionalRecoveryDestinations: Set<ClaudeRotationRecoveryDestination> = [],
         liveCredentialReadPolicy: ClaudeLiveCredentialReadPolicy = .read,
         liveCredentialAccessDenied: ((CredentialAccessDisposition) -> Void)? = nil,
-        credentialDidResolve: ((ClaudeOAuthCredentials) -> Void)? = nil
+        credentialDidResolve: ((ClaudeOAuthCredentials) -> Void)? = nil,
+        expectedIdentity: AccountIdentity? = nil
     ) async throws -> ClaudeAccountUsageFetchResult {
         guard storedRecord.summary.provider == .claude else {
             throw ClaudeAccountUsageFetchError.credentialUnavailable(
@@ -529,7 +544,8 @@ public struct ClaudeAccountUsageService {
                 liveCredentialAccessDenied: liveCredentialAccessDenied,
                 storedCredentialSource: .preloaded(storedRecord),
                 credentialDidPersist: { latestPersistedCredentials = $0 },
-                credentialDidResolve: credentialDidResolve
+                credentialDidResolve: credentialDidResolve,
+                expectedIdentity: expectedIdentity
             )
         } catch let error as ClaudeAccountUsageFetchError {
             throw ClaudeAccountUsagePreflightError(
@@ -551,7 +567,8 @@ public struct ClaudeAccountUsageService {
         liveCredentialAccessDenied: ((CredentialAccessDisposition) -> Void)?,
         storedCredentialSource: StoredCredentialSource,
         credentialDidPersist: ((ClaudeOAuthCredentials) -> Void)?,
-        credentialDidResolve: ((ClaudeOAuthCredentials) -> Void)?
+        credentialDidResolve: ((ClaudeOAuthCredentials) -> Void)?,
+        expectedIdentity: AccountIdentity?
     ) async throws -> ClaudeAccountUsageFetchResult {
         // The live Claude Code chain is never rotated by unattended work, even
         // if a caller asks for scheduled recovery. Downgrading here keeps every
@@ -580,7 +597,8 @@ public struct ClaudeAccountUsageService {
                         liveCredentialAccessDenied: liveCredentialAccessDenied,
                         storedCredentialSource: storedCredentialSource,
                         credentialDidPersist: credentialDidPersist,
-                        credentialDidResolve: credentialDidResolve
+                        credentialDidResolve: credentialDidResolve,
+                        expectedIdentity: expectedIdentity
                     )
                 }
             } catch let error as ClaudeAccountUsageFetchError {
@@ -601,7 +619,8 @@ public struct ClaudeAccountUsageService {
             liveCredentialAccessDenied: liveCredentialAccessDenied,
             storedCredentialSource: storedCredentialSource,
             credentialDidPersist: credentialDidPersist,
-            credentialDidResolve: credentialDidResolve
+            credentialDidResolve: credentialDidResolve,
+            expectedIdentity: expectedIdentity
         )
     }
 
@@ -617,7 +636,8 @@ public struct ClaudeAccountUsageService {
         liveCredentialAccessDenied: ((CredentialAccessDisposition) -> Void)?,
         storedCredentialSource: StoredCredentialSource,
         credentialDidPersist: ((ClaudeOAuthCredentials) -> Void)?,
-        credentialDidResolve: ((ClaudeOAuthCredentials) -> Void)?
+        credentialDidResolve: ((ClaudeOAuthCredentials) -> Void)?,
+        expectedIdentity: AccountIdentity?
     ) async throws -> ClaudeAccountUsageFetchResult {
         let resolution = try await resolveCredentials(
             for: profile,
@@ -654,19 +674,84 @@ public struct ClaudeAccountUsageService {
             guard !usageResult.usage.windows.isEmpty else {
                 throw ClaudeAccountUsageFetchError.transport(ClaudeUsageAPIError.malformedResponse)
             }
+            let accountInfo = try await validatedAccountInfo(
+                accessToken: usageResult.credentials.accessToken,
+                expectedIdentity: expectedIdentity,
+                now: now
+            )
             return ClaudeAccountUsageFetchResult(
                 snapshot: apiClient.makeSnapshot(
                     for: profile,
                     usage: usageResult.usage,
                     now: now
                 ),
-                credentials: usageResult.credentials
+                credentials: usageResult.credentials,
+                accountInfo: accountInfo
             )
         } catch let error as ClaudeAccountUsageFetchError {
             throw error
         } catch {
             throw ClaudeAccountUsageFetchError.transport(error)
         }
+    }
+
+    /// Verifies the identity behind the exact credential generation that
+    /// produced the usage response. Callers without a saved identity retain
+    /// the legacy enrichment path until the profile has enough information to
+    /// fail closed on later refreshes.
+    private func validatedAccountInfo(
+        accessToken: String,
+        expectedIdentity: AccountIdentity?,
+        now: Date
+    ) async throws -> ClaudeAPIAccountInfo? {
+        guard let expectedIdentity else {
+            return nil
+        }
+        let accountInfo: ClaudeAPIAccountInfo
+        do {
+            accountInfo = try await apiClient.fetchAccountInfo(
+                accessToken: accessToken,
+                now: now
+            )
+        } catch ClaudeUsageAPIError.unauthorized {
+            throw ClaudeAccountUsageFetchError.unauthorized
+        } catch ClaudeUsageAPIError.forbidden {
+            throw ClaudeAccountUsageFetchError.forbidden
+        } catch {
+            throw ClaudeAccountUsageFetchError.transport(error)
+        }
+        guard let returnedIdentity = accountInfo.identity,
+              Self.matchesExpectedIdentity(
+                expectedIdentity,
+                returnedIdentity: returnedIdentity
+              ) else {
+            throw ClaudeAccountUsageFetchError.accountMismatch
+        }
+        return accountInfo
+    }
+
+    /// Stable identifiers are authoritative and must be present on the
+    /// returned profile whenever the saved identity contains them. Email is a
+    /// fallback only for older profiles without an account UUID, and an
+    /// organization UUID mismatch always fails even when emails are identical.
+    private static func matchesExpectedIdentity(
+        _ expectedIdentity: AccountIdentity,
+        returnedIdentity: AccountIdentity
+    ) -> Bool {
+        if let expectedAccountID = expectedIdentity.accountID {
+            guard returnedIdentity.accountID == expectedAccountID else {
+                return false
+            }
+        }
+        if let expectedOrganizationID = expectedIdentity.organizationID {
+            guard returnedIdentity.organizationID == expectedOrganizationID else {
+                return false
+            }
+        }
+        if expectedIdentity.accountID != nil {
+            return true
+        }
+        return expectedIdentity.matches(returnedIdentity)
     }
 
     /// Identity + plan tier from the profile endpoint. Called sparingly (only
