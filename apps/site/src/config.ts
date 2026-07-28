@@ -10,9 +10,9 @@ const dmgAsset = `Limit-Lifeboat-${version}-arm64.dmg`;
 
 export const product = {
   name: "Limit Lifeboat",
-  headline: "See every Claude Code and Codex account. Switch safely.",
+  headline: "Switch Claude Code and Codex accounts without breaking your setup.",
   shortDescription:
-    "Monitor usage across work and personal Claude Code and Codex CLI accounts, then switch safely without replacing settings. Free, open-source Mac app.",
+    "Switch Claude Code and Codex CLI logins between your accounts on macOS. Only the auth fields change, the account is verified afterwards, and settings.json is never touched. Free and open source.",
   siteUrl: "https://limitlifeboat.com",
   version,
   minimumMacOS: "macOS 14 Sonoma",
@@ -43,5 +43,6 @@ export const navigation = [
   { label: "Features", href: "/#features" },
   { label: "How it works", href: "/#setup" },
   { label: "Security", href: "/#security" },
+  { label: "Is this allowed?", href: "/#allowed" },
   { label: "Resources", href: "/#resources" },
 ] as const;

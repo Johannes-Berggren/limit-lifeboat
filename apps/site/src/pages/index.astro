@@ -8,14 +8,19 @@ import BaseLayout from "../layouts/BaseLayout.astro";
 
 const faqs = [
   {
-    question: "Does Limit Lifeboat combine accounts or bypass usage limits?",
+    question: "What exactly changes on disk when I switch?",
     answer:
-      "No. Each account and its provider-enforced limits remain separate. Switching changes only the selected CLI login. Manual switching is the default; optional switching from a depleted account is off until you explicitly enable it.",
+      "Only the selected provider's authentication fields. settings.json, MCP server definitions, hooks, permissions, instructions, and local history are left byte-for-byte alone. The app captures the current login first, stages rollback material, then verifies the restored identity before it cleans up.",
+  },
+  {
+    question: "What happens if a switch fails halfway?",
+    answer:
+      "It rolls back. If another process rewrote a credential while the switch was running, that external change wins and the switch aborts rather than overwriting it. If a safe rollback is not possible, the app keeps a protected recovery directory and tells you, instead of guessing.",
   },
   {
     question: "Can I keep work and personal accounts separate?",
     answer:
-      "Yes. Each saved account has its own identity, usage reading, and Keychain-protected credential snapshot. Use only accounts you are authorized to access and follow the provider and workplace policies that apply to them.",
+      "Yes. Each saved account has its own identity, usage reading, and Keychain-protected credential snapshot. Quotas stay separate and provider-enforced; nothing is pooled or merged. Use only accounts you are authorized to access and follow the provider and workplace policies that apply to them.",
   },
   {
     question: "Which accounts does Limit Lifeboat support?",
@@ -98,10 +103,12 @@ const structuredData = {
           <span class="status-dot"></span>
           Native macOS menu-bar app
         </p>
-        <h1>See every Claude Code and Codex account. <span>Switch safely.</span></h1>
+        <h1>Switch Claude Code and Codex accounts <span>without breaking your setup.</span></h1>
         <p class="hero-lead">
-          Monitor usage across work and personal accounts, get warned before limits, and switch
-          CLI logins without replacing your settings.
+          Most switchers move the credential and leave you to discover what else they changed.
+          This one restores only the auth fields, verifies which account you actually landed on,
+          and rolls back if it cannot finish. Your <code>settings.json</code>, MCP servers, and
+          hooks are never touched.
         </p>
         <div class="hero-actions">
           <a class="button button--primary button--large" href={product.links.download}>
@@ -158,23 +165,19 @@ const structuredData = {
       </div>
     </div>
     <div class="container proof-strip" aria-label="Product highlights">
-      <div><strong>Work + personal</strong><span>Every authorized account</span></div>
-      <div><strong>One menu bar</strong><span>No dashboard juggling</span></div>
-      <div><strong>Verified switches</strong><span>Rollback when needed</span></div>
+      <div><strong>Auth fields only</strong><span>settings.json untouched</span></div>
+      <div><strong>Identity verified</strong><span>After every switch</span></div>
+      <div><strong>Rolls back</strong><span>Or keeps recovery material</span></div>
       <div><strong>Zero telemetry</strong><span>Open source on GitHub</span></div>
     </div>
-    <p class="container account-boundary">
-      Accounts stay separate. Switching affects only the selected CLI and never merges quotas or
-      changes browser and desktop-app sessions. Optional automatic switching is off by default.
-    </p>
   </section>
 
   <section class="section" id="features">
     <div class="container">
       <SectionHeading
         eyebrow="Built for more than one login"
-        title="The right account, without the login dance."
-        copy="Keep work and personal Claude Code and Codex accounts visible, understand what is available, and switch deliberately without rebuilding your CLI setup."
+        title="Change the login, not your configuration."
+        copy="A switch that goes wrong costs more than the switch saved. Every change is scoped to the credential, checked afterwards, and reversible."
         align="center"
       />
       <div class="feature-grid">
@@ -183,9 +186,9 @@ const structuredData = {
             <span class="feature-icon feature-icon--violet">
               <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 18h16M6 15V9m6 6V5m6 10v-3" /></svg>
             </span>
-            <p class="card-kicker">Work + personal, one view</p>
-            <h3>Know which account is active before work begins.</h3>
-            <p>See every saved identity, its session and weekly limits, the active CLI account, and the age of each reading without opening provider dashboards.</p>
+            <p class="card-kicker">Every account, one view</p>
+            <h3>Never spend an afternoon on the wrong account.</h3>
+            <p>The CLI shows one identity at a time, and a switch that moves the credential without moving the identity will happily bill the wrong employer. See every saved account, which one the CLI is really logged into, what each has left, and how old each reading is.</p>
           </div>
           <div class="meter-demo" aria-hidden="true">
             <div class="demo-account"><span class="provider-glyph provider-glyph--claude">✦</span><strong>Claude</strong><span>3 accounts</span></div>
@@ -208,9 +211,9 @@ const structuredData = {
           <span class="feature-icon feature-icon--cyan">
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 7h11m0 0-3-3m3 3-3 3M16 17H5m0 0 3 3m-3-3 3-3" /></svg>
           </span>
-          <p class="card-kicker">Safe CLI switching</p>
-          <h3>Change the login, not your configuration.</h3>
-          <p>Restore only the selected provider’s authentication fields, verify the identity, and roll back if the switch cannot be completed safely.</p>
+          <p class="card-kicker">Transactional switching</p>
+          <h3>A switch that assumes it will be interrupted.</h3>
+          <p>It stages rollback material, restores only the auth fields, then verifies the account it landed on. If another process rewrites a credential mid-switch, that change wins and the switch aborts rather than overwriting it.</p>
           <div class="switch-demo" aria-hidden="true">
             <span><i class="avatar avatar--violet">P</i>Personal</span>
             <svg viewBox="0 0 32 20"><path d="M3 7h23m0 0-5-5m5 5-5 5M29 13H6m0 0 5 5m-5-5 5-5" /></svg>
@@ -259,7 +262,7 @@ const structuredData = {
     <div class="container">
       <SectionHeading
         eyebrow="Up and running in minutes"
-        title="Your accounts already know the way aboard."
+        title="It works with the logins you already have."
         copy="There are no API keys to paste and no new account system to create. Limit Lifeboat works with the CLI logins you already use."
         align="center"
       />
@@ -301,7 +304,7 @@ const structuredData = {
       </div>
       <div class="security-copy">
         <p class="eyebrow">Local-first by design</p>
-        <h2>A narrow switch surface, with a way back.</h2>
+        <h2>A narrow switch surface, and a way back.</h2>
         <p class="section-copy">Limit Lifeboat handles sensitive CLI authentication material with explicit boundaries, identity checks, and protected recovery.</p>
         <ul class="check-list">
           <li><span>✓</span><div><strong>Only provider authentication fields change</strong><p>Unrelated CLI settings, MCP servers, instructions, and local history stay in place.</p></div></li>
@@ -310,6 +313,35 @@ const structuredData = {
           <li><span>✓</span><div><strong>No App Sandbox, for a specific reason</strong><p>Switching must update provider-owned CLI files. The release entitlement is limited to optional Terminal automation.</p></div></li>
         </ul>
         <a class="text-link" href="/privacy">Read the privacy details <span aria-hidden="true">→</span></a>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="allowed">
+    <div class="container">
+      <SectionHeading
+        eyebrow="The question everyone asks second"
+        title="Is this allowed?"
+        copy="Short answer: holding more than one account is normal, and this app does not do the thing providers actually prohibit."
+        align="center"
+      />
+      <div class="allowed-grid">
+        <article>
+          <h3>What providers prohibit</h3>
+          <p>Sharing one account between people, and reselling or proxying subscription inference through third-party harnesses. Limit Lifeboat does neither. It never sends your credentials anywhere, never routes a model request, and never gives two people access to one subscription.</p>
+        </article>
+        <article>
+          <h3>What this actually does</h3>
+          <p>It moves your own logins between your own accounts on your own Mac, using the same credential store and the same official CLI you already use. Quotas are enforced by the provider, per account, exactly as before. Nothing is pooled, merged, or extended.</p>
+        </article>
+        <article>
+          <h3>Why people need it</h3>
+          <p>The common case is an employer-provisioned account plus a personal one. Both vendors have declined to build switching — the request has been open on Claude Code since January 2026 with several hundred upvotes — so people do it by hand with scripts that overwrite their config.</p>
+        </article>
+        <article>
+          <h3>Where the line is</h3>
+          <p>Use only accounts you are authorized to use, and follow whatever policy your employer sets for the account they gave you. That is your call to make, not this app's. It will not create accounts, and it will not touch a browser or desktop-app session.</p>
+        </article>
       </div>
     </div>
   </section>
@@ -349,8 +381,8 @@ const structuredData = {
     <div class="container install-shell">
       <div class="install-orb" aria-hidden="true"></div>
       <div class="install-heading">
-        <p class="eyebrow eyebrow--light">Ready when your next limit is not</p>
-        <h2>Bring your accounts aboard.</h2>
+        <p class="eyebrow eyebrow--light">Free, signed, and notarized</p>
+        <h2>Install it and keep your config.</h2>
         <p>Free, open source, and made for Apple Silicon Macs.</p>
       </div>
       <div class="install-grid">
@@ -404,7 +436,7 @@ const structuredData = {
   <section class="closing-cta">
     <div class="container closing-cta-inner">
       <BrandMark size={64} />
-      <div><h2>Every account visible. Every switch deliberate.</h2><p>Keep work and personal CLI identities clear without rebuilding your setup.</p></div>
+      <div><h2>Every account visible. Every switch reversible.</h2><p>Change which account the CLI uses without changing anything else.</p></div>
       <a class="button button--primary button--large" href={product.links.download}>Download for Mac</a>
     </div>
   </section>

@@ -1,17 +1,30 @@
 # Limit Lifeboat
 
-[Limit Lifeboat](https://limitlifeboat.com) is the safe Claude Code and Codex
-account switcher for Mac, with usage for every work and personal account. The
-native menu-bar app shows each account's remaining usage and can switch Claude
-Code or the Codex CLI to another saved account without replacing unrelated CLI
-or MCP settings. When OpenAI supplies earned Codex rate-limit resets, the app
-also shows the authoritative available count for each Codex account.
+[Limit Lifeboat](https://limitlifeboat.com) switches Claude Code and Codex CLI
+logins between your accounts on macOS, without breaking the rest of your setup.
+
+Most account switchers copy a credential file and leave you to find out what
+else changed. This one treats a switch as a transaction: it captures the
+current login, stages rollback material, restores **only** the authentication
+fields, then verifies which account it actually landed on. If another process
+rewrites a credential while the switch is running, that external change wins
+and the switch aborts rather than overwriting it. When a safe rollback is not
+possible it keeps a protected recovery directory and says so, instead of
+guessing.
+
+`settings.json`, MCP server definitions, hooks, permissions, and local history
+are never touched.
+
+The menu-bar app also shows what every saved account has left — session,
+weekly, and model-scoped windows for Claude, the 7-day window for Codex — so
+you can see which account to move to before you move. When OpenAI supplies
+earned Codex rate-limit resets, it shows the authoritative available count for
+each Codex account.
 
 Switching is manual by default; optional switching from a depleted account is
-off until you explicitly enable it. Both paths change only the selected CLI
-login, verify the restored identity, and roll back if verification fails.
-Browser and desktop-app sessions remain separate, and Limit Lifeboat does not
-merge accounts or bypass provider limits.
+off until you explicitly enable it. Browser and desktop-app sessions are
+separate and unaffected. Quotas stay separate and provider-enforced: nothing is
+pooled, merged, or extended.
 
 This monorepo contains the macOS app and its static Astro marketing site:
 
