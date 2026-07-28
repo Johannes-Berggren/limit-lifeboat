@@ -164,27 +164,52 @@ public enum PayAsYouGoState: String, Codable, Sendable {
 /// billing month and stays non-zero after a rate-limit window resets, so it
 /// must never drive `payAsYouGoState`/`billingUsageMode` (see the trigger
 /// rationale in `ClaudeUsageAPIClient.payAsYouGoState(for:)`).
+///
+/// `monthlyLimit` and `usedCredits` hold the wire values, which are MINOR
+/// units (see `CreditAmount`). Storing them unscaled keeps persisted history
+/// faithful to what the API reported; scaling happens once, at display.
 public struct PayAsYouGoSpend: Codable, Equatable, Sendable {
+    /// The month's overage cap, in minor units.
     public var monthlyLimit: Double?
-    /// Cumulative extra-usage spend for the current billing month.
+    /// Cumulative extra-usage spend for the current billing month, in minor
+    /// units.
     public var usedCredits: Double?
     /// The API's own used/limit ratio; shape unconfirmed (fraction vs
     /// percent), so it is only a last-resort display fallback.
     public var utilization: Double?
+    /// ISO 4217 code the amounts are billed in; USD when the API omits it.
+    public var currency: String?
+    /// How far to scale the minor-unit amounts; 2 when the API omits it.
+    public var decimalPlaces: Int?
 
-    public init(monthlyLimit: Double? = nil, usedCredits: Double? = nil, utilization: Double? = nil) {
+    public init(
+        monthlyLimit: Double? = nil,
+        usedCredits: Double? = nil,
+        utilization: Double? = nil,
+        currency: String? = nil,
+        decimalPlaces: Int? = nil
+    ) {
         self.monthlyLimit = monthlyLimit
         self.usedCredits = usedCredits
         self.utilization = utilization
+        self.currency = currency
+        self.decimalPlaces = decimalPlaces
     }
 
     /// The one-line human summary, or nil when nothing usable was reported.
     public var summaryText: String? {
+        summaryText(locale: .current)
+    }
+
+    /// Locale is a parameter so tests can assert a stable rendering; every
+    /// shipping surface goes through `summaryText`.
+    public func summaryText(locale: Locale) -> String? {
         if let usedCredits {
+            let used = format(usedCredits, locale: locale)
             if let monthlyLimit {
-                return "\(Self.formatCredits(usedCredits)) of \(Self.formatCredits(monthlyLimit)) extra usage this month"
+                return "\(used) of \(format(monthlyLimit, locale: locale)) extra usage this month"
             }
-            return "\(Self.formatCredits(usedCredits)) extra usage this month"
+            return "\(used) extra usage this month"
         }
         if let utilization {
             let percent = utilization <= 1 ? utilization * 100 : utilization
@@ -193,15 +218,13 @@ public struct PayAsYouGoSpend: Codable, Equatable, Sendable {
         return nil
     }
 
-    /// The single home for credit formatting. The API's units are assumed to
-    /// be dollars (unverified against a live overage response); if they turn
-    /// out to be cents, this is the one line to fix.
-    private static func formatCredits(_ value: Double) -> String {
-        let rounded = (value * 100).rounded() / 100
-        if rounded == rounded.rounded() {
-            return "$\(Int(rounded))"
-        }
-        return String(format: "$%.2f", rounded)
+    private func format(_ minorUnits: Double, locale: Locale) -> String {
+        CreditAmount.text(
+            minorUnits: minorUnits,
+            currency: currency,
+            decimalPlaces: decimalPlaces,
+            locale: locale
+        )
     }
 }
 

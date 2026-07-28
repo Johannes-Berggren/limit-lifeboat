@@ -77,7 +77,7 @@ final class UsageSnapshotFactoryTests: XCTestCase {
     /// Spend must survive the empty-windows branch too, so a response that
     /// carried only the extra_usage block still shows the month's spend.
     func testSnapshotCarriesPayAsYouGoSpendThroughBothBranches() {
-        let spend = PayAsYouGoSpend(monthlyLimit: 50, usedCredits: 12.5)
+        let spend = PayAsYouGoSpend(monthlyLimit: 5000, usedCredits: 1250, currency: "USD", decimalPlaces: 2)
         let empty = UsageSnapshotFactory.snapshot(
             accountID: UUID(),
             provider: .claude,

@@ -78,6 +78,63 @@ public enum AbsoluteTimestamp {
     }
 }
 
+/// Money the usage API reports in MINOR units, rendered in its own currency.
+///
+/// The `extra_usage` block scales its amounts and says so in the same object:
+/// `used_credits: 14157` alongside `currency: "BRL"` and `decimal_places: 2`
+/// means R$ 141.57. Releases through 1.1.5 read those amounts as major units
+/// and prepended "$", so an account paying 141.57 of overage was told "$14157"
+/// — wrong by 100x, and the wrong currency for anyone not billed in USD.
+///
+/// `decimalPlaces` falls back to 2 when a response omits it, because every
+/// known response scales by 100. A response that starts reporting major units
+/// would have to send `decimal_places: 0`.
+///
+/// The formatter is cached like `AbsoluteTimestamp`'s, keyed on locale and
+/// currency, because the menu re-renders often. Fraction digits are set per
+/// call under the same lock so alternating whole and fractional amounts in one
+/// line cannot thrash the cache.
+public enum CreditAmount {
+    private static let lock = NSLock()
+    private nonisolated(unsafe) static var cached: (locale: Locale, currencyCode: String, formatter: NumberFormatter)?
+
+    /// Minor units scaled to major units: 14157 at 2 places is 141.57.
+    public static func majorUnits(_ minorUnits: Double, decimalPlaces: Int?) -> Double {
+        minorUnits / pow(10, Double(max(0, decimalPlaces ?? 2)))
+    }
+
+    /// "$141.57", "R$ 141.57", "50 kr". The fraction is dropped for whole
+    /// amounts so a 5000-minor-unit cap reads "$50" rather than "$50.00".
+    public static func text(
+        minorUnits: Double,
+        currency: String?,
+        decimalPlaces: Int?,
+        locale: Locale = .current
+    ) -> String {
+        let value = majorUnits(minorUnits, decimalPlaces: decimalPlaces)
+        let rounded = (value * 100).rounded() / 100
+        let trimmed = currency?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let code = (trimmed?.isEmpty == false) ? trimmed! : "USD"
+
+        return lock.withLock {
+            let formatter: NumberFormatter
+            if let cached, cached.locale == locale, cached.currencyCode == code {
+                formatter = cached.formatter
+            } else {
+                formatter = NumberFormatter()
+                formatter.numberStyle = .currency
+                formatter.locale = locale
+                formatter.currencyCode = code
+                cached = (locale, code, formatter)
+            }
+            let digits = rounded == rounded.rounded() ? 0 : 2
+            formatter.minimumFractionDigits = digits
+            formatter.maximumFractionDigits = digits
+            return formatter.string(from: rounded as NSNumber) ?? "\(rounded)"
+        }
+    }
+}
+
 /// Shared "how long until" phrasing so every surface rounds the same way.
 public enum DurationPhrase {
     /// A compact single-unit duration ("3m", "5h", "2d") rounded up so a

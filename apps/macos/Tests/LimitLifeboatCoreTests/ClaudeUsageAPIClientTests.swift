@@ -368,6 +368,33 @@ final class ClaudeUsageAPIClientTests: XCTestCase {
         XCTAssertNil(usage.extraUsage)
     }
 
+    /// The API describes its own money scale. Releases through 1.1.5 dropped
+    /// `currency` and `decimal_places` on the floor and read the minor-unit
+    /// amounts as dollars, so this payload rendered as "$14157".
+    func testParsesExtraUsageCurrencyAndDecimalPlaces() async throws {
+        let httpClient = MockHTTPClient()
+        httpClient.stub(status: 200, bodyText: #"""
+        {"limits": [{"kind": "session", "percent": 100}],
+         "extra_usage": {"is_enabled": true, "monthly_limit": 20000, "used_credits": 14157,
+                         "currency": "BRL", "decimal_places": 2}}
+        """#)
+        let usage = try await ClaudeUsageAPIClient(httpClient: httpClient).fetchUsage(accessToken: "token")
+
+        let extra = try XCTUnwrap(usage.extraUsage)
+        XCTAssertEqual(extra.currency, "BRL")
+        XCTAssertEqual(extra.decimalPlaces, 2)
+        XCTAssertEqual(extra.usedCredits, 14157)
+
+        let snapshot = ClaudeUsageAPIClient().makeSnapshot(for: claudeProfile, usage: usage)
+        let spend = try XCTUnwrap(snapshot.payAsYouGoSpend)
+        XCTAssertEqual(spend.currency, "BRL")
+        XCTAssertEqual(spend.decimalPlaces, 2)
+        XCTAssertEqual(
+            spend.summaryText(locale: Locale(identifier: "en_US")),
+            "R$141.57 of R$200 extra usage this month"
+        )
+    }
+
     func testMakeSnapshotDisabledOverageKeepsOriginalCreditStatus() {
         let usage = ClaudeAPIUsage(
             windows: [ClaudeAPIUsageWindow(kindRaw: "session", usedPercent: 53)],
@@ -435,12 +462,28 @@ final class ClaudeUsageAPIClientTests: XCTestCase {
     func testMakeSnapshotCarriesSpendFiguresWhenOverageEnabled() {
         let usage = ClaudeAPIUsage(
             windows: [ClaudeAPIUsageWindow(kindRaw: "session", usedPercent: 40)],
-            extraUsage: ClaudeAPIExtraUsage(isEnabled: true, monthlyLimit: 50, usedCredits: 12.5, utilization: 25)
+            extraUsage: ClaudeAPIExtraUsage(
+                isEnabled: true,
+                monthlyLimit: 5000,
+                usedCredits: 1250,
+                utilization: 25,
+                currency: "USD",
+                decimalPlaces: 2
+            )
         )
         let snapshot = ClaudeUsageAPIClient().makeSnapshot(for: claudeProfile, usage: usage)
 
         XCTAssertEqual(snapshot.payAsYouGoState, .enabledIdle)
-        XCTAssertEqual(snapshot.payAsYouGoSpend, PayAsYouGoSpend(monthlyLimit: 50, usedCredits: 12.5, utilization: 25))
+        XCTAssertEqual(
+            snapshot.payAsYouGoSpend,
+            PayAsYouGoSpend(
+                monthlyLimit: 5000,
+                usedCredits: 1250,
+                utilization: 25,
+                currency: "USD",
+                decimalPlaces: 2
+            )
+        )
         // Spend never flips the billing mode on its own.
         XCTAssertEqual(snapshot.billingUsageMode, .includedSubscription)
     }

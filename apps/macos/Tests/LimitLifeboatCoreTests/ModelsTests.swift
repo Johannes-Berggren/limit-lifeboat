@@ -375,36 +375,64 @@ final class ModelsTests: XCTestCase {
             parseConfidence: .high,
             message: "m",
             payAsYouGoState: .enabledIdle,
-            payAsYouGoSpend: PayAsYouGoSpend(monthlyLimit: 50, usedCredits: 12.5, utilization: 25)
+            payAsYouGoSpend: PayAsYouGoSpend(
+                monthlyLimit: 5000,
+                usedCredits: 1250,
+                utilization: 25,
+                currency: "USD",
+                decimalPlaces: 2
+            )
         )
 
         let data = try JSONEncoder.appEncoder.encode(original)
         let decoded = try JSONDecoder.appDecoder.decode(UsageSnapshot.self, from: data)
         XCTAssertEqual(decoded, original)
-        XCTAssertEqual(decoded.payAsYouGoSpend?.usedCredits, 12.5)
+        // The wire value is persisted unscaled; scaling is a display concern.
+        XCTAssertEqual(decoded.payAsYouGoSpend?.usedCredits, 1250)
+        XCTAssertEqual(decoded.payAsYouGoSpend?.decimalPlaces, 2)
     }
 
-    func testPayAsYouGoSpendSummaryText() {
+    /// Amounts arrive in minor units. 1250 with 2 decimal places is $12.50, not
+    /// $1250 — the 100x overstatement shipped through 1.1.5, and it reached
+    /// only the users actually paying overage.
+    func testPayAsYouGoSpendSummaryTextScalesMinorUnits() {
+        let enUS = Locale(identifier: "en_US")
         XCTAssertEqual(
-            PayAsYouGoSpend(monthlyLimit: 50, usedCredits: 12.5).summaryText,
+            PayAsYouGoSpend(monthlyLimit: 5000, usedCredits: 1250, currency: "USD", decimalPlaces: 2)
+                .summaryText(locale: enUS),
             "$12.50 of $50 extra usage this month"
         )
         XCTAssertEqual(
-            PayAsYouGoSpend(usedCredits: 42).summaryText,
+            PayAsYouGoSpend(usedCredits: 4200, currency: "USD", decimalPlaces: 2).summaryText(locale: enUS),
+            "$42 extra usage this month"
+        )
+        // A response that omits the scale is still minor units: default to 2.
+        XCTAssertEqual(
+            PayAsYouGoSpend(usedCredits: 1250).summaryText(locale: enUS),
+            "$12.50 extra usage this month"
+        )
+        // A non-USD account must not be relabelled as dollars.
+        XCTAssertEqual(
+            PayAsYouGoSpend(usedCredits: 14157, currency: "BRL", decimalPlaces: 2).summaryText(locale: enUS),
+            "R$141.57 extra usage this month"
+        )
+        // decimal_places: 0 means the API switched to major units.
+        XCTAssertEqual(
+            PayAsYouGoSpend(usedCredits: 42, currency: "USD", decimalPlaces: 0).summaryText(locale: enUS),
             "$42 extra usage this month"
         )
         // Utilization is a last-resort fallback; both fraction and percent
         // shapes must read sensibly because the API's shape is unconfirmed.
         XCTAssertEqual(
-            PayAsYouGoSpend(utilization: 0.25).summaryText,
+            PayAsYouGoSpend(utilization: 0.25).summaryText(locale: enUS),
             "Extra usage at 25% of this month's cap"
         )
         XCTAssertEqual(
-            PayAsYouGoSpend(utilization: 25).summaryText,
+            PayAsYouGoSpend(utilization: 25).summaryText(locale: enUS),
             "Extra usage at 25% of this month's cap"
         )
-        XCTAssertNil(PayAsYouGoSpend().summaryText)
-        XCTAssertNil(PayAsYouGoSpend(monthlyLimit: 50).summaryText)
+        XCTAssertNil(PayAsYouGoSpend().summaryText(locale: enUS))
+        XCTAssertNil(PayAsYouGoSpend(monthlyLimit: 5000).summaryText(locale: enUS))
     }
 
     /// The load-bearing migration guarantee: snapshots persisted before
