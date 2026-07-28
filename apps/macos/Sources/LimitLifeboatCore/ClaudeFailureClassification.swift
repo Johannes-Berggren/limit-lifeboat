@@ -37,7 +37,7 @@ public enum ClaudeCredentialOutcomePolicy {
             }
             return .refreshFailed
         case .keychainLocked, .liveCredentialAccessDenied, .credentialUnavailable,
-             .noCredentials, .transport:
+             .accountMismatch, .noCredentials, .transport:
             return nil
         }
     }

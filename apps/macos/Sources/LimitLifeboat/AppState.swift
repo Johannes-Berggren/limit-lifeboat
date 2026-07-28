@@ -856,12 +856,13 @@ final class AppState: ObservableObject {
             }
             var resolvedUsageCredentials: ClaudeOAuthCredentials?
             do {
-                let snapshot = try await claudeUsageService.fetchSnapshot(
+                let result = try await claudeUsageService.fetchSnapshot(
                     for: profile,
                     isActiveCLI: profile.isActiveCLI,
                     accountIsLiveElsewhere: liveElsewhere,
                     liveCredentialReadPolicy: liveContext?.readPolicy ?? .read,
-                    credentialDidResolve: { resolvedUsageCredentials = $0 }
+                    credentialDidResolve: { resolvedUsageCredentials = $0 },
+                    expectedIdentity: profile.identity
                 )
                 if profile.isActiveCLI, let resolvedUsageCredentials {
                     liveClaudeRefreshChainFingerprint =
@@ -869,16 +870,18 @@ final class AppState: ObservableObject {
                             credentials: resolvedUsageCredentials
                         )
                 }
-                applySnapshot(snapshot, for: profile)
+                applyClaudeUsageResult(result, for: profile)
                 clearUsagePaused(for: profile.id)
                 scheduledClaudeRecoveryLedger[profile.id] = nil
                 recordClaudeCredentialOutcome(.success, for: profile, codePath: "background")
-                await enrichAccountInfoIfMissing(
-                    for: profile,
-                    accountIsLiveElsewhere: liveElsewhere,
-                    liveCredentialReadPolicy: liveContext?.readPolicy,
-                    resolvedCredentials: resolvedUsageCredentials
-                )
+                if result.accountInfo == nil {
+                    await enrichAccountInfoIfMissing(
+                        for: profile,
+                        accountIsLiveElsewhere: liveElsewhere,
+                        liveCredentialReadPolicy: liveContext?.readPolicy,
+                        resolvedCredentials: resolvedUsageCredentials
+                    )
+                }
             } catch {
                 // Map the failure to a visible, retryable state rather than
                 // swallowing it. The active account may still recover via the
@@ -1141,9 +1144,29 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Plan tier and identity rarely change; fetch them at most once per
-    /// launch. This also lets new mapping logic repair labels written by
-    /// older builds (for example Team Premium previously showing as Max 5x).
+    private func applyClaudeUsageResult(
+        _ result: ClaudeAccountUsageFetchResult,
+        for profile: AccountProfile
+    ) {
+        if let info = result.accountInfo {
+            accountInfoFetched.insert(profile.id)
+            if AccountProfileUpdater.enrich(
+                profiles: &profiles,
+                profileID: profile.id,
+                enrichment: AccountProfileEnrichment(
+                    planLabel: info.planLabel,
+                    identity: info.identity
+                )
+            ) {
+                persistProfiles()
+            }
+        }
+        applySnapshot(result.snapshot, for: profile)
+    }
+
+    /// Legacy profiles without a saved identity cannot yet fail closed. Fetch
+    /// their account information once so subsequent usage refreshes can verify
+    /// the credential and return account info with the snapshot.
     private func enrichAccountInfoIfMissing(
         for profile: AccountProfile,
         accountIsLiveElsewhere: Bool,
@@ -3733,7 +3756,8 @@ final class AppState: ObservableObject {
                     storedRecord: storedRecord,
                     accessMode: CredentialAccess.currentMode,
                     rotationIntent: rotationIntent,
-                    additionalRecoveryDestinations: additionalDestinations
+                    additionalRecoveryDestinations: additionalDestinations,
+                    expectedIdentity: profile.identity
                 )
                 // Inactive resolution is owned by the stored snapshot, so a
                 // changed generation was compare-and-swap persisted there.
@@ -3766,7 +3790,7 @@ final class AppState: ObservableObject {
                         )
                     }
                 }
-                applySnapshot(result.snapshot, for: profile)
+                applyClaudeUsageResult(result, for: profile)
                 return .ready
             } catch {
                 let fetchError: ClaudeAccountUsageFetchError
@@ -5334,7 +5358,7 @@ final class AppState: ObservableObject {
                     targetProfileID: profile.id,
                     storedCredentialWorkflow: nil
                 )
-                let snapshot = try await claudeUsageService.fetchSnapshot(
+                let result = try await claudeUsageService.fetchSnapshot(
                     for: profile,
                     isActiveCLI: profile.isActiveCLI,
                     accountIsLiveElsewhere: liveElsewhere,
@@ -5347,7 +5371,8 @@ final class AppState: ObservableObject {
                         : .read,
                     credentialDidResolve: {
                         resolvedUsageCredentials = $0
-                    }
+                    },
+                    expectedIdentity: profile.identity
                 )
                 // Compare against the pre-rotation credential predicted before
                 // the fetch. The resolve callback only ever reports the
@@ -5377,7 +5402,7 @@ final class AppState: ObservableObject {
                             credentials: resolvedUsageCredentials
                         )
                 }
-                applySnapshot(snapshot, for: profile)
+                applyClaudeUsageResult(result, for: profile)
                 clearUsagePaused(for: profile.id)
                 scheduledClaudeRecoveryLedger[profile.id] = nil
                 recordClaudeCredentialOutcome(
@@ -5385,14 +5410,16 @@ final class AppState: ObservableObject {
                     for: profile,
                     codePath: source.credentialCodePath
                 )
-                await enrichAccountInfoIfMissing(
-                    for: profile,
-                    accountIsLiveElsewhere: liveElsewhere,
-                    liveCredentialReadPolicy: profile.isActiveCLI
-                        ? .preloaded(retryLiveRecord)
-                        : nil,
-                    resolvedCredentials: resolvedUsageCredentials
-                )
+                if result.accountInfo == nil {
+                    await enrichAccountInfoIfMissing(
+                        for: profile,
+                        accountIsLiveElsewhere: liveElsewhere,
+                        liveCredentialReadPolicy: profile.isActiveCLI
+                            ? .preloaded(retryLiveRecord)
+                            : nil,
+                        resolvedCredentials: resolvedUsageCredentials
+                    )
+                }
             } catch {
                 let fetchError = (error as? ClaudeAccountUsageFetchError) ?? .transport(error)
                 if case .liveCredentialAccessDenied(let underlying, let item) = fetchError {

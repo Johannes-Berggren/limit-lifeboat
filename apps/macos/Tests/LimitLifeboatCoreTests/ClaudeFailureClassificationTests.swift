@@ -16,6 +16,7 @@ final class ClaudeCredentialOutcomePolicyTests: XCTestCase {
         XCTAssertNil(outcome(.noCredentials))
         XCTAssertNil(outcome(.transport(SampleError.boom)))
         XCTAssertNil(outcome(.credentialUnavailable(SampleError.boom)))
+        XCTAssertNil(outcome(.accountMismatch))
         XCTAssertNil(
             outcome(.liveCredentialAccessDenied(error: .missingLiveItem, item: nil))
         )

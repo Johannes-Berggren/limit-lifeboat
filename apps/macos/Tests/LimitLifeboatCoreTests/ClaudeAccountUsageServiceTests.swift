@@ -13,12 +13,12 @@ final class ClaudeAccountUsageServiceTests: XCTestCase {
         let http = ScriptedHTTPClient(responses: [(usageJSON, 200)])
 
         let service = makeService(http: http, credentials: store)
-        let snapshot = try await service.fetchSnapshot(for: profile, isActiveCLI: true, now: now)
+        let result = try await service.fetchSnapshot(for: profile, isActiveCLI: true, now: now)
 
         XCTAssertEqual(http.requests.count, 1)
         XCTAssertEqual(http.requests[0].value(forHTTPHeaderField: "Authorization"), "Bearer live-token")
-        XCTAssertEqual(snapshot.windows.first?.id, "session")
-        XCTAssertEqual(snapshot.source, "Anthropic usage API")
+        XCTAssertEqual(result.snapshot.windows.first?.id, "session")
+        XCTAssertEqual(result.snapshot.source, "Anthropic usage API")
     }
 
     func testInactiveProfileUsesStoredToken() async throws {
@@ -31,6 +31,192 @@ final class ClaudeAccountUsageServiceTests: XCTestCase {
         _ = try await service.fetchSnapshot(for: profile, isActiveCLI: false, now: now)
 
         XCTAssertEqual(http.requests[0].value(forHTTPHeaderField: "Authorization"), "Bearer stored-token")
+    }
+
+    func testMatchingAccountAndOrganizationReturnVerifiedUsageAndAccountInfo() async throws {
+        let store = FakeCredentialProvider()
+        store.stored[profile.id] = makeCredentials(
+            accessToken: "account-a-token",
+            expiresAt: now.addingTimeInterval(3_600)
+        )
+        let http = ScriptedHTTPClient(responses: [
+            (usageJSON, 200),
+            (accountProfileJSON(
+                accountID: "account-a",
+                organizationID: "organization-a",
+                email: "johannes@berggren.co"
+            ), 200)
+        ])
+
+        let result = try await makeService(http: http, credentials: store).fetchSnapshot(
+            for: profile,
+            isActiveCLI: false,
+            now: now,
+            expectedIdentity: accountIdentity(
+                accountID: "account-a",
+                organizationID: "organization-a",
+                email: "johannes@berggren.co"
+            )
+        )
+
+        XCTAssertEqual(result.snapshot.windows.first?.id, "session")
+        XCTAssertEqual(result.accountInfo?.identity?.accountID, "account-a")
+        XCTAssertEqual(result.accountInfo?.identity?.organizationID, "organization-a")
+        XCTAssertEqual(http.requests.count, 2)
+        XCTAssertEqual(http.requests[1].url, ClaudeUsageAPIClient.profileEndpoint)
+        XCTAssertEqual(
+            http.requests[1].value(forHTTPHeaderField: "Authorization"),
+            "Bearer account-a-token"
+        )
+    }
+
+    func testDifferentAccountIDIsRejectedBeforeUsageCanBeAttributed() async {
+        let store = FakeCredentialProvider()
+        store.stored[profile.id] = makeCredentials(
+            accessToken: "account-b-token",
+            expiresAt: now.addingTimeInterval(3_600)
+        )
+        let http = ScriptedHTTPClient(responses: [
+            (usageJSON, 200),
+            (accountProfileJSON(
+                accountID: "account-b",
+                organizationID: "organization-a",
+                email: "other@example.com"
+            ), 200)
+        ])
+
+        do {
+            _ = try await makeService(http: http, credentials: store).fetchSnapshot(
+                for: profile,
+                isActiveCLI: false,
+                now: now,
+                expectedIdentity: accountIdentity(
+                    accountID: "account-a",
+                    organizationID: "organization-a",
+                    email: "johannes@berggren.co"
+                )
+            )
+            XCTFail("Expected a different account UUID to fail closed")
+        } catch ClaudeAccountUsageFetchError.accountMismatch {
+            XCTAssertEqual(http.requests.count, 2)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testSwitchPreflightRejectsCredentialForDifferentAccount() async {
+        let store = FakeCredentialProvider()
+        let accountBCredentials = makeCredentials(
+            accessToken: "account-b-token",
+            expiresAt: now.addingTimeInterval(3_600)
+        )
+        let http = ScriptedHTTPClient(responses: [
+            (usageJSON, 200),
+            (accountProfileJSON(
+                accountID: "account-b",
+                organizationID: "organization-b",
+                email: "findable@example.com"
+            ), 200)
+        ])
+
+        do {
+            _ = try await makeService(http: http, credentials: store).fetchSnapshot(
+                for: profile,
+                isActiveCLI: false,
+                storedRecord: makeStoredRecord(credentials: accountBCredentials),
+                now: now,
+                expectedIdentity: accountIdentity(
+                    accountID: "account-a",
+                    organizationID: "organization-a",
+                    email: "johannes@berggren.co"
+                )
+            )
+            XCTFail("Expected switch preflight to reject the other account")
+        } catch let error as ClaudeAccountUsagePreflightError {
+            guard case .accountMismatch = error.underlying else {
+                return XCTFail("Expected accountMismatch, got \(error.underlying)")
+            }
+            XCTAssertNil(error.latestPersistedCredentials)
+            XCTAssertEqual(http.requests.count, 2)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testSameEmailInDifferentOrganizationIsRejected() async {
+        let store = FakeCredentialProvider()
+        store.stored[profile.id] = makeCredentials(
+            accessToken: "other-organization-token",
+            expiresAt: now.addingTimeInterval(3_600)
+        )
+        let http = ScriptedHTTPClient(responses: [
+            (usageJSON, 200),
+            (accountProfileJSON(
+                accountID: "account-a",
+                organizationID: "organization-b",
+                email: "johannes@berggren.co"
+            ), 200)
+        ])
+
+        do {
+            _ = try await makeService(http: http, credentials: store).fetchSnapshot(
+                for: profile,
+                isActiveCLI: false,
+                now: now,
+                expectedIdentity: accountIdentity(
+                    accountID: "account-a",
+                    organizationID: "organization-a",
+                    email: "johannes@berggren.co"
+                )
+            )
+            XCTFail("Expected a different organization UUID to fail closed")
+        } catch ClaudeAccountUsageFetchError.accountMismatch {
+            XCTAssertEqual(http.requests.count, 2)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testIdentityValidationUsesCredentialReturnedAfterTokenRotation() async throws {
+        let store = FakeCredentialProvider()
+        store.stored[profile.id] = makeCredentials(
+            accessToken: "stale-token",
+            refreshToken: "refresh-1",
+            expiresAt: now.addingTimeInterval(-60)
+        )
+        let http = ScriptedHTTPClient(responses: [
+            (refreshJSON(accessToken: "fresh-token"), 200),
+            (usageJSON, 200),
+            (accountProfileJSON(
+                accountID: "account-a",
+                organizationID: "organization-a",
+                email: "johannes@berggren.co"
+            ), 200)
+        ])
+
+        let result = try await makeService(http: http, credentials: store).fetchSnapshot(
+            for: profile,
+            isActiveCLI: false,
+            now: now,
+            accessMode: .userInitiated,
+            rotationIntent: .userRetry,
+            expectedIdentity: accountIdentity(
+                accountID: "account-a",
+                organizationID: "organization-a",
+                email: "johannes@berggren.co"
+            )
+        )
+
+        XCTAssertEqual(result.credentials.accessToken, "fresh-token")
+        XCTAssertEqual(http.requests.count, 3)
+        XCTAssertEqual(http.requests[0].url, ClaudeOAuthConstants.tokenEndpoint)
+        for request in http.requests.dropFirst() {
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "Authorization"),
+                "Bearer fresh-token"
+            )
+        }
+        XCTAssertEqual(http.requests[2].url, ClaudeUsageAPIClient.profileEndpoint)
     }
 
     func testPreloadedStoredRecordSkipsCredentialProviderRead() async throws {
@@ -3928,6 +4114,39 @@ final class ClaudeAccountUsageServiceTests: XCTestCase {
 
     private func refreshJSON(accessToken: String) -> Data {
         Data(#"{"access_token":"\#(accessToken)","refresh_token":"refresh-2","expires_in":28800}"#.utf8)
+    }
+
+    private func accountProfileJSON(
+        accountID: String,
+        organizationID: String,
+        email: String
+    ) -> Data {
+        try! JSONSerialization.data(withJSONObject: [
+            "account": [
+                "uuid": accountID,
+                "email": email,
+                "full_name": "Test User",
+                "has_claude_pro": true
+            ],
+            "organization": [
+                "uuid": organizationID,
+                "name": "Test Organization"
+            ]
+        ])
+    }
+
+    private func accountIdentity(
+        accountID: String,
+        organizationID: String,
+        email: String
+    ) -> AccountIdentity {
+        AccountIdentity(
+            email: email,
+            organizationID: organizationID,
+            accountID: accountID,
+            source: .claudeCodeUsage,
+            updatedAt: now
+        )
     }
 
     private func makeCredentials(
