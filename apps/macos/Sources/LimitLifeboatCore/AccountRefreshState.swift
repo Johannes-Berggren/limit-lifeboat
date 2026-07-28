@@ -175,6 +175,13 @@ public enum RefreshOutcomePolicy {
                 ),
                 attemptTUIFallback: false
             )
+        case .accountMismatch:
+            return RefreshOutcome(
+                state: .needsLogin(
+                    reason: "This saved Claude login belongs to a different account. Log in again to repair it."
+                ),
+                attemptTUIFallback: false
+            )
         case .forbidden:
             return RefreshOutcome(
                 state: .providerAccessForbidden(

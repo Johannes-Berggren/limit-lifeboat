@@ -53,6 +53,21 @@ final class RefreshOutcomePolicyTests: XCTestCase {
         }
     }
 
+    func testAccountMismatchRequiresLoginRepairWithoutFallback() {
+        for active in [true, false] {
+            let outcome = RefreshOutcomePolicy.outcome(
+                for: .accountMismatch,
+                isActiveCLI: active
+            )
+            guard case .needsLogin(let reason) = outcome.state else {
+                return XCTFail("Expected needsLogin, got \(outcome.state)")
+            }
+            XCTAssertTrue(reason.lowercased().contains("different account"))
+            XCTAssertTrue(reason.lowercased().contains("log in"))
+            XCTAssertFalse(outcome.attemptTUIFallback)
+        }
+    }
+
     func testForbiddenIsNonterminalAndNeverFallsBack() {
         for active in [true, false] {
             let outcome = RefreshOutcomePolicy.outcome(for: .forbidden, isActiveCLI: active)
