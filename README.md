@@ -21,10 +21,10 @@ you can see which account to move to before you move. When OpenAI supplies
 earned Codex rate-limit resets, it shows the authoritative available count for
 each Codex account.
 
-Switching is manual by default; optional switching from a depleted account is
-off until you explicitly enable it. Browser and desktop-app sessions are
-separate and unaffected. Quotas stay separate and provider-enforced: nothing is
-pooled, merged, or extended.
+Switching is manual by default; optional switching when the active account's
+tightest reported limit window reaches 5% remaining is off until you explicitly
+enable it. Browser and desktop-app sessions are separate and unaffected. Quotas
+stay separate and provider-enforced: nothing is pooled, merged, or extended.
 
 This monorepo contains the macOS app and its static Astro marketing site:
 
@@ -83,14 +83,16 @@ Support and Keychain data.
   inspect backend-provided details and expirations, then confirm use of one
   reset for any saved Codex account. Per-account automatic use is off by
   default; when enabled for the active account, it runs only after a fresh hard
-  `rate_limit_reached` reading and before optional depleted-account switching.
+  `rate_limit_reached` reading. When that hard-limit response occurs, the
+  enabled reset runs before automatic account switching is evaluated.
 - **Switching is transactional and user-controlled.** Manual switching is the
-  default, and switching from a depleted account is off until you enable it.
-  Every switch captures the current login, stages private rollback material,
-  restores and validates the selected identity, then removes the temporary
-  material. If the transaction detects another process changing a credential
-  during the operation, that external change wins. A recovery path is retained
-  and shown only when a safe rollback cannot be completed.
+  default, and switching at 5% remaining is off until you enable it. The first
+  eligible account in your saved priority order must still have clearly more
+  headroom. Every switch captures the current login, stages private rollback
+  material, restores and validates the selected identity, then removes the
+  temporary material. If the transaction detects another process changing a
+  credential during the operation, that external change wins. A recovery path
+  is retained and shown only when a safe rollback cannot be completed.
 - **Warnings are optional.** The app can notify you when an account is nearing
   a limit or when a previously depleted account is likely available again.
 - **Updates are user-controlled.** Sparkle checks the signed GitHub release

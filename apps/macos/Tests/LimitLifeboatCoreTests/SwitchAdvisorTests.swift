@@ -25,6 +25,156 @@ final class SwitchAdvisorTests: XCTestCase {
         XCTAssertEqual(advice.reason, "Claude B has ~85% of its session window left")
     }
 
+    func testActiveAtFivePercentRemainingAutoSwitches() {
+        let active = candidate(
+            label: "Claude A",
+            isActiveCLI: true,
+            snapshot: freshSnapshot(usedPercent: 95)
+        )
+        let target = candidate(label: "Claude B", snapshot: freshSnapshot(usedPercent: 15))
+
+        let advice = advisor.advise(candidates: [active, target], now: now)
+
+        XCTAssertEqual(advice.bestCandidateID, target.profileID)
+        XCTAssertTrue(advice.shouldAutoSwitch)
+        XCTAssertFalse(advice.isRebalance)
+    }
+
+    func testActiveBelowFivePercentRemainingAutoSwitches() {
+        let active = candidate(
+            label: "Claude A",
+            isActiveCLI: true,
+            snapshot: freshSnapshot(usedPercent: 95.1)
+        )
+        let target = candidate(label: "Claude B", snapshot: freshSnapshot(usedPercent: 15))
+
+        let advice = advisor.advise(candidates: [active, target], now: now)
+
+        XCTAssertEqual(advice.bestCandidateID, target.profileID)
+        XCTAssertTrue(advice.shouldAutoSwitch)
+    }
+
+    func testActiveAboveFivePercentRemainingDoesNotUseEscapePath() {
+        let active = candidate(
+            label: "Claude A",
+            isActiveCLI: true,
+            snapshot: freshSnapshot(usedPercent: 94.9)
+        )
+        let target = candidate(label: "Claude B", snapshot: freshSnapshot(usedPercent: 15))
+
+        let advice = advisor.advise(candidates: [active, target], now: now)
+
+        XCTAssertEqual(advice.bestCandidateID, target.profileID)
+        XCTAssertFalse(advice.shouldAutoSwitch)
+    }
+
+    func testStaleActiveAtFivePercentRemainingDoesNotAutoSwitch() {
+        let active = candidate(
+            label: "Claude A",
+            isActiveCLI: true,
+            snapshot: staleSnapshot(usedPercent: 95)
+        )
+        let target = candidate(label: "Claude B", snapshot: freshSnapshot(usedPercent: 15))
+
+        let advice = advisor.advise(candidates: [active, target], now: now)
+
+        XCTAssertEqual(advice.bestCandidateID, target.profileID)
+        XCTAssertFalse(advice.shouldAutoSwitch)
+    }
+
+    func testCustomEarlySwitchThresholdIsHonored() {
+        let advisor = SwitchAdvisor(
+            configuration: .init(autoSwitchTriggerRemainingPercent: 10)
+        )
+        let active = candidate(
+            label: "Claude A",
+            isActiveCLI: true,
+            snapshot: freshSnapshot(usedPercent: 90)
+        )
+        let target = candidate(label: "Claude B", snapshot: freshSnapshot(usedPercent: 15))
+
+        let advice = advisor.advise(candidates: [active, target], now: now)
+
+        XCTAssertTrue(advice.shouldAutoSwitch)
+    }
+
+    func testAuthoritativeDepletionWithoutUsageMeasurementStillAutoSwitches() {
+        let active = candidate(
+            label: "Claude A",
+            isActiveCLI: true,
+            snapshot: snapshotWithoutUsage(riskLevel: .depleted)
+        )
+        let target = candidate(label: "Claude B", snapshot: freshSnapshot(usedPercent: 15))
+
+        let advice = advisor.advise(candidates: [active, target], now: now)
+
+        XCTAssertEqual(advice.bestCandidateID, target.profileID)
+        XCTAssertTrue(advice.shouldAutoSwitch)
+    }
+
+    func testUnknownUsageIsNotTreatedAsZeroRemaining() {
+        let active = candidate(
+            label: "Claude A",
+            isActiveCLI: true,
+            snapshot: snapshotWithoutUsage(riskLevel: .unknown)
+        )
+        let target = candidate(label: "Claude B", snapshot: freshSnapshot(usedPercent: 15))
+
+        let advice = advisor.advise(candidates: [active, target], now: now)
+
+        XCTAssertEqual(advice.bestCandidateID, target.profileID)
+        XCTAssertFalse(advice.shouldAutoSwitch)
+    }
+
+    func testElapsedActiveWindowCountsAsFullAndDoesNotTriggerEarlySwitch() {
+        let active = candidate(
+            label: "Claude A",
+            isActiveCLI: true,
+            snapshot: freshSnapshot(
+                usedPercent: 95,
+                resetDate: now.addingTimeInterval(-600)
+            )
+        )
+        let target = candidate(label: "Claude B", snapshot: freshSnapshot(usedPercent: 15))
+
+        let advice = advisor.advise(candidates: [active, target], now: now)
+
+        XCTAssertEqual(advice.bestCandidateID, target.profileID)
+        XCTAssertFalse(advice.shouldAutoSwitch)
+    }
+
+    func testTightestActiveWindowTriggersWhileElapsedWindowCountsAsFull() {
+        let activeSnapshot = UsageSnapshot(
+            accountID: UUID(),
+            provider: .claude,
+            windows: [
+                window(
+                    id: "session",
+                    kind: .session,
+                    label: "Session",
+                    usedPercent: 100,
+                    resetDate: now.addingTimeInterval(-600)
+                ),
+                window(
+                    id: "weekly-all",
+                    kind: .weekly,
+                    label: "Weekly (all models)",
+                    usedPercent: 95,
+                    resetDate: now.addingTimeInterval(5 * 86_400)
+                )
+            ],
+            source: "test",
+            lastRefreshed: now.addingTimeInterval(-600),
+            parseConfidence: .high
+        )
+        let active = candidate(label: "Claude A", isActiveCLI: true, snapshot: activeSnapshot)
+        let target = candidate(label: "Claude B", snapshot: freshSnapshot(usedPercent: 15))
+
+        let advice = advisor.advise(candidates: [active, target], now: now)
+
+        XCTAssertTrue(advice.shouldAutoSwitch)
+    }
+
     func testStaleTargetWithoutElapsedResetIsIneligible() {
         let target = candidate(label: "Claude B", snapshot: staleSnapshot(usedPercent: 15))
 
@@ -62,6 +212,31 @@ final class SwitchAdvisorTests: XCTestCase {
         let targetCodex = candidate(
             label: "Codex B",
             snapshot: codexSnapshot(usedPercent: 92, lastRefreshed: now.addingTimeInterval(-4 * 3600), resetDate: now.addingTimeInterval(-600))
+        )
+
+        let advice = advisor.advise(candidates: [activeCodex, targetCodex], now: now)
+
+        XCTAssertEqual(advice.bestCandidateID, targetCodex.profileID)
+        XCTAssertTrue(advice.shouldAutoSwitch)
+    }
+
+    func testCodexAutoSwitchesAtFivePercentRemaining() {
+        let activeCodex = candidate(
+            label: "Codex A",
+            isActiveCLI: true,
+            snapshot: codexSnapshot(
+                usedPercent: 95,
+                lastRefreshed: now.addingTimeInterval(-600),
+                resetDate: nil
+            )
+        )
+        let targetCodex = candidate(
+            label: "Codex B",
+            snapshot: codexSnapshot(
+                usedPercent: 15,
+                lastRefreshed: now.addingTimeInterval(-600),
+                resetDate: nil
+            )
         )
 
         let advice = advisor.advise(candidates: [activeCodex, targetCodex], now: now)
@@ -179,6 +354,39 @@ final class SwitchAdvisorTests: XCTestCase {
         XCTAssertFalse(advice.shouldAutoSwitch)
     }
 
+    func testEarlySwitchStillRequiresTargetHeadroomFloor() {
+        let active = candidate(
+            label: "Claude A",
+            isActiveCLI: true,
+            snapshot: freshSnapshot(usedPercent: 95)
+        )
+        let target = candidate(label: "Claude B", snapshot: freshSnapshot(usedPercent: 75))
+
+        let advice = advisor.advise(candidates: [active, target], now: now)
+
+        XCTAssertEqual(advice.bestCandidateID, target.profileID)
+        XCTAssertFalse(advice.shouldAutoSwitch)
+    }
+
+    func testEarlySwitchStillRequiresImprovementMargin() {
+        let advisor = SwitchAdvisor(
+            configuration: .init(minimumHeadroomPercent: 0)
+        )
+        let active = candidate(
+            label: "Claude A",
+            isActiveCLI: true,
+            snapshot: freshSnapshot(usedPercent: 95)
+        )
+        let target = candidate(label: "Claude B", snapshot: freshSnapshot(usedPercent: 76))
+
+        // The target has 24% remaining, only 19 percentage points above the
+        // active account's 5%.
+        let advice = advisor.advise(candidates: [active, target], now: now)
+
+        XCTAssertEqual(advice.bestCandidateID, target.profileID)
+        XCTAssertFalse(advice.shouldAutoSwitch)
+    }
+
     func testTargetBlockedBySessionPolicyIsIneligible() {
         let target = candidate(
             label: "Claude B",
@@ -281,11 +489,11 @@ final class SwitchAdvisorTests: XCTestCase {
         XCTAssertFalse(advice.shouldAutoSwitch)
     }
 
-    func testDepletedActiveFallsThroughToLowerPriorityWhenGateFails() {
+    func testEarlySwitchFallsThroughToLowerPriorityWhenGateFails() {
         // The preferred target's 25% headroom misses the 30% floor; the
-        // depleted active must not stay stuck on it when the next account in
+        // near-limit active must not stay stuck on it when the next account in
         // priority order qualifies.
-        let active = candidate(label: "Claude A", isActiveCLI: true, snapshot: freshSnapshot(usedPercent: 100))
+        let active = candidate(label: "Claude A", isActiveCLI: true, snapshot: freshSnapshot(usedPercent: 95))
         let preferred = candidate(label: "Claude B", snapshot: freshSnapshot(usedPercent: 75), priorityRank: 1)
         let fallback = candidate(label: "Claude C", snapshot: freshSnapshot(usedPercent: 15), priorityRank: 2)
 
@@ -435,6 +643,17 @@ final class SwitchAdvisorTests: XCTestCase {
             source: "test",
             lastRefreshed: lastRefreshed,
             parseConfidence: .high
+        )
+    }
+
+    private func snapshotWithoutUsage(riskLevel: RiskLevel) -> UsageSnapshot {
+        UsageSnapshot(
+            accountID: UUID(),
+            provider: .claude,
+            riskLevel: riskLevel,
+            source: "test",
+            lastRefreshed: now.addingTimeInterval(-600),
+            parseConfidence: .none
         )
     }
 

@@ -161,9 +161,9 @@ struct SettingsView: View {
                     }
 
                     Section("Switching") {
-                        Toggle("Switch CLI automatically when the active account is depleted", isOn: $settings.autoSwitchEnabled)
+                        Toggle("Switch CLI automatically at 5% remaining", isOn: $settings.autoSwitchEnabled)
                         Label(
-                            "Chooses the saved account with the most remaining quota and sends a notification. It only runs when another account clearly has more headroom.",
+                            "Chooses the first eligible saved account in your priority order and sends a notification. The target must have at least 30% remaining and 20 percentage points more headroom.",
                             systemImage: "info.circle"
                         )
                         .font(.caption)
