@@ -145,8 +145,8 @@ final class AppState: ObservableObject {
     private var lastAutoSwitchAttempt: [Provider: Date] = [:]
     private var lastManualSwitchAt: [Provider: Date] = [:]
     /// Whether the current active account was chosen by the user rather than
-    /// an automatic switch. A manual park is only ever left via the depleted
-    /// path, never a priority rebalance.
+    /// an automatic switch. A manual park is only ever left via the early-limit
+    /// escape path, never a priority rebalance.
     private var activeWasManuallySelected: [Provider: Bool] = [:]
     /// Per-account backoff for automatic reset attempts. Manual redemption is
     /// never throttled and reuses any persisted unresolved idempotency key.
@@ -539,12 +539,12 @@ final class AppState: ObservableObject {
     }
 
     /// Recomputes the best-switch-target hint from the fresh readings and,
-    /// when the opt-in is enabled, performs the switch: active account
-    /// depleted, another account with clearly more headroom.
+    /// when the opt-in is enabled, performs the switch: active account at 5%
+    /// remaining, another account with clearly more headroom.
     private func updateSwitchAdvice() {
         // Candidates never mix providers: credentials and quota are
         // provider-scoped, so a Claude account can't be a switch target for a
-        // depleted Codex login. The advisor itself is provider-agnostic.
+        // near-limit Codex login. The advisor itself is provider-agnostic.
         for provider in Provider.allCases {
             let advice = switchAdvisor.advise(candidates: switchCandidates(for: provider))
             switchAdvice[provider] = advice
@@ -727,7 +727,8 @@ final class AppState: ObservableObject {
         }
 
         // A rebalance leaves an account that still has quota, so it must not
-        // undo a deliberate manual park — only depletion moves off of one.
+        // undo a deliberate manual park — only the early-limit escape path
+        // moves off of one.
         if advice.isRebalance, activeWasManuallySelected[provider] == true {
             return
         }

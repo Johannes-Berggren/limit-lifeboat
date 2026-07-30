@@ -18,7 +18,7 @@ const faqs = [
   {
     question: "Can two Claude Code accounts run simultaneously through Limit Lifeboat?",
     answer:
-      "No. Limit Lifeboat switches the global Claude Code CLI login one account at a time. It does not launch isolated simultaneous profiles. Optional switching from a depleted account is disabled by default and must be explicitly enabled.",
+      "No. Limit Lifeboat switches the global Claude Code CLI login one account at a time. It does not launch isolated simultaneous profiles. Optional switching at 5% remaining is disabled by default and must be explicitly enabled.",
   },
 ] as const;
 ---
@@ -65,7 +65,7 @@ const faqs = [
     <h2>Save authentication, not the whole configuration</h2>
     <p>Limit Lifeboat registers the account that is currently authenticated by Claude Code and stores an app-managed credential snapshot in macOS Keychain. Once work and personal accounts are registered, the menu-bar view shows their identities, current or last-known usage, and which account is active.</p>
     <p>When you request a switch, the app captures the current login, prepares restricted rollback material, restores only the selected provider’s authentication fields, and verifies the resulting identity. Unrelated CLI and MCP settings remain in place. If verification fails, the app restores the previous state; if another process changes a credential during recovery, that external change wins and protected recovery material is retained.</p>
-    <p>Manual switching is the default. An optional setting can switch away from a depleted account, but it is off until you explicitly enable it and uses the same identity verification safeguards. To set up either path, install Limit Lifeboat, authenticate each account once with Claude Code’s official flow, and refresh the app after each login.</p>
+    <p>Manual switching is the default. An optional setting can switch accounts when the tightest reported limit window reaches 5% remaining, but it is off until you explicitly enable it and uses the same identity verification safeguards. To set up either path, install Limit Lifeboat, authenticate each account once with Claude Code’s official flow, and refresh the app after each login.</p>
   </section>
 
   <section id="boundaries">

@@ -122,7 +122,7 @@ final class UsageAlertController {
     func handleAutoSwitch(fromLabel: String?, toLabel: String, provider: Provider, reason: String?) {
         var parts: [String] = []
         if let fromLabel {
-            parts.append("\(fromLabel) hit its limit.")
+            parts.append("\(fromLabel) was at or near its limit.")
         }
         if let reason {
             parts.append(reason)

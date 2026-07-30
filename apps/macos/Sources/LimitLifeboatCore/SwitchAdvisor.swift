@@ -43,8 +43,8 @@ public struct SwitchAdvice: Equatable, Sendable {
     public var bestCandidateLabel: String?
     public var shouldAutoSwitch: Bool
     /// True when the switch returns to a recovered higher-priority account
-    /// rather than fleeing a depleted one. Rebalances defer to manual parking
-    /// in the app layer.
+    /// rather than fleeing one at or near its limit. Rebalances defer to
+    /// manual parking in the app layer.
     public var isRebalance: Bool
     /// Short human sentence for status/notification, nil when no advice.
     public var reason: String?
@@ -73,7 +73,8 @@ public struct SwitchAdvice: Equatable, Sendable {
 /// quota regardless of staleness) or whose reading is fresh and whose
 /// tightest window is not depleted. Targets rank in the user's priority
 /// order (repository order per provider), not by headroom. An automatic
-/// switch requires either a depleted active account and a target clearing
+/// switch requires either an active account at or below the configured
+/// remaining-quota trigger (or authoritatively depleted) and a target clearing
 /// both headroom bars, or a recovered higher-priority account clearing the
 /// rebalance bar.
 public struct SwitchAdvisor: Sendable {
@@ -81,6 +82,9 @@ public struct SwitchAdvisor: Sendable {
         /// Candidate readings older than this only count once every
         /// window's reset has elapsed.
         public var staleAfter: TimeInterval
+        /// The active account switches before depletion once its tightest
+        /// measurable window has this percentage of quota remaining or less.
+        public var autoSwitchTriggerRemainingPercent: Double
         /// Candidate must have at least this much headroom to auto-switch.
         public var minimumHeadroomPercent: Double
         /// And beat the active account's headroom by at least this much.
@@ -95,11 +99,13 @@ public struct SwitchAdvisor: Sendable {
 
         public init(
             staleAfter: TimeInterval = 3 * 3600,
+            autoSwitchTriggerRemainingPercent: Double = 5,
             minimumHeadroomPercent: Double = 30,
             minimumImprovementPercent: Double = 20,
             rebalanceMinimumHeadroomPercent: Double = 50
         ) {
             self.staleAfter = staleAfter
+            self.autoSwitchTriggerRemainingPercent = autoSwitchTriggerRemainingPercent
             self.minimumHeadroomPercent = minimumHeadroomPercent
             self.minimumImprovementPercent = minimumImprovementPercent
             self.rebalanceMinimumHeadroomPercent = rebalanceMinimumHeadroomPercent
@@ -130,11 +136,11 @@ public struct SwitchAdvisor: Sendable {
             return SwitchAdvice()
         }
 
-        // If the active account is depleted, walk the priority order and pick
-        // the first read-only target that actually clears the auto-switch
-        // bars — a preferred account below the bars must not block a healthy
-        // one further down. Otherwise preserve the highest-priority manually
-        // switchable account as the passive UI hint.
+        // If the active account is at the early-switch point, walk the priority
+        // order and pick the first read-only target that actually clears the
+        // auto-switch bars — a preferred account below the bars must not block
+        // a healthy one further down. Otherwise preserve the highest-priority
+        // manually switchable account as the passive UI hint.
         if let automaticBest = targets.first(where: {
             $0.candidate.automaticSwitchEligibility.isEligible
                 && shouldAutoSwitch(to: $0, candidates: candidates, now: now)
@@ -269,21 +275,43 @@ public struct SwitchAdvisor: Sendable {
               best.candidate.automaticSwitchEligibility.isEligible,
               best.score >= configuration.minimumHeadroomPercent,
               let active = candidates.first(where: { $0.isActiveCLI }),
-              let activeSnapshot = active.snapshot,
-              effectiveRiskLevel(of: activeSnapshot) == .depleted else {
+              let activeSnapshot = active.snapshot else {
             return false
         }
-        return best.score - headroomScore(of: activeSnapshot, now: now) >= configuration.minimumImprovementPercent
+        let measurableHeadroom = measurableHeadroomScore(of: activeSnapshot, now: now)
+        let isAuthoritativelyDepleted = effectiveRiskLevel(of: activeSnapshot) == .depleted
+        let reachedEarlySwitchPoint = !activeSnapshot.isStale(
+            asOf: now,
+            maxAge: configuration.staleAfter
+        ) && (measurableHeadroom.map {
+            $0 <= configuration.autoSwitchTriggerRemainingPercent
+        } ?? false)
+        guard isAuthoritativelyDepleted || reachedEarlySwitchPoint else {
+            return false
+        }
+
+        return best.score - headroomScore(of: activeSnapshot, now: now)
+            >= configuration.minimumImprovementPercent
     }
 
     /// The percentage of quota left on the tightest window as of `now`;
     /// windows whose reset has rolled over since the reading count as full.
     private func headroomScore(of snapshot: UsageSnapshot, now: Date) -> Double {
-        let windows = snapshot.orderedDisplayWindows
-        guard !windows.isEmpty else {
+        guard let measurableHeadroom = measurableHeadroomScore(of: snapshot, now: now) else {
             return snapshot.resetHasElapsed(asOf: now) ? 100 : 0
         }
-        return windows.map { effectiveHeadroom(of: $0, now: now) }.min() ?? 0
+        return measurableHeadroom
+    }
+
+    /// Nil means the snapshot contains no quota measurement. Keeping that
+    /// distinct from zero prevents unknown usage from triggering an early
+    /// switch while retaining the legacy zero fallback for a hard depletion.
+    private func measurableHeadroomScore(of snapshot: UsageSnapshot, now: Date) -> Double? {
+        let windows = snapshot.orderedDisplayWindows
+        guard !windows.isEmpty else {
+            return nil
+        }
+        return windows.map { effectiveHeadroom(of: $0, now: now) }.min()
     }
 
     /// A window's quota left as of `now`: full once its reset has rolled

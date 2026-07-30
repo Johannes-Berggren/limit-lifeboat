@@ -15,8 +15,8 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(usageAlertsEnabled, forKey: Keys.usageAlertsEnabled) }
     }
 
-    /// Opt-in: switch the CLI automatically when the active Claude account is
-    /// depleted and another account has clearly more headroom.
+    /// Opt-in: switch the CLI automatically when the active account reaches
+    /// 5% remaining and another account has clearly more headroom.
     @Published var autoSwitchEnabled: Bool {
         didSet { defaults.set(autoSwitchEnabled, forKey: Keys.autoSwitchEnabled) }
     }
