@@ -1,0 +1,201 @@
+---
+import AnswerBlock from "../../components/AnswerBlock.astro";
+import { getGuide } from "../../data/pages";
+import GuideLayout from "../../layouts/GuideLayout.astro";
+
+const meta = getGuide("/guides/multiple-claude-accounts-allowed");
+
+const faqs = [
+  {
+    question: "Will I get banned for having two Claude subscriptions?",
+    answer:
+      "Nobody outside Anthropic can promise you will not, and this page does not. What is documented is that enforcement has centred on account sharing, reselling access, and routing subscription credentials through third-party harnesses. Holding a separate employer-provisioned account and a personal account is a common arrangement, but the terms that apply to each account are the ones that govern your situation.",
+  },
+  {
+    question: "Is using a subscription login outside the official CLI against the terms?",
+    answer:
+      "That is the pattern most associated with enforcement. Subscription access is sold for use through the provider's own products. Taking the OAuth token that Claude Code or Codex CLI minted and pointing a different agent harness at it is a materially different thing from switching which account the official CLI is signed in as.",
+  },
+  {
+    question: "Does switching accounts count as evading a rate limit?",
+    answer:
+      "Switching does not change how a limit is enforced. Each account keeps its own provider-enforced quota, and nothing is pooled, merged, or extended. That said, providers prohibit circumventing restrictions, and whether a particular pattern of use crosses that line is a judgment about your use, not about the mechanism.",
+  },
+  {
+    question: "Can I use my employer's Claude account for personal projects?",
+    answer:
+      "That is a question for your employer, not for a provider's terms. A work or enterprise account is typically governed by organization retention, access, and acceptable-use policies that do not apply to a personal account. Ask before assuming.",
+  },
+  {
+    question: "Is Limit Lifeboat affiliated with Anthropic or OpenAI?",
+    answer:
+      "No. It is an independent open-source project, not endorsed by, affiliated with, or supported by Anthropic or OpenAI. It cannot and does not make a blanket claim that every multi-subscription pattern is permitted.",
+  },
+];
+---
+
+<GuideLayout
+  meta={meta}
+  introduction="This is the question everyone asks second, and most answers to it are either sales copy or scare stories. Here is what is actually documented, what is genuinely uncertain, and which questions decide your own case."
+  faqs={faqs}
+  ctaHeading="Switch deliberately, inside the boundaries you set."
+>
+  <Fragment slot="nav">
+    <a href="#short">The honest answer</a>
+    <a href="#prohibited">What providers prohibit</a>
+    <a href="#confused">What gets confused with it</a>
+    <a href="#mechanism">Why the mechanism matters</a>
+    <a href="#decide">Deciding your own case</a>
+    <a href="#questions">Questions</a>
+    <a href="#related">Related guides</a>
+  </Fragment>
+
+  <AnswerBlock
+    facts={[
+      "The behaviours consistently associated with enforcement are account sharing, reselling access, and using subscription OAuth tokens in third-party harnesses.",
+      "Switching which account an official CLI is signed in as does not pool, merge, or extend any quota. Each account's limit is still enforced by the provider.",
+      "An employer-provisioned account is governed by that organization's policies, which are separate from the provider's terms.",
+      "OpenAI's Terms of Use prohibit circumventing rate limits or restrictions.",
+      "No independent tool can tell you your particular setup is permitted, and any that does is overreaching.",
+    ]}
+  >
+    <p>
+      Holding more than one Claude or ChatGPT account is a common arrangement, most often an
+      employer-provisioned account alongside a personal one, and it is not the thing providers have
+      acted against. What providers do prohibit is sharing one account between people, reselling
+      access, and pushing subscription credentials through third-party harnesses. Whether your own
+      pattern of use is within your accounts' terms is a judgment only you can make.
+    </p>
+  </AnswerBlock>
+
+  <section id="short">
+    <h2>Why there is no clean yes or no</h2>
+    <p>
+      Two different questions get collapsed into one. The first is “may I hold more than one
+      account?” The second is “may I use these accounts the way I am planning to?” The first has a
+      fairly settled answer. The second depends on facts nobody else can see: whose accounts they
+      are, what your employer permits, and what you are doing with the capacity.
+    </p>
+    <p>
+      Any tool that tells you your setup is definitely fine is selling you something. What an
+      independent project can honestly do is describe the mechanism precisely, so that you can
+      apply your own terms to it. That is what the rest of this page does.
+    </p>
+  </section>
+
+  <section id="prohibited">
+    <h2>What providers actually prohibit</h2>
+    <p>Three patterns come up consistently, and they are the ones worth avoiding:</p>
+    <ul>
+      <li>
+        <strong>Account sharing.</strong> One subscription used by several people. Subscriptions are
+        priced per person, and giving colleagues access to a single login is the clearest violation
+        in the set.
+      </li>
+      <li>
+        <strong>Reselling or proxying access.</strong> Taking subscription inference and selling it
+        on, or exposing it as a service to others.
+      </li>
+      <li>
+        <strong>Using subscription credentials in third-party harnesses.</strong> Subscription
+        access is sold for use through the provider's own products. Extracting the OAuth token and
+        pointing another agent framework at it is the pattern most associated with account
+        suspensions.
+      </li>
+    </ul>
+    <p>
+      OpenAI's <a href="https://openai.com/policies/row-terms-of-use/">Terms of Use</a> also
+      prohibit circumventing rate limits or restrictions, and Anthropic publishes its own
+      <a href="https://code.claude.com/docs/en/legal-and-compliance">legal and compliance</a>
+      documentation for Claude Code. Read the terms that apply to your accounts rather than a
+      summary of them, including this one.
+    </p>
+  </section>
+
+  <section id="confused">
+    <h2>What gets confused with the prohibited list</h2>
+    <p>
+      Holding a work account and a personal account is not on that list. It is the ordinary
+      consequence of an employer buying a seat: you have a company identity for company work, and
+      your own for everything else. Both vendors support keeping accounts separate elsewhere in
+      their products — OpenAI ships account switching for ChatGPT on the web precisely so that work
+      and personal stay distinct.
+    </p>
+    <p>
+      What neither vendor has shipped is switching for their command-line tools. The gap is why
+      people write scripts that swap whole configuration directories, and why those scripts quietly
+      destroy MCP server definitions and settings. The demand is real and mundane; the tooling
+      around it is where the risk has been.
+    </p>
+  </section>
+
+  <section id="mechanism">
+    <h2>Why the mechanism matters more than the intent</h2>
+    <p>
+      If you are assessing any tool in this space against your own terms, the question to ask is
+      what it actually does with the credential. Three things separate an account switcher from the
+      patterns above:
+    </p>
+    <ul>
+      <li>
+        <strong>Does the credential leave the machine?</strong> If a tool sends credentials to a
+        server, that is a different product with different risks. Limit Lifeboat never transmits
+        them; everything stays in the macOS Keychain and your user Library.
+      </li>
+      <li>
+        <strong>Does it route model requests?</strong> A switcher changes which identity the
+        official CLI uses and then gets out of the way. It never sits in the request path, so it is
+        not a harness.
+      </li>
+      <li>
+        <strong>Does it give two people one subscription?</strong> Switching between accounts you
+        personally hold on your own Mac is the opposite of shared access.
+      </li>
+    </ul>
+    <p>
+      On quotas specifically: switching cannot merge them. Each account's session and weekly windows
+      are tracked and enforced by the provider for that account. Moving the CLI to a second account
+      does not add capacity to the first, and does not change when either resets. If you want the
+      detail on how those windows work, see
+      <a href="/guides/claude-code-usage-limits-explained">Claude Code usage limits explained</a>.
+    </p>
+  </section>
+
+  <section id="decide">
+    <h2>Deciding your own case</h2>
+    <p>Four questions settle most situations:</p>
+    <ol>
+      <li>
+        <strong>Is every account one you are authorized to use?</strong> Not borrowed, not shared,
+        not someone else's.
+      </li>
+      <li>
+        <strong>What does your employer permit for the account they gave you?</strong> Their policy
+        governs that account, and it may be stricter than the provider's terms.
+      </li>
+      <li>
+        <strong>Are you using each account through the provider's own tools?</strong> If a
+        subscription credential is being pointed at something other than the official CLI, that is
+        the risky pattern regardless of how many accounts are involved.
+      </li>
+      <li>
+        <strong>Would you describe what you are doing to the provider without hesitating?</strong>
+        A useful instinct when the terms are ambiguous.
+      </li>
+    </ol>
+    <p>
+      If you need more capacity on one account rather than more accounts, both vendors document
+      supported routes: Anthropic offers extra usage and higher plan tiers, and OpenAI sells
+      additional credits. Those are the sanctioned answers to a limit, and they are worth using
+      before reaching for anything else. <a href="/guides/claude-code-limit-reached"
+        >What to do when Claude Code hits its limit</a
+      > compares the options.
+    </p>
+    <p>
+      For the practical mechanics of keeping two accounts straight day to day, see
+      <a href="/guides/work-and-personal-claude-accounts"
+        >keeping work and personal accounts separate</a
+      >.
+    </p>
+  </section>
+</GuideLayout>

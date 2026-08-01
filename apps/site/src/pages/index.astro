@@ -4,7 +4,15 @@ import appScreenshot from "../assets/app-dashboard.png";
 import BrandMark from "../components/BrandMark.astro";
 import SectionHeading from "../components/SectionHeading.astro";
 import { product } from "../config";
+import { guides } from "../data/pages";
+import { latestRelease } from "../data/releases";
 import BaseLayout from "../layouts/BaseLayout.astro";
+
+const featuredGuides = [
+  "/guides/switch-claude-code-accounts-mac",
+  "/guides/multiple-claude-accounts-allowed",
+  "/guides/claude-code-limit-reached",
+].map((path) => guides.find((guide) => guide.path === path)!);
 
 const faqs = [
   {
@@ -28,9 +36,9 @@ const faqs = [
       "It supports Claude subscription accounts used by Claude Code and ChatGPT subscription accounts used by the Codex CLI. You can use either provider or both.",
   },
   {
-    question: "What changes when I switch an account?",
+    question: "Does it switch accounts automatically?",
     answer:
-      "Only the selected provider’s CLI authentication fields change. Limit Lifeboat preserves unrelated CLI and MCP settings, validates the restored identity, and rolls back safely if verification fails.",
+      "Only if you turn that on, and it is off by default. When enabled, it moves off the active account once its tightest reported window reaches 5% remaining, follows your saved priority order, and requires the target account to have at least 30% headroom and to be at least 20 points better than the one you are leaving.",
   },
   {
     question: "Does it switch my browser or desktop app too?",
@@ -54,44 +62,68 @@ const faqs = [
   },
 ] as const;
 
-const structuredData = {
-  "@context": "https://schema.org",
-  "@graph": [
-    {
-      "@type": "SoftwareApplication",
-      name: product.name,
-      url: product.siteUrl,
-      description: product.shortDescription,
-      applicationCategory: "UtilitiesApplication",
-      operatingSystem: `${product.minimumMacOS} or newer`,
-      softwareVersion: product.version,
-      downloadUrl: product.links.download,
-      codeRepository: product.links.repository,
-      license: product.links.license,
-      offers: {
-        "@type": "Offer",
-        price: "0",
-        priceCurrency: "USD",
+const structuredData = [
+  {
+    "@type": "SoftwareApplication",
+    "@id": `${product.siteUrl}/#software`,
+    name: product.name,
+    url: product.siteUrl,
+    description: product.metaDescription,
+    applicationCategory: "DeveloperApplication",
+    applicationSubCategory: "Account and usage management",
+    operatingSystem: `${product.minimumMacOS} or newer`,
+    processorRequirements: "arm64",
+    softwareRequirements: `${product.architecture} Mac running ${product.minimumMacOS} or newer, plus Claude Code and/or the Codex CLI`,
+    softwareVersion: product.version,
+    datePublished: "2026-07-15",
+    dateModified: latestRelease.date,
+    releaseNotes: new URL("/changelog", product.siteUrl).toString(),
+    downloadUrl: product.links.download,
+    installUrl: new URL("/download", product.siteUrl).toString(),
+    screenshot: new URL("/og-card.png", product.siteUrl).toString(),
+    codeRepository: product.links.repository,
+    license: product.links.license,
+    isAccessibleForFree: true,
+    author: { "@id": `${product.siteUrl}/#organization` },
+    maintainer: { "@id": `${product.siteUrl}/#organization` },
+    featureList: [
+      "Switch Claude Code and Codex CLI logins between saved accounts",
+      "Write only provider authentication fields, never settings.json or MCP definitions",
+      "Verify the restored account identity after every switch",
+      "Roll back a failed switch, or keep protected recovery material when rollback is unsafe",
+      "Show session, weekly, and model-scoped usage windows for every saved account",
+      "Display the age of each usage reading instead of presenting stale data as live",
+      "Optional warnings before a limit interrupts work, and when an account is likely available again",
+      "Optional automatic switching, off by default",
+      "Local usage history with CSV export",
+    ],
+    offers: {
+      "@type": "Offer",
+      price: "0",
+      priceCurrency: "USD",
+      availability: "https://schema.org/InStock",
+      url: new URL("/download", product.siteUrl).toString(),
+    },
+  },
+  {
+    "@type": "FAQPage",
+    "@id": `${product.siteUrl}/#faq`,
+    mainEntity: faqs.map((item) => ({
+      "@type": "Question",
+      name: item.question,
+      acceptedAnswer: {
+        "@type": "Answer",
+        text: item.answer,
       },
-    },
-    {
-      "@type": "FAQPage",
-      mainEntity: faqs.map((item) => ({
-        "@type": "Question",
-        name: item.question,
-        acceptedAnswer: {
-          "@type": "Answer",
-          text: item.answer,
-        },
-      })),
-    },
-  ],
-};
+    })),
+  },
+];
 ---
 
 <BaseLayout
   title="Claude Code & Codex Account Switcher for Mac"
-  description={product.shortDescription}
+  description={product.metaDescription}
+  dateModified={latestRelease.date}
   structuredData={structuredData}
 >
   <section class="hero">
@@ -343,6 +375,11 @@ const structuredData = {
           <p>Use only accounts you are authorized to use, and follow whatever policy your employer sets for the account they gave you. That is your call to make, not this app's. It will not create accounts, and it will not touch a browser or desktop-app session.</p>
         </article>
       </div>
+      <p class="allowed-more">
+        <a class="text-link" href="/guides/multiple-claude-accounts-allowed"
+          >Read the long answer, with what the terms actually say <span aria-hidden="true">→</span></a
+        >
+      </p>
     </div>
   </section>
 
@@ -355,25 +392,24 @@ const structuredData = {
         align="center"
       />
       <div class="resource-grid">
-        <a class="resource-card" href="/guides/switch-claude-code-accounts-mac">
-          <span>Claude Code</span>
-          <h3>How to switch between Claude Code accounts on Mac</h3>
-          <p>Compare the built-in login flow with a saved, verified account switch.</p>
-          <strong>Read the guide <i aria-hidden="true">→</i></strong>
-        </a>
-        <a class="resource-card" href="/guides/manage-multiple-codex-accounts-mac">
-          <span>Codex CLI</span>
-          <h3>How to use multiple Codex CLI accounts on Mac</h3>
-          <p>Keep CLI identity changes separate from ChatGPT browser and desktop sessions.</p>
-          <strong>Read the guide <i aria-hidden="true">→</i></strong>
-        </a>
-        <a class="resource-card" href="/guides/claude-code-codex-usage-monitor-mac">
-          <span>Usage</span>
-          <h3>How to monitor Claude Code and Codex usage on Mac</h3>
-          <p>See current windows, resets, reading age, and pace without dashboard juggling.</p>
-          <strong>Read the guide <i aria-hidden="true">→</i></strong>
-        </a>
+        {
+          featuredGuides.map((guide) => (
+            <a class="resource-card" href={guide.path}>
+              <span>{guide.eyebrow}</span>
+              <h3>{guide.title}</h3>
+              <p>{guide.summary}</p>
+              <strong>
+                Read the guide <i aria-hidden="true">→</i>
+              </strong>
+            </a>
+          ))
+        }
       </div>
+      <p class="allowed-more">
+        <a class="text-link" href="/guides"
+          >Browse all {guides.length} guides <span aria-hidden="true">→</span></a
+        >
+      </p>
     </div>
   </section>
 
@@ -408,9 +444,15 @@ const structuredData = {
       <dl class="requirements">
         <div><dt>Requires</dt><dd>{product.minimumMacOS} or newer</dd></div>
         <div><dt>Hardware</dt><dd>{product.architecture}</dd></div>
-        <div><dt>Current version</dt><dd>{product.version}</dd></div>
+        <div>
+          <dt>Current version</dt>
+          <dd><a href="/changelog">{product.version}</a></dd>
+        </div>
         <div><dt>Price</dt><dd>Free</dd></div>
       </dl>
+      <p class="install-more">
+        <a href="/download">Full install instructions, requirements, and update behaviour</a>
+      </p>
     </div>
   </section>
 

@@ -1,4 +1,69 @@
+# Limit Lifeboat — https://limitlifeboat.com
+# Everything here is public documentation for a free, open-source project.
+# Crawling and citation are welcome, including by AI search and answer engines.
+
 User-agent: *
 Allow: /
+
+# Search and answer engines, named explicitly so the intent is unambiguous.
+# Several of these treat an absent rule as opt-out rather than opt-in.
+
+User-agent: Googlebot
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: Bingbot
+Allow: /
+
+User-agent: Applebot
+Allow: /
+
+User-agent: Applebot-Extended
+Allow: /
+
+User-agent: DuckDuckBot
+Allow: /
+
+User-agent: GPTBot
+Allow: /
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: Claude-User
+Allow: /
+
+User-agent: Claude-SearchBot
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Perplexity-User
+Allow: /
+
+User-agent: CCBot
+Allow: /
+
+User-agent: Amazonbot
+Allow: /
+
+User-agent: meta-externalagent
+Allow: /
+
+User-agent: cohere-ai
+Allow: /
+
+# Plain-text summaries for language models:
+#   https://limitlifeboat.com/llms.txt        curated index
+#   https://limitlifeboat.com/llms-full.txt   full text of every page
 
 Sitemap: https://limitlifeboat.com/sitemap-index.xml

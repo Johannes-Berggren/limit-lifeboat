@@ -1,0 +1,196 @@
+---
+import AnswerBlock from "../../components/AnswerBlock.astro";
+import { getGuide } from "../../data/pages";
+import GuideLayout from "../../layouts/GuideLayout.astro";
+
+const meta = getGuide("/guides/claude-code-usage-limits-explained");
+
+const faqs = [
+  {
+    question: "How long is the Claude Code session window?",
+    answer:
+      "Roughly five hours, and it rolls rather than resetting on a fixed clock. Usage from about five hours ago frees up gradually as time passes, so heavy consumption early in a session keeps weighing on you until that block ages out.",
+  },
+  {
+    question: "What is the difference between the weekly and the model-scoped weekly limit?",
+    answer:
+      "The weekly all-models window covers everything you do across the week. A model-scoped weekly window covers one model family in particular, so a session can be blocked on the Opus window while the all-models window still has room. Dropping to a cheaper model can keep you working when only the scoped window is exhausted.",
+  },
+  {
+    question: "Can I reset a Claude Code limit early?",
+    answer:
+      "No. The windows are enforced by Anthropic and cannot be reset on request. The supported ways to get more capacity are Anthropic's documented extra-usage options and higher plan tiers.",
+  },
+  {
+    question: "Does checking usage consume any of my limit?",
+    answer:
+      "Running /usage does not submit a coding prompt or a model turn, so it does not meaningfully consume your allowance. The same is true of reading usage through the provider's usage services.",
+  },
+  {
+    question: "Why does my remaining percentage differ between tools?",
+    answer:
+      "Different tools read from different sources and at different times. Anthropic's own display is authoritative. A local reading has an age, and a value from an inactive or expired login is a last-known figure rather than a live one.",
+  },
+];
+---
+
+<GuideLayout
+  meta={meta}
+  introduction="Claude Code reports several usage windows at once, and they do not behave the same way. Knowing which one is about to stop you is the difference between planning a long task and losing one halfway through."
+  faqs={faqs}
+  ctaHeading="Know which window is about to run out."
+>
+  <Fragment slot="nav">
+    <a href="#windows">The windows</a>
+    <a href="#rolling">How the session window rolls</a>
+    <a href="#scoped">Model-scoped windows</a>
+    <a href="#reading">Reading them accurately</a>
+    <a href="#planning">Planning around them</a>
+    <a href="#questions">Questions</a>
+    <a href="#related">Related guides</a>
+  </Fragment>
+
+  <AnswerBlock
+    facts={[
+      "Session window: approximately 5 hours (300 minutes), rolling rather than fixed-reset.",
+      "Weekly all-models window: 7 days (10,080 minutes).",
+      "Model-scoped weekly windows: 7 days each, tracked separately per model family.",
+      "The tightest window governs. Capacity in the others does not help once one is exhausted.",
+      "/usage inside Claude Code is the authoritative view of your current limits.",
+    ]}
+  >
+    <p>
+      Claude Code tracks three kinds of usage window at once: a rolling window of about five hours,
+      a weekly window covering all models, and weekly windows scoped to individual model families.
+      Whichever of these is closest to empty is the one that will interrupt you, so remaining
+      capacity is only meaningful per window. Run <code>/usage</code> inside Claude Code to see all
+      of them.
+    </p>
+  </AnswerBlock>
+
+  <section id="windows">
+    <h2>What windows does Claude Code report?</h2>
+    <p>
+      Anthropic reports usage as a set of windows rather than a single balance. The ones you will
+      see are:
+    </p>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">Window</th>
+            <th scope="col">Length</th>
+            <th scope="col">Covers</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">Session</th>
+            <td>~5 hours (300 minutes)</td>
+            <td>Short-term consumption, rolling</td>
+          </tr>
+          <tr>
+            <th scope="row">Weekly, all models</th>
+            <td>7 days (10,080 minutes)</td>
+            <td>Everything you run in the week</td>
+          </tr>
+          <tr>
+            <th scope="row">Weekly, model-scoped</th>
+            <td>7 days each</td>
+            <td>One model family, tracked on its own</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      Exactly which windows appear depends on your plan and on what Anthropic currently reports.
+      Some accounts see a scoped window for a heavier model alongside the all-models one; others do
+      not. Treat the set you actually see in <code>/usage</code> as the real one, not a list from an
+      article.
+    </p>
+  </section>
+
+  <section id="rolling">
+    <h2>Why the session window does not reset all at once</h2>
+    <p>
+      This is the part that surprises people. The session window is rolling, not a bucket that
+      empties on the hour. Consumption from roughly five hours ago ages out gradually, which means
+      capacity returns in a trickle rather than all at once.
+    </p>
+    <p>
+      The practical consequence: a heavy burst at the start of a working session keeps pressing on
+      your remaining capacity for the next five hours. If you exhaust the window at 10am, you do not
+      get everything back at 3pm — you get back whatever you spent between 10am and 10:15am at
+      around 3:15pm, and so on. Planning a long task right after a heavy burst rarely works out.
+    </p>
+  </section>
+
+  <section id="scoped">
+    <h2>Model-scoped windows change what you should do</h2>
+    <p>
+      When a scoped weekly window is the constraint, you are not out of capacity — you are out of
+      capacity <em>for that model</em>. The all-models weekly window may still have plenty left.
+    </p>
+    <p>
+      That distinction matters because it opens an option the other windows do not: switching to a
+      lighter model can let you keep working immediately, with no waiting and no account change.
+      Before assuming you are blocked for the week, check which window is actually at zero.
+    </p>
+  </section>
+
+  <section id="reading">
+    <h2>Reading the numbers accurately</h2>
+    <p>
+      <code>/usage</code> inside Claude Code is the authoritative view, and
+      <code>claude.ai/settings/usage</code> shows the same picture in the browser. Anything else,
+      including this project, is a convenience layer over those sources.
+    </p>
+    <p>Two things make a local reading misleading if you are not careful about them:</p>
+    <ul>
+      <li>
+        <strong>Age.</strong> A number fetched twenty minutes ago is not a live number. Limit
+        Lifeboat marks a reading stale after 30 minutes and shows its age rather than presenting it
+        as current.
+      </li>
+      <li>
+        <strong>Which account it belongs to.</strong> An inactive saved account can only show its
+        last successful reading. If that account's login has expired, the figure could be hours old.
+      </li>
+    </ul>
+    <p>
+      Pace is the other missing piece. Forty percent remaining means something different depending
+      on whether the last hour consumed two points or twenty. Local history makes that visible; a
+      single percentage does not. The
+      <a href="/guides/claude-code-codex-usage-monitor-mac">usage monitoring guide</a> covers what to
+      watch.
+    </p>
+  </section>
+
+  <section id="planning">
+    <h2>Planning work around the windows</h2>
+    <ul>
+      <li>
+        <strong>Check before a long task, not during it.</strong> The cost of a task is not knowable
+        in advance, but the room you have is.
+      </li>
+      <li>
+        <strong>Read the reset time, not just the percentage.</strong> Twenty percent with a reset in
+        twenty minutes is a completely different situation from twenty percent with four hours to go.
+      </li>
+      <li>
+        <strong>Identify which window is tightest.</strong> If it is a model-scoped one, changing
+        model is the cheapest fix available.
+      </li>
+      <li>
+        <strong>Expect the weekly window to bite late in the week.</strong> Session limits interrupt
+        an afternoon; weekly limits interrupt a Thursday.
+      </li>
+    </ul>
+    <p>
+      If you have already hit a limit,
+      <a href="/guides/claude-code-limit-reached">the options at that point</a> are a short list, and
+      waiting is not always the best one. For the equivalent picture on the other provider, see
+      <a href="/guides/codex-cli-rate-limits-explained">Codex CLI rate limits explained</a>.
+    </p>
+  </section>
+</GuideLayout>

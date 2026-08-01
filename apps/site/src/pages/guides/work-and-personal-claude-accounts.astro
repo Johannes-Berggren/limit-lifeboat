@@ -1,0 +1,190 @@
+---
+import AnswerBlock from "../../components/AnswerBlock.astro";
+import { getGuide } from "../../data/pages";
+import GuideLayout from "../../layouts/GuideLayout.astro";
+
+const meta = getGuide("/guides/work-and-personal-claude-accounts");
+
+const faqs = [
+  {
+    question: "Can I use my work Claude account for personal projects?",
+    answer:
+      "That is your employer's decision, not a question the provider's terms settle. A work or enterprise account is usually governed by organization retention, access, and acceptable-use policies that do not apply to a personal account. Ask before assuming, particularly where retention or code confidentiality is involved.",
+  },
+  {
+    question: "How do I check which Claude Code account is active?",
+    answer:
+      "Run /status inside Claude Code. Do not infer it from the browser: claude.ai sessions and Claude Code CLI authentication are separate, so the account signed in on the web tells you nothing about which identity the terminal is using.",
+  },
+  {
+    question: "Does switching the CLI account change my browser session?",
+    answer:
+      "No. Claude Code, Claude Desktop, and claude.ai in the browser hold independent sessions, and the same is true of Codex CLI, ChatGPT Desktop, and chatgpt.com. Each surface has to be checked on its own.",
+  },
+  {
+    question: "Will my employer see what I do on my personal account?",
+    answer:
+      "Not through the account itself; the accounts are separate and the provider enforces that separation. What your employer can see on their own account is governed by their administrative controls and retention settings, which is exactly why keeping company work on the company account matters.",
+  },
+  {
+    question: "Can I run work and personal accounts at the same time?",
+    answer:
+      "Not through Limit Lifeboat, which switches the single global CLI login one account at a time. Tools that create isolated per-profile configuration directories, such as claude-swap and clauth, support genuinely parallel sessions.",
+  },
+];
+---
+
+<GuideLayout
+  meta={meta}
+  introduction="The common multi-account case is not exotic: an employer bought you a seat, and you also have your own. The risk is not running out of quota. It is spending an afternoon on the wrong account and finding out afterwards."
+  faqs={faqs}
+  ctaHeading="Make the account boundary visible."
+>
+  <Fragment slot="nav">
+    <a href="#why">Why this gets messy</a>
+    <a href="#surfaces">Every surface is separate</a>
+    <a href="#habits">Habits that hold up</a>
+    <a href="#policy">Your employer's policy</a>
+    <a href="#setup">A setup that makes it visible</a>
+    <a href="#questions">Questions</a>
+    <a href="#related">Related guides</a>
+  </Fragment>
+
+  <AnswerBlock
+    facts={[
+      "Claude Code CLI, Claude Desktop, and claude.ai in the browser hold independent sessions.",
+      "The same separation applies to Codex CLI, ChatGPT Desktop, and chatgpt.com.",
+      "/status in Claude Code and codex login status in Codex CLI report the active CLI identity.",
+      "An employer-provisioned account carries that organization's retention, access, and acceptable-use policies.",
+      "Switching a CLI login does not move conversations, transfer files, or combine billing.",
+    ]}
+  >
+    <p>
+      Keeping an employer-provisioned account separate from a personal one comes down to one habit:
+      verify the active CLI identity before starting work that belongs to a particular account,
+      rather than inferring it from whichever account is signed in on the web. The terminal and the
+      browser hold independent sessions, so they can disagree, and nothing warns you when they do.
+    </p>
+  </AnswerBlock>
+
+  <section id="why">
+    <h2>Why this gets messy in practice</h2>
+    <p>
+      Neither vendor has shipped account switching for their command-line tools. OpenAI supports it
+      for ChatGPT on the web, and explicitly notes that it is not currently supported in Codex
+      desktop. Anthropic has an open request for Claude Code that has been running since January
+      2026 with several hundred upvotes.
+    </p>
+    <p>
+      So the CLI holds exactly one login, and changing it means going through a browser flow again.
+      Because that is tedious, people avoid it, and then work drifts onto whichever account happened
+      to be signed in. The failure is quiet: nothing tells you the last two hours were billed to
+      your employer's seat, or that client code went through a personal subscription.
+    </p>
+  </section>
+
+  <section id="surfaces">
+    <h2>Every surface is separate, and none of them tell you</h2>
+    <p>There are more independent sessions here than people expect:</p>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">Surface</th>
+            <th scope="col">How to check the active account</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">Claude Code CLI</th>
+            <td><code>/status</code> inside Claude Code</td>
+          </tr>
+          <tr>
+            <th scope="row">Codex CLI</th>
+            <td><code>codex login status</code> in Terminal</td>
+          </tr>
+          <tr>
+            <th scope="row">claude.ai / chatgpt.com</th>
+            <td>The account menu in the browser</td>
+          </tr>
+          <tr>
+            <th scope="row">Claude Desktop / ChatGPT Desktop</th>
+            <td>The app's own account settings</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      Changing any one of these changes only that one. Codex CLI is a partial exception in the other
+      direction: OpenAI's documentation says its cached authentication is shared with the Codex IDE
+      extension, so those two move together.
+    </p>
+  </section>
+
+  <section id="habits">
+    <h2>Habits that hold up</h2>
+    <ul>
+      <li>
+        <strong>Check identity at the start of a work block, not at the end.</strong> One
+        <code>/status</code> before opening a company repository costs two seconds.
+      </li>
+      <li>
+        <strong>Name accounts by role, not by email.</strong> "Work" and "Personal" are legible at a
+        glance in a menu; two similar addresses are not.
+      </li>
+      <li>
+        <strong>Keep the boundary aligned with the work, not with the quota.</strong> Moving company
+        work onto a personal account because the company account ran out is the failure mode this
+        whole page exists to prevent.
+      </li>
+      <li>
+        <strong>Re-check after anything that touches credentials.</strong> A reinstall, a machine
+        restore, or a colleague's pairing session can leave a different identity in place.
+      </li>
+    </ul>
+  </section>
+
+  <section id="policy">
+    <h2>Your employer's policy governs their account</h2>
+    <p>
+      Provider terms and workplace policy are two different constraints, and the workplace one is
+      usually stricter. An organization-managed account typically carries retention settings,
+      administrative visibility, access controls, and acceptable-use rules that a personal
+      subscription does not.
+    </p>
+    <p>
+      Two questions are worth asking explicitly rather than assuming: may this account be used for
+      anything outside company work, and may company code go through an account the company does not
+      control? The second one matters most. Running client or employer code through a personal
+      subscription can breach a confidentiality obligation even where no provider term is involved.
+    </p>
+    <p>
+      On the provider side,
+      <a href="/guides/multiple-claude-accounts-allowed">what the terms actually prohibit</a> covers
+      the separate question of whether holding several accounts is itself a problem.
+    </p>
+  </section>
+
+  <section id="setup">
+    <h2>A setup that makes the boundary visible</h2>
+    <p>
+      The goal is that the active identity is something you see rather than something you remember.
+      Limit Lifeboat keeps every saved Claude Code and Codex CLI account in the menu bar with its
+      own label, its remaining usage, and a clear indicator of which one the CLI is actually
+      authenticated as.
+    </p>
+    <p>
+      A switch changes only the selected provider's authentication fields. Settings, MCP server
+      definitions, hooks, permissions, instructions, and local history are untouched, and the app
+      verifies which account it landed on before reporting success. It switches one global login at
+      a time and does not run accounts in parallel — if simultaneous sessions are what you need, the
+      <a href="/guides/claude-code-account-switchers-compared">switcher comparison</a> covers the
+      tools built for that.
+    </p>
+    <p>
+      Setup walkthroughs live in the
+      <a href="/guides/switch-claude-code-accounts-mac">Claude Code guide</a> and the
+      <a href="/guides/manage-multiple-codex-accounts-mac">Codex CLI guide</a>.
+    </p>
+  </section>
+</GuideLayout>

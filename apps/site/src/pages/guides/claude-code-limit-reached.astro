@@ -1,0 +1,205 @@
+---
+import AnswerBlock from "../../components/AnswerBlock.astro";
+import { getGuide } from "../../data/pages";
+import GuideLayout from "../../layouts/GuideLayout.astro";
+
+const meta = getGuide("/guides/claude-code-limit-reached");
+
+const faqs = [
+  {
+    question: "Can I reset the Claude Code weekly limit early?",
+    answer:
+      "No. The weekly window is enforced by Anthropic and cannot be reset on request. The supported routes to more capacity are Anthropic's documented extra-usage options and higher plan tiers.",
+  },
+  {
+    question: "How long until my Claude Code limit resets?",
+    answer:
+      "Run /usage inside Claude Code; it reports the reset time for each window. The session window rolls, so capacity returns gradually rather than all at once, while the weekly window has a definite reset point.",
+  },
+  {
+    question: "Will switching to another account give me more total capacity?",
+    answer:
+      "It gives you access to that account's own separate allowance, which the provider tracks and enforces independently. It does not add capacity to the exhausted account, merge the two, or change either reset time. Use only accounts you are authorized to use.",
+  },
+  {
+    question: "Does dropping to a cheaper model help?",
+    answer:
+      "It does when a model-scoped weekly window is what ran out, because the all-models window may still have room. It does not help if the session window or the all-models weekly window is the constraint.",
+  },
+  {
+    question: "Is it worth switching to API billing when I hit a limit?",
+    answer:
+      "It is the reliable escape hatch for urgent work, since API access is billed per token rather than capped by a subscription window. It is also the most expensive option for sustained use, so it suits finishing something time-critical rather than becoming the default.",
+  },
+];
+---
+
+<GuideLayout
+  meta={meta}
+  introduction="Claude Code has stopped and told you the limit is reached. There are five real options at that point, and waiting is only sometimes the best one. Which applies depends on which window ran out."
+  faqs={faqs}
+  ctaHeading="Turn a hard stop into a decision."
+>
+  <Fragment slot="nav">
+    <a href="#first">Find out which window</a>
+    <a href="#options">The five options</a>
+    <a href="#choosing">Choosing between them</a>
+    <a href="#prevent">Not being caught again</a>
+    <a href="#questions">Questions</a>
+    <a href="#related">Related guides</a>
+  </Fragment>
+
+  <AnswerBlock
+    facts={[
+      "Run /usage first: the right response depends entirely on which window is exhausted.",
+      "A model-scoped weekly window can be worked around by changing model. The session and all-models windows cannot.",
+      "The session window rolls, so capacity returns gradually rather than at a single reset point.",
+      "Anthropic's extra usage and higher plan tiers are the supported routes to more capacity on the same account.",
+      "Limits cannot be reset early on request.",
+    ]}
+  >
+    <p>
+      When Claude Code reports the usage limit reached, run <code>/usage</code> before doing anything
+      else, because the fix depends on which window is empty. If a model-scoped weekly window ran
+      out, switching to a lighter model gets you working immediately. If the session window ran out,
+      capacity returns gradually over the next few hours. If the weekly all-models window ran out,
+      the options are extra usage, a higher tier, API billing, or waiting.
+    </p>
+  </AnswerBlock>
+
+  <section id="first">
+    <h2>First, find out which window ran out</h2>
+    <p>
+      "Limit reached" is not one state. Claude Code tracks a rolling session window of about five
+      hours, a weekly window covering all models, and weekly windows scoped to individual model
+      families. Any of them can stop you, and each has a different cheapest fix.
+    </p>
+    <pre><code>/usage</code></pre>
+    <p>
+      That reports every window along with its reset time. The
+      <a href="/guides/claude-code-usage-limits-explained">usage limits reference</a> explains what
+      each one measures. Skipping this step is how people spend four hours waiting for a session
+      window when they could have changed model and carried on.
+    </p>
+  </section>
+
+  <section id="options">
+    <h2>The five options</h2>
+
+    <h3>1. Wait for the window to reset</h3>
+    <p>
+      Free, and correct more often than the internet suggests. The important nuance is that the
+      session window rolls: capacity from roughly five hours ago frees up gradually, so you do not
+      have to wait for a single reset moment before doing anything at all. A weekly window is
+      different — that one has a definite reset point and waiting can mean days.
+    </p>
+
+    <h3>2. Change model</h3>
+    <p>
+      Only relevant when a model-scoped weekly window is the constraint, but when it is, this is the
+      fastest fix available. The all-models weekly window frequently still has room while a heavier
+      model's own window is exhausted. Costs nothing, takes seconds.
+    </p>
+
+    <h3>3. Buy extra usage or move up a tier</h3>
+    <p>
+      Anthropic documents extra-usage options and higher plan tiers, and these are the sanctioned
+      routes to more capacity on the account you are already using. If you hit the weekly window
+      most weeks, this is the answer rather than a workaround — you are simply on too small a plan
+      for your workload.
+    </p>
+
+    <h3>4. Switch to API billing</h3>
+    <p>
+      API access is billed per token instead of being capped by a subscription window, so it will
+      not stop you. It is also the most expensive option for sustained work. Treat it as the escape
+      hatch for something genuinely time-critical rather than as a default.
+    </p>
+
+    <h3>5. Move to another account you are authorized to use</h3>
+    <p>
+      If you already hold a second account — most commonly an employer-provisioned one alongside a
+      personal one — it has its own separate allowance. Switching the CLI to it does not add capacity
+      to the exhausted account, merge the two, or change either reset time; each account's limit
+      stays tracked and enforced by Anthropic independently.
+    </p>
+    <p>
+      Two conditions apply before this is a real option. Use only accounts you are authorized to
+      use, and follow whatever policy your employer sets for the account they gave you.
+      <a href="/guides/multiple-claude-accounts-allowed">What the terms actually prohibit</a>
+      covers where the line sits. Then, mechanically: switching the CLI login should change
+      authentication and nothing else, or you will trade a usage problem for a configuration one.
+    </p>
+  </section>
+
+  <section id="choosing">
+    <h2>Choosing between them</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">Situation</th>
+            <th scope="col">Best first move</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">Model-scoped window empty, others fine</th>
+            <td>Change model. Immediate and free.</td>
+          </tr>
+          <tr>
+            <th scope="row">Session window empty, nothing urgent</th>
+            <td>Wait. Capacity returns gradually over the next few hours.</td>
+          </tr>
+          <tr>
+            <th scope="row">Session window empty, something urgent</th>
+            <td>Another authorized account, or API billing.</td>
+          </tr>
+          <tr>
+            <th scope="row">Weekly window empty, first time this month</th>
+            <td>Extra usage, or wait for the reset.</td>
+          </tr>
+          <tr>
+            <th scope="row">Weekly window empty most weeks</th>
+            <td>Move up a plan tier. The workload has outgrown the plan.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="prevent">
+    <h2>Not being caught again</h2>
+    <p>
+      Hitting a limit mid-task is expensive because of where it happens, not because of the wait.
+      Three habits make it rare:
+    </p>
+    <ul>
+      <li>
+        <strong>Check before a long task.</strong> You cannot know what a task will cost, but you can
+        know how much room you have before starting it.
+      </li>
+      <li>
+        <strong>Watch pace, not just percentage.</strong> Forty percent remaining means something
+        very different if the last hour consumed fifteen points. Local history makes the trend
+        visible.
+      </li>
+      <li>
+        <strong>Get warned early.</strong> A notification at 80% consumed is worth more than an
+        error at 100%.
+      </li>
+    </ul>
+    <p>
+      Limit Lifeboat covers all three from the menu bar: every saved account's tightest window,
+      how old each reading is, recent pace, and optional warnings as an account nears its limit or
+      becomes available again. It can also switch accounts automatically, though that is off by
+      default — when enabled it triggers at 5% remaining on the tightest window, follows your saved
+      priority order, and requires the target to have at least 30% headroom and to be at least 20
+      points better than the account you are leaving.
+    </p>
+    <p>
+      More on watching the numbers in the
+      <a href="/guides/claude-code-codex-usage-monitor-mac">usage monitoring guide</a>.
+    </p>
+  </section>
+</GuideLayout>

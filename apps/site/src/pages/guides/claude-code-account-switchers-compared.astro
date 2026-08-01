@@ -1,0 +1,276 @@
+---
+import AnswerBlock from "../../components/AnswerBlock.astro";
+import { getGuide } from "../../data/pages";
+import GuideLayout from "../../layouts/GuideLayout.astro";
+
+const meta = getGuide("/guides/claude-code-account-switchers-compared");
+
+// Every claim in this table was checked against the project's own repository and README
+// on the verification date below. Re-check before changing this page; these projects
+// move, and a stale comparison is worse than none.
+const verifiedOn = "1 August 2026";
+
+const tools = [
+  {
+    name: "Limit Lifeboat",
+    href: "https://github.com/Johannes-Berggren/limit-lifeboat",
+    form: "macOS menu-bar app",
+    providers: "Claude Code and Codex CLI",
+    licence: "MIT",
+    signed: "Signed and notarized",
+    note: "This site's project, so read the rest with that in mind.",
+  },
+  {
+    name: "claude-swap",
+    href: "https://github.com/realiti4/claude-swap",
+    form: "Python CLI with a live dashboard",
+    providers: "Claude Code only",
+    licence: "MIT",
+    signed: "Not applicable (CLI)",
+    note: "The largest of the switchers by a wide margin, and actively developed.",
+  },
+  {
+    name: "clauth",
+    href: "https://github.com/uwuclxdy/clauth",
+    form: "Rust CLI, TUI, and MCP plugin",
+    providers: "Claude Code only",
+    licence: "MIT",
+    signed: "Not applicable (CLI)",
+    note: "The only one here that runs on Linux and Windows as well as macOS.",
+  },
+  {
+    name: "Claude/Codex Account Switcher",
+    href: "https://github.com/Symbioose/claude-account-switcher",
+    form: "macOS menu-bar app",
+    providers: "Claude Code and Codex CLI",
+    licence: "No licence file",
+    signed: "Unsigned",
+    note: "Its README tells you to use Open Anyway in System Settings on first launch.",
+  },
+  {
+    name: "cc-account-switcher",
+    href: "https://github.com/ming86/cc-account-switcher",
+    form: "Shell script",
+    providers: "Claude Code only",
+    licence: "MIT",
+    signed: "Not applicable (script)",
+    note: "Archived by its author and no longer maintained.",
+  },
+] as const;
+
+const faqs = [
+  {
+    question: "Which Claude Code account switcher has the most users?",
+    answer:
+      "claude-swap, by a wide margin among the dedicated switchers. As of 1 August 2026 it has roughly 1,465 GitHub stars against 449 for the archived cc-account-switcher, 46 for Claude/Codex Account Switcher, and 32 for clauth. Star counts measure attention rather than quality, and the usage monitors are larger still: CodexBar alone has over 19,000.",
+  },
+  {
+    question: "What is the difference between a usage monitor and an account switcher?",
+    answer:
+      "A usage monitor reads and displays your remaining limits; it never writes credentials. A switcher changes which account your CLI is authenticated as, which means writing to a credential store. Monitors are the safer category by construction because they only read. Several tools do both.",
+  },
+  {
+    question: "Is it safe to let a tool write my Claude Code credentials?",
+    answer:
+      "It depends entirely on what else that tool writes and whether it can undo a failed write. Ask three questions of any switcher: which exact files and keys does it modify, does it verify the account it landed on afterwards, and what happens if it is interrupted halfway. A tool that swaps whole configuration directories can take your MCP servers and settings with it.",
+  },
+  {
+    question: "Do any of these tools let me run two Claude Code accounts at the same time?",
+    answer:
+      "claude-swap and clauth both support parallel sessions using isolated configuration directories. Limit Lifeboat does not: it switches the single global CLI login one account at a time. If simultaneous accounts are the requirement, the isolated-config approach is the one that fits.",
+  },
+  {
+    question: "Are these tools affiliated with Anthropic or OpenAI?",
+    answer:
+      "No. All of them are independent community projects. None is endorsed by, affiliated with, or supported by Anthropic or OpenAI.",
+  },
+];
+---
+
+<GuideLayout
+  meta={meta}
+  introduction="Several projects now switch Claude Code logins on macOS, and they make genuinely different trade-offs. This compares what each one writes to disk, what it does when a switch fails, and which platforms and providers it covers."
+  faqs={faqs}
+  ctaHeading="Switch scope matters more than switch speed."
+>
+  <Fragment slot="nav">
+    <a href="#lineup">The lineup</a>
+    <a href="#what-matters">What actually matters</a>
+    <a href="#write-scope">Write scope</a>
+    <a href="#monitors">Monitors versus switchers</a>
+    <a href="#choosing">How to choose</a>
+    <a href="#questions">Questions</a>
+    <a href="#related">Related guides</a>
+  </Fragment>
+
+  <AnswerBlock
+    facts={[
+      "claude-swap is the largest dedicated switcher at roughly 1,465 GitHub stars; clauth is the only one covering Linux and Windows.",
+      "Only Limit Lifeboat and Claude/Codex Account Switcher cover Codex CLI as well as Claude Code.",
+      "cc-account-switcher is archived and no longer maintained.",
+      "Usage monitors such as CodexBar are a different category: they read limits and never write credentials.",
+      "All figures verified 1 August 2026 against each project's own repository.",
+    ]}
+  >
+    <p>
+      There is no single best Claude Code account switcher, because the projects optimise for
+      different things. claude-swap and clauth are terminal-first and support running several
+      accounts in parallel through isolated configuration directories. Limit Lifeboat and
+      Claude/Codex Account Switcher are macOS menu-bar apps that switch one global login at a time
+      and also cover Codex CLI. Pick on write scope and recovery behaviour, not on feature count.
+    </p>
+  </AnswerBlock>
+
+  <section id="lineup">
+    <h2>The lineup</h2>
+    <p>
+      These are the dedicated Claude Code account switchers with meaningful adoption, checked
+      against their own repositories on {verifiedOn}. This is not a ranking; the order is by
+      current popularity within each form factor.
+    </p>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">Tool</th>
+            <th scope="col">Form</th>
+            <th scope="col">Providers</th>
+            <th scope="col">Licence</th>
+            <th scope="col">macOS signing</th>
+          </tr>
+        </thead>
+        <tbody>
+          {
+            tools.map((tool) => (
+              <tr>
+                <th scope="row">
+                  <a href={tool.href}>{tool.name}</a>
+                </th>
+                <td>{tool.form}</td>
+                <td>{tool.providers}</td>
+                <td>{tool.licence}</td>
+                <td>{tool.signed}</td>
+              </tr>
+            ))
+          }
+        </tbody>
+      </table>
+    </div>
+    <p class="table-caption">Verified {verifiedOn}. These projects change; check the repository before relying on a row.</p>
+    <ul>
+      {tools.map((tool) => (
+        <li><strong>{tool.name}:</strong> {tool.note}</li>
+      ))}
+    </ul>
+  </section>
+
+  <section id="what-matters">
+    <h2>What actually matters when comparing switchers</h2>
+    <p>
+      Every tool here can move a credential. Moving a credential is the easy part. The differences
+      that cost you an afternoon are these:
+    </p>
+    <ul>
+      <li>
+        <strong>Write scope.</strong> Which files and which keys inside those files does the tool
+        modify? A tool that replaces a whole configuration directory moves your MCP servers, hooks,
+        permissions, and instructions along with the login.
+      </li>
+      <li>
+        <strong>Verification.</strong> After the write, does the tool confirm which account the CLI
+        is actually authenticated as, or does it assume the write succeeded? A credential that moves
+        without the identity moving will happily bill the wrong employer.
+      </li>
+      <li>
+        <strong>Interruption behaviour.</strong> If the process is killed halfway, or another
+        process rewrites the credential at the same moment, what state are you left in?
+      </li>
+      <li>
+        <strong>Concurrency.</strong> Do you need one login at a time, or several accounts running
+        side by side in separate terminals?
+      </li>
+      <li>
+        <strong>Provider coverage.</strong> Claude Code only, or Codex CLI as well?
+      </li>
+      <li>
+        <strong>Maintenance.</strong> When was the last commit, and is the repository archived?
+      </li>
+    </ul>
+  </section>
+
+  <section id="write-scope">
+    <h2>Write scope, tool by tool</h2>
+    <p>
+      This is the axis where the projects genuinely differ, and it is worth reading each one's own
+      description rather than trusting a summary.
+    </p>
+    <p>
+      <strong>clauth</strong> states that a switch “touches only the API keys and the profile's
+      declared <code>env</code> block in <code>settings.json</code>”. That is a deliberately narrow
+      scope, and it is documented plainly — but note that it does write inside
+      <code>settings.json</code>, which matters if you keep that file under version control or share
+      it across machines. It also offers isolated per-profile config directories through
+      <code>CLAUDE_CONFIG_DIR</code> for running accounts in parallel.
+    </p>
+    <p>
+      <strong>claude-swap</strong> saves and restores accounts from Claude Code's own login state and
+      supports parallel sessions alongside a live usage dashboard. It works with the VS Code
+      extension as well as the CLI, which none of the others claim.
+    </p>
+    <p>
+      <strong>Claude/Codex Account Switcher</strong> stores credential backups in the macOS Keychain
+      rather than in plaintext config, and keeps Claude and Codex state separate so switching one
+      does not change the other. Its README notes the app is unsigned, so macOS blocks it on first
+      launch until you approve it in System Settings.
+    </p>
+    <p>
+      <strong>Limit Lifeboat</strong> writes only a fixed list of authentication keys and cannot
+      write outside it: <code>oauth:tokenCache</code> and <code>oauth:tokenCacheV2</code> for Claude,
+      <code>oauthAccount</code> in <code>~/.claude.json</code>, the value of Claude Code's own
+      Keychain item, and <code>auth_mode</code>, <code>tokens</code>, <code>OPENAI_API_KEY</code> and
+      <code>last_refresh</code> in <code>~/.codex/auth.json</code>. It stages rollback material
+      first, verifies the resulting identity, and rolls back if verification fails. If another
+      process rewrites a credential mid-switch, that external change wins and the switch aborts
+      rather than overwriting it. It does not support parallel sessions.
+    </p>
+    <p>
+      The honest summary: if you want several accounts live at once, claude-swap or clauth are the
+      right shape and Limit Lifeboat is not. If you want one login at a time with the narrowest
+      possible write and an explicit recovery path, that is what Limit Lifeboat is built for.
+    </p>
+  </section>
+
+  <section id="monitors">
+    <h2>Usage monitors are a different category</h2>
+    <p>
+      A large group of macOS menu-bar tools show Claude Code and Codex usage without switching
+      anything. CodexBar is the biggest by a long way, with more than 19,000 GitHub stars, and there
+      are many others. Because they only read, they carry none of the credential-writing risk
+      discussed above.
+    </p>
+    <p>
+      If your problem is purely “how much do I have left”, a monitor is the simpler answer and you
+      should use one. The switchers become relevant only once you have more than one account you are
+      authorized to use and you need to move between them. Some tools, including Limit Lifeboat,
+      clauth and claude-swap, do both.
+    </p>
+  </section>
+
+  <section id="choosing">
+    <h2>How to choose</h2>
+    <ul>
+      <li><strong>You only want to see usage.</strong> Use a monitor. CodexBar is the obvious starting point.</li>
+      <li><strong>You want several accounts running at once.</strong> claude-swap or clauth.</li>
+      <li><strong>You are not on macOS.</strong> clauth is the only option here.</li>
+      <li><strong>You use Codex CLI too.</strong> Limit Lifeboat or Claude/Codex Account Switcher.</li>
+      <li><strong>You care most about what a switch writes and what happens when it fails.</strong> That is the axis Limit Lifeboat is designed around.</li>
+    </ul>
+    <p>
+      Whichever you pick, the policy position is the same for all of them: use only accounts you are
+      authorized to use. None of these tools pools, merges, or extends a quota, and none of them
+      changes how a provider enforces its limits. <a href="/guides/multiple-claude-accounts-allowed"
+        >What the terms actually prohibit</a
+      > covers where the real line sits.
+    </p>
+  </section>
+</GuideLayout>

@@ -1,0 +1,95 @@
+---
+import BrandMark from "../components/BrandMark.astro";
+import { product } from "../config";
+import { formatLongDate } from "../data/pages";
+import { latestRelease, releases } from "../data/releases";
+import BaseLayout from "../layouts/BaseLayout.astro";
+
+const title = "Limit Lifeboat Changelog";
+const description = `Release notes for every published version of Limit Lifeboat, from 1.0.0 to ${product.version}. Each version is an immutable, signed, notarized macOS release.`;
+
+const structuredData = [
+  {
+    "@type": "ItemList",
+    "@id": `${product.siteUrl}/changelog#releases`,
+    name: title,
+    numberOfItems: releases.length,
+    itemListOrder: "https://schema.org/ItemListOrderDescending",
+    itemListElement: releases.map((release, index) => ({
+      "@type": "ListItem",
+      position: index + 1,
+      name: `Limit Lifeboat ${release.version}`,
+      url: `${product.links.releases}/tag/v${release.version}`,
+    })),
+  },
+];
+---
+
+<BaseLayout
+  title={title}
+  metaTitle="Changelog"
+  description={description}
+  pageType="article"
+  breadcrumbs={[{ name: "Home", href: "/" }]}
+  datePublished="2026-07-15"
+  dateModified={latestRelease.date}
+  structuredData={structuredData}
+>
+  <section class="page-hero">
+    <div class="container page-hero-inner">
+      <nav class="breadcrumbs" aria-label="Breadcrumb">
+        <a href="/">Home</a><span aria-hidden="true">/</span><span>Changelog</span>
+      </nav>
+      <p class="eyebrow">Release notes</p>
+      <h1>Changelog</h1>
+      <p>
+        Every published version, newest first. Tags, DMGs, checksums, and update feeds are
+        immutable — a fix always ships as a new patch release rather than a replaced artifact.
+      </p>
+      <div class="hero-actions page-actions">
+        <a class="button button--primary button--large" href="/download">Download {product.version}</a>
+        <a class="button button--secondary button--large" href={product.links.releases}
+          >All releases on GitHub</a
+        >
+      </div>
+    </div>
+  </section>
+
+  <section class="section changelog-section">
+    <div class="container changelog-list">
+      {
+        releases.map((release) => (
+          <article class="changelog-entry" id={`v${release.version}`}>
+            <div class="changelog-meta">
+              <h2>
+                <a href={`${product.links.releases}/tag/v${release.version}`}>{release.version}</a>
+              </h2>
+              <time datetime={release.date}>{formatLongDate(release.date)}</time>
+              {release.version === product.version && <span class="changelog-badge">Current</span>}
+            </div>
+            <ul>
+              {release.highlights.map((highlight) => (
+                <li>{highlight}</li>
+              ))}
+            </ul>
+          </article>
+        ))
+      }
+    </div>
+  </section>
+
+  <section class="guide-cta">
+    <div class="container guide-cta-inner">
+      <BrandMark size={56} />
+      <div>
+        <p class="eyebrow">Stay current</p>
+        <h2>Updates never install themselves.</h2>
+        <p>
+          The app checks a signed feed daily by default and waits for you to choose Install and
+          Relaunch. Subscribe to the <a href="/rss.xml">RSS feed</a> to follow releases instead.
+        </p>
+      </div>
+      <a class="button button--primary button--large" href="/download">Download for Mac</a>
+    </div>
+  </section>
+</BaseLayout>

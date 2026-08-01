@@ -1,0 +1,180 @@
+---
+import AnswerBlock from "../../components/AnswerBlock.astro";
+import { getGuide } from "../../data/pages";
+import GuideLayout from "../../layouts/GuideLayout.astro";
+
+const meta = getGuide("/guides/codex-cli-rate-limits-explained");
+
+const faqs = [
+  {
+    question: "What are earned rate-limit resets in Codex?",
+    answer:
+      "They are reset entitlements issued by OpenAI to a ChatGPT-authenticated account and reported through the Codex app server. Redeeming one restores capacity that OpenAI has already granted. They are a provider feature, not a bypass: no third-party tool can create a reset, and redeeming one does not circumvent a limit.",
+  },
+  {
+    question: "Does Codex CLI have a 5-hour limit like Claude Code?",
+    answer:
+      "Codex reports its windows with explicit durations rather than fixed names, and a short rolling window is commonly one of them. Because OpenAI can change what it reports, and recent plans may expose only a weekly window, read the durations your own account returns rather than assuming a fixed pair.",
+  },
+  {
+    question: "How do I check Codex usage from the terminal?",
+    answer:
+      "Run /usage inside the interactive Codex CLI. OpenAI documents it as the command for account token activity and available rate-limit resets. The Codex usage page and the in-product limit banner show the same information.",
+  },
+  {
+    question: "Do Codex limits differ between ChatGPT Plus and Pro?",
+    answer:
+      "Yes. Codex inherits the limits of whichever plan the account is on, and the tiers differ substantially. An API-key login is billed and limited differently again, on metered API pricing rather than a subscription allowance.",
+  },
+  {
+    question: "Does checking Codex usage consume part of the limit?",
+    answer:
+      "No coding prompt or model turn is submitted. A usage reading uses the locally installed Codex app server's rate-limit request, which reports state rather than performing work.",
+  },
+];
+---
+
+<GuideLayout
+  meta={meta}
+  introduction="Codex CLI reports its rate limits differently from Claude Code, and the difference matters if you are trying to plan around them. It also exposes something no other provider does: reset entitlements that OpenAI grants directly."
+  faqs={faqs}
+  ctaHeading="Read Codex capacity before the task, not after."
+>
+  <Fragment slot="nav">
+    <a href="#windows">How Codex reports windows</a>
+    <a href="#resets">Earned rate-limit resets</a>
+    <a href="#plans">Plans and auth methods</a>
+    <a href="#reading">Reading capacity accurately</a>
+    <a href="#questions">Questions</a>
+    <a href="#related">Related guides</a>
+  </Fragment>
+
+  <AnswerBlock
+    facts={[
+      "Codex reports rate limit windows with explicit durations; a short rolling window and a multi-day one are the common pair.",
+      "Recent plans may expose only a weekly primary window rather than a primary and secondary pair.",
+      "Earned rate-limit resets are issued and enforced by OpenAI. No third-party tool can create one.",
+      "Codex CLI authentication is separate from ChatGPT on the web, and is shared with the Codex IDE extension.",
+      "/usage inside Codex CLI reports token activity and available resets.",
+    ]}
+  >
+    <p>
+      Codex CLI limits are tied to the ChatGPT plan the account is on, and OpenAI reports them as
+      windows with explicit durations rather than fixed names — commonly a short rolling window plus
+      a multi-day one. Some accounts see only a weekly window. Run <code>/usage</code> inside Codex
+      CLI to see what your own account actually reports, including any earned rate-limit resets
+      OpenAI has granted it.
+    </p>
+  </AnswerBlock>
+
+  <section id="windows">
+    <h2>How Codex reports its windows</h2>
+    <p>
+      Where Claude Code names its windows, Codex describes them by duration. A tool reading Codex
+      usage sees a window length in minutes and infers the semantics from that: a window of a day or
+      less behaves as a short rolling session window, anything longer behaves as a multi-day one.
+    </p>
+    <p>
+      This is worth knowing because it means any article stating “Codex has a 5-hour and a 7-day
+      limit” is describing one common configuration rather than a rule. OpenAI has shipped plans
+      that expose only a weekly primary window with no short companion. Limit Lifeboat labels each
+      window from the duration OpenAI actually returned for your account, which is why the labels
+      you see may not match a screenshot from somewhere else.
+    </p>
+    <p>
+      The practical instruction is the same either way: read the windows your account reports, and
+      treat the tightest one as the constraint.
+    </p>
+  </section>
+
+  <section id="resets">
+    <h2>Earned rate-limit resets</h2>
+    <p>
+      This is the Codex-specific feature that is least well documented elsewhere. OpenAI can grant a
+      ChatGPT-authenticated account reset entitlements, reported through the locally installed Codex
+      app server. Redeeming one restores capacity that OpenAI has already decided to give you.
+    </p>
+    <p>Three things are worth being precise about, because they are easy to misrepresent:</p>
+    <ul>
+      <li>
+        <strong>They are provider-issued.</strong> No third-party tool creates them, and no tool can
+        turn paid usage credits into resets. A client can only display and redeem what OpenAI
+        reports.
+      </li>
+      <li>
+        <strong>They are not a bypass.</strong> Redeeming a reset is a supported subscription
+        feature. It does not circumvent a rate limit, and it does not change how OpenAI enforces one.
+      </li>
+      <li>
+        <strong>They may not exist for your account.</strong> The capability appears only when your
+        installed Codex version and the backend expose it. If they do not, there is nothing to show.
+      </li>
+    </ul>
+    <p>
+      In Limit Lifeboat, a Codex account displays OpenAI's authoritative available count when the
+      capability is present, along with any titles, descriptions, and expirations OpenAI returned.
+      Manual redemption always asks for confirmation. Automatic redemption is off by default and is
+      enabled per account; when enabled it applies only to the active Codex account and only after a
+      fresh hard <code>rate_limit_reached</code> response — not merely when a limit is close. In that
+      case the reset runs before any automatic account switch is considered.
+    </p>
+    <p>
+      OpenAI documents the capability in its
+      <a href="https://learn.chatgpt.com/docs/app-server#8-earned-rate-limit-resets-chatgpt"
+        >app-server documentation</a
+      >.
+    </p>
+  </section>
+
+  <section id="plans">
+    <h2>Plans, auth methods, and what they change</h2>
+    <p>
+      Codex inherits the limits of whichever authentication path you use, and the paths are not
+      interchangeable:
+    </p>
+    <ul>
+      <li>
+        <strong>ChatGPT subscription login.</strong> Uses your plan's allowance. Pro tiers carry
+        substantially higher ceilings than Plus.
+      </li>
+      <li>
+        <strong>API key login.</strong> Uses metered API billing instead of a subscription
+        allowance, with its own separate limits. Usage windows in the subscription sense do not
+        apply.
+      </li>
+    </ul>
+    <p>
+      OpenAI covers the subscription side in
+      <a href="https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan"
+        >Using Codex with your ChatGPT plan</a
+      >, and the credential stores in
+      <a href="https://developers.openai.com/codex/auth/">Codex authentication</a>. Limit Lifeboat
+      reports subscription usage windows; it does not estimate API spend or translate subscription
+      activity into API prices.
+    </p>
+  </section>
+
+  <section id="reading">
+    <h2>Reading Codex capacity accurately</h2>
+    <p>
+      Run <code>/usage</code> inside the interactive Codex CLI for the authoritative view. OpenAI
+      also directs users approaching a limit to the Codex usage page or the in-product banner. How
+      much a task consumes varies with its size, complexity, the model, and where it runs, so a
+      remaining percentage is a budget rather than a task count.
+    </p>
+    <p>
+      Two accuracy notes if you are reading Codex usage from a menu-bar tool. First, the reading has
+      an age: a saved account that is not currently active can only report its last successful
+      fetch. Second, Codex readings are taken through the locally installed Codex app server, so a
+      Codex install that is missing or out of date changes what can be read at all. Recent local
+      session data serves as a fallback for the active account, but it cannot expose or redeem
+      resets.
+    </p>
+    <p>
+      If you are running more than one Codex account, the
+      <a href="/guides/manage-multiple-codex-accounts-mac">multiple Codex accounts guide</a> covers
+      verifying which login the CLI is really on. For the Claude equivalent of this page, see
+      <a href="/guides/claude-code-usage-limits-explained">Claude Code usage limits explained</a>.
+    </p>
+  </section>
+</GuideLayout>

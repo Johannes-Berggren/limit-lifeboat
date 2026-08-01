@@ -3,6 +3,7 @@ import { Picture } from "astro:assets";
 import appScreenshot from "../assets/app-dashboard.png";
 import BrandMark from "../components/BrandMark.astro";
 import { product } from "../config";
+import { formatLongDate, ogImageFor, relatedGuides, type GuideMeta } from "../data/pages";
 import BaseLayout from "./BaseLayout.astro";
 
 interface FAQ {
@@ -11,100 +12,100 @@ interface FAQ {
 }
 
 interface Props {
-  title: string;
-  description: string;
-  eyebrow: string;
+  /** The registry entry for this guide. Metadata lives in src/data/pages.ts. */
+  meta: GuideMeta;
   introduction: string;
-  path: string;
-  imageAlt: string;
-  readingTime: string;
   faqs: readonly FAQ[];
+  /** Heading for the closing call to action, so the guide set is not boilerplate. */
+  ctaHeading: string;
 }
 
+const { meta, introduction, faqs, ctaHeading } = Astro.props;
 const {
+  path,
   title,
+  metaTitle,
   description,
   eyebrow,
-  introduction,
-  path,
-  imageAlt,
+  datePublished,
+  dateModified,
   readingTime,
-  faqs,
-} = Astro.props;
+  imageAlt,
+  figcaption,
+} = meta;
 
-const datePublished = "2026-07-15";
 const canonicalURL = new URL(path, product.siteUrl).toString();
-const structuredData = {
-  "@context": "https://schema.org",
-  "@graph": [
-    {
-      "@type": "Article",
-      headline: title,
-      description,
-      datePublished,
-      dateModified: datePublished,
-      mainEntityOfPage: canonicalURL,
-      image: new URL("/og-card.png", product.siteUrl).toString(),
-      author: {
-        "@type": "Person",
-        name: "Johannes Berggren",
-        url: "https://github.com/Johannes-Berggren",
+const organizationId = `${product.siteUrl}/#organization`;
+const related = relatedGuides(path);
+
+const structuredData = [
+  {
+    "@type": "TechArticle",
+    "@id": `${canonicalURL}#article`,
+    headline: title,
+    description,
+    datePublished,
+    dateModified,
+    mainEntityOfPage: { "@id": `${canonicalURL}#webpage` },
+    image: new URL(ogImageFor(path), product.siteUrl).toString(),
+    author: {
+      "@type": "Person",
+      name: product.author.name,
+      url: product.author.url,
+    },
+    publisher: { "@id": organizationId },
+    isPartOf: { "@id": `${product.siteUrl}/#website` },
+    inLanguage: "en",
+  },
+  {
+    "@type": "FAQPage",
+    "@id": `${canonicalURL}#faq`,
+    mainEntity: faqs.map((item) => ({
+      "@type": "Question",
+      name: item.question,
+      acceptedAnswer: {
+        "@type": "Answer",
+        text: item.answer,
       },
-      publisher: {
-        "@type": "Organization",
-        name: product.name,
-        url: product.siteUrl,
-      },
-    },
-    {
-      "@type": "BreadcrumbList",
-      itemListElement: [
-        {
-          "@type": "ListItem",
-          position: 1,
-          name: "Limit Lifeboat",
-          item: product.siteUrl,
-        },
-        {
-          "@type": "ListItem",
-          position: 2,
-          name: title,
-          item: canonicalURL,
-        },
-      ],
-    },
-    {
-      "@type": "FAQPage",
-      mainEntity: faqs.map((item) => ({
-        "@type": "Question",
-        name: item.question,
-        acceptedAnswer: {
-          "@type": "Answer",
-          text: item.answer,
-        },
-      })),
-    },
-  ],
-};
+    })),
+  },
+];
 ---
 
 <BaseLayout
   title={title}
+  metaTitle={metaTitle}
   description={description}
   pageType="article"
+  breadcrumbs={[
+    { name: "Home", href: "/" },
+    { name: "Guides", href: "/guides" },
+  ]}
+  datePublished={datePublished}
+  dateModified={dateModified}
   structuredData={structuredData}
 >
   <section class="guide-hero">
     <div class="container guide-hero-grid">
       <div class="guide-hero-copy">
         <nav class="breadcrumbs" aria-label="Breadcrumb">
-          <a href="/">Home</a><span aria-hidden="true">/</span><span>Guide</span>
+          <a href="/">Home</a><span aria-hidden="true">/</span><a href="/guides">Guides</a><span
+            aria-hidden="true">/</span
+          ><span>{title}</span>
         </nav>
         <p class="eyebrow">{eyebrow}</p>
         <h1>{title}</h1>
         <p class="guide-introduction">{introduction}</p>
         <p class="guide-meta">
-          Updated <time datetime={datePublished}>July 15, 2026</time>
+          Published <time datetime={datePublished}>{formatLongDate(datePublished)}</time>
+          {
+            dateModified !== datePublished && (
+              <>
+                <span aria-hidden="true">·</span>
+                Updated <time datetime={dateModified}>{formatLongDate(dateModified)}</time>
+              </>
+            )
+          }
           <span aria-hidden="true">·</span>
           {readingTime}
         </p>
@@ -116,9 +117,10 @@ const structuredData = {
           widths={[480, 720, 960]}
           sizes="(max-width: 900px) 92vw, 480px"
           loading="eager"
+          fetchpriority="high"
           alt={imageAlt}
         />
-        <figcaption>Limit Lifeboat keeps account identity and usage visible in the Mac menu bar.</figcaption>
+        <figcaption>{figcaption}</figcaption>
       </figure>
     </div>
   </section>
@@ -142,6 +144,22 @@ const structuredData = {
           ))}
         </div>
       </section>
+
+      <section id="related">
+        <h2>Related guides</h2>
+        <ul class="related-guides">
+          {related.map((guide) => (
+            <li>
+              <a href={guide.path}>{guide.title}</a>
+              <p>{guide.summary}</p>
+            </li>
+          ))}
+        </ul>
+        <p>
+          Something not covered here? <a href="/support">Support</a> lists the quick checks, and
+          the <a href="/guides">guide index</a> has the rest.
+        </p>
+      </section>
     </article>
   </div>
 
@@ -150,10 +168,10 @@ const structuredData = {
       <BrandMark size={56} />
       <div>
         <p class="eyebrow">Free and open source</p>
-        <h2>Keep every authorized CLI account clear.</h2>
+        <h2>{ctaHeading}</h2>
         <p>Monitor usage and switch deliberately without replacing the rest of your setup.</p>
       </div>
-      <a class="button button--primary button--large" href={product.links.download}>Download for Mac</a>
+      <a class="button button--primary button--large" href="/download">Download for Mac</a>
     </div>
   </section>
 </BaseLayout>

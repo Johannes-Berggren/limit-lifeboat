@@ -1,0 +1,30 @@
+---
+/**
+ * Answer-first summary placed directly under a guide's introduction.
+ *
+ * The slotted paragraph must stand on its own: no pronouns pointing back at earlier
+ * text, no "as described above". It is the unit a search or answer engine lifts, so it
+ * has to make sense quoted in isolation.
+ */
+interface Props {
+  label?: string;
+  /** Concrete, checkable facts. Numbers get cited; vague summaries do not. */
+  facts?: readonly string[];
+}
+
+const { label = "Short answer", facts } = Astro.props;
+---
+
+<aside class="answer-block" aria-label={label}>
+  <p class="answer-block__label">{label}</p>
+  <div class="answer-block__body"><slot /></div>
+  {
+    facts && facts.length > 0 && (
+      <ul class="answer-block__facts">
+        {facts.map((fact) => (
+          <li>{fact}</li>
+        ))}
+      </ul>
+    )
+  }
+</aside>

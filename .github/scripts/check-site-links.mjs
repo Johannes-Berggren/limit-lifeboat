@@ -5,7 +5,32 @@ import path from "node:path";
 import process from "node:process";
 
 const siteRoot = path.resolve(process.argv[2] ?? "apps/site/dist");
-const expectedPages = ["index.html", "privacy/index.html", "support/index.html", "404.html"];
+
+// Every route the site is expected to publish. A page removed by accident fails the build
+// here rather than turning into a 404 in production.
+const expectedPages = [
+  "index.html",
+  "404.html",
+  "privacy/index.html",
+  "support/index.html",
+  "download/index.html",
+  "changelog/index.html",
+  "guides/index.html",
+  "guides/switch-claude-code-accounts-mac/index.html",
+  "guides/manage-multiple-codex-accounts-mac/index.html",
+  "guides/claude-code-codex-usage-monitor-mac/index.html",
+  "guides/claude-code-account-switchers-compared/index.html",
+  "guides/claude-code-usage-limits-explained/index.html",
+  "guides/codex-cli-rate-limits-explained/index.html",
+  "guides/claude-code-limit-reached/index.html",
+  "guides/multiple-claude-accounts-allowed/index.html",
+  "guides/work-and-personal-claude-accounts/index.html",
+  "llms.txt",
+  "llms-full.txt",
+  "rss.xml",
+  "robots.txt",
+  "sitemap-index.xml",
+];
 
 async function filesBelow(directory) {
   const entries = await readdir(directory, { withFileTypes: true });

@@ -1,0 +1,190 @@
+---
+import AnswerBlock from "../../components/AnswerBlock.astro";
+import { getGuide } from "../../data/pages";
+import GuideLayout from "../../layouts/GuideLayout.astro";
+
+const meta = getGuide("/guides/claude-code-login-expired");
+
+const faqs = [
+  {
+    question: "Why does Claude Code keep asking me to log in again?",
+    answer:
+      "The most common cause of repeated logouts is two things refreshing the same login at once. Refresh tokens are single-use: when one process redeems the token, the other's copy becomes invalid, and the failed attempt can invalidate the stored login rather than just failing quietly. Waking a Mac from sleep with several sessions open is a reliable way to trigger it.",
+  },
+  {
+    question: "Does /login fix an expired Claude Code session?",
+    answer:
+      "Usually, and it should be your first attempt. /login renews in place without needing a logout first and resolves most expiry cases. Only escalate to a full logout, terminal restart, and fresh login if renewing in place fails.",
+  },
+  {
+    question: "Will re-logging in lose my settings or MCP servers?",
+    answer:
+      "No. Logging in again replaces authentication only. settings.json, MCP server definitions, hooks, permissions, and local history are unaffected. What does lose configuration is a script that swaps entire configuration directories, which is a different problem.",
+  },
+  {
+    question: "Why does an inactive saved account show an expired login?",
+    answer:
+      "Saved credentials can expire on their own, the Keychain can deny background access, or a provider request can fail. A tool showing that account can only report its last successful reading. Limit Lifeboat shows the age of that reading and offers a Log In action rather than presenting stale data as live.",
+  },
+  {
+    question: "Should I switch to an API key instead?",
+    answer:
+      "Setting ANTHROPIC_API_KEY bypasses the OAuth flow entirely and will stop the logout loop, but it moves you onto metered API billing rather than your subscription. It is a reasonable emergency measure, not a fix for the underlying cause.",
+  },
+];
+---
+
+<GuideLayout
+  meta={meta}
+  introduction="Claude Code asking for a login once is routine. Asking repeatedly, across every open terminal at the same moment, is a specific failure with a specific cause — and a recovery order that works better than guessing."
+  faqs={faqs}
+  ctaHeading="Keep an expired login actionable."
+>
+  <Fragment slot="nav">
+    <a href="#cause">The usual cause</a>
+    <a href="#recovery">Recovery, in order</a>
+    <a href="#avoid">Avoiding a repeat</a>
+    <a href="#inactive">Expired saved accounts</a>
+    <a href="#questions">Questions</a>
+    <a href="#related">Related guides</a>
+  </Fragment>
+
+  <AnswerBlock
+    facts={[
+      "Refresh tokens are single-use: two processes refreshing the same login race, and the loser's copy is dead.",
+      "Try /login first — it renews in place and does not require a logout.",
+      "If that fails: /logout, close the terminal completely, reopen, and log in again.",
+      "Re-authenticating never touches settings.json, MCP servers, hooks, or local history.",
+      "Waking a Mac from sleep with several Claude Code sessions open is a common trigger.",
+    ]}
+  >
+    <p>
+      Repeated Claude Code logouts are usually a token-rotation race rather than a genuinely expired
+      subscription. Refresh tokens are single-use, so when two sessions try to renew the same login
+      simultaneously, one succeeds and the other's token is already spent — and that failure can
+      invalidate the saved login for everything. Start recovery with <code>/login</code>, which
+      renews in place, before trying anything more drastic.
+    </p>
+  </AnswerBlock>
+
+  <section id="cause">
+    <h2>What actually causes the logout loop</h2>
+    <p>
+      OAuth refresh tokens are single-use by design: redeeming one issues a new access token and a
+      new refresh token, and invalidates the old one. That is a security property, not a bug. It
+      becomes a problem when two things hold a copy of the same refresh token and both try to use it.
+    </p>
+    <p>
+      One wins and rotates the token. The other presents a token that has already been spent, and the
+      provider rejects it. If the losing process treats that rejection as "this login is dead" rather
+      than "someone else already rotated it", the stored credential gets cleared — and now every
+      session on the machine is logged out at once, not just the one that lost the race.
+    </p>
+    <p>That is why the symptom has such a distinctive shape:</p>
+    <ul>
+      <li>Several terminals demand a login at the same moment, not one at a time.</li>
+      <li>It often happens right after waking the Mac from sleep, when everything reconnects together.</li>
+      <li>You logged in only recently, so a genuine expiry does not explain it.</li>
+      <li>It recurs, because the same conditions reproduce it.</li>
+    </ul>
+    <p>
+      Parallel sessions, a background tool that also refreshes credentials, and the same account
+      signed in on more than one Mac all increase the odds. This is a real enough failure mode that
+      Limit Lifeboat shipped a fix for its own contribution to it in
+      <a href="/changelog#v1.1.1">version 1.1.1</a>, and reduced cross-machine expiry in 1.0.4.
+    </p>
+  </section>
+
+  <section id="recovery">
+    <h2>Recovery, in order</h2>
+    <p>Work down this list and stop at the first step that works. Each is more disruptive than the last.</p>
+    <ol>
+      <li>
+        <strong>Run <code>/login</code> inside Claude Code.</strong> It renews in place, without a
+        logout first, and resolves most cases. Try this before anything else.
+      </li>
+      <li>
+        <strong>Full cycle.</strong> Run <code>/logout</code>, close the terminal window completely
+        rather than just exiting Claude Code, open a new one, start <code>claude</code>, and log in.
+        Closing the terminal matters — it clears first-run state that a plain restart keeps.
+      </li>
+      <li>
+        <strong>Close every other session first.</strong> If the loop keeps returning, shut down all
+        other Claude Code sessions and any background tool that reads credentials, then log in once
+        with nothing else running. This removes the race rather than working around it.
+      </li>
+      <li>
+        <strong>Clear the stored credential.</strong> Remove Claude Code's saved credential and
+        authenticate from a clean state. On macOS the login lives in the Keychain item
+        <code>Claude Code-credentials</code> rather than in a plain file.
+      </li>
+      <li>
+        <strong>Use an API key temporarily.</strong> Setting <code>ANTHROPIC_API_KEY</code> bypasses
+        OAuth completely. It moves you onto metered API billing, so treat it as a way to finish
+        something urgent rather than a resolution.
+      </li>
+    </ol>
+    <p>
+      Two things worth knowing while you do this. Re-authenticating replaces authentication only —
+      your <code>settings.json</code>, MCP servers, hooks, permissions and history are not involved.
+      And keep Claude Code itself up to date: token-refresh handling has been improved more than
+      once, and an old version can reproduce a problem that has already been fixed upstream.
+    </p>
+  </section>
+
+  <section id="avoid">
+    <h2>Avoiding a repeat</h2>
+    <ul>
+      <li>
+        <strong>Be deliberate about parallel sessions.</strong> Several Claude Code instances on one
+        account is the single biggest contributor. If you need genuine parallelism, tools that give
+        each profile an isolated configuration directory avoid sharing one credential between them.
+      </li>
+      <li>
+        <strong>Audit what else touches your credentials.</strong> Any background tool that refreshes
+        tokens is a participant in the race. It should back off when another writer has already
+        rotated, rather than overwriting.
+      </li>
+      <li>
+        <strong>Watch the same account across machines.</strong> Two Macs signed into one account
+        will rotate the same token from different places.
+      </li>
+      <li>
+        <strong>Keep Claude Code current.</strong> Refresh-race handling has improved over time.
+      </li>
+    </ul>
+    <p>
+      This is also the behaviour to look for in any account switcher. A tool that overwrites a
+      credential another process just rotated will cause exactly this problem. Limit Lifeboat treats
+      a newer external change as authoritative: if something else rewrote the credential mid-switch,
+      the switch aborts rather than overwriting it, and background usage refreshes never rotate the
+      live CLI login at all. The
+      <a href="/guides/claude-code-account-switchers-compared">switcher comparison</a> covers how
+      the alternatives handle it.
+    </p>
+  </section>
+
+  <section id="inactive">
+    <h2>When a saved account shows as expired</h2>
+    <p>
+      If you keep several accounts and one of them shows an expired login or a stale usage figure,
+      that is a different situation from being logged out of the active session. A saved credential
+      for an account you are not currently using can expire on its own, the Keychain can refuse
+      background access to it, or a provider request can simply fail.
+    </p>
+    <p>
+      The right behaviour from a tool here is to say so. Limit Lifeboat keeps the last successful
+      reading, shows how old it is, and marks anything over 30 minutes as stale rather than
+      presenting it as current. Recoverable Claude credentials refresh silently; a login that the
+      provider has genuinely rejected surfaces a <strong>Log In</strong> action instead of failing
+      in the background. Reauthenticating that account through the official flow and refreshing the
+      app restores it.
+    </p>
+    <p>
+      More on reading usage accurately in the
+      <a href="/guides/claude-code-codex-usage-monitor-mac">usage monitoring guide</a>, and if the
+      problem turns out to be capacity rather than authentication, see
+      <a href="/guides/claude-code-limit-reached">what to do when the limit is reached</a>.
+    </p>
+  </section>
+</GuideLayout>
