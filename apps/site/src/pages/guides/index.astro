@@ -1,0 +1,102 @@
+---
+import BrandMark from "../../components/BrandMark.astro";
+import { product } from "../../config";
+import { formatLongDate, guideGroups, guides, guidesInGroup } from "../../data/pages";
+import BaseLayout from "../../layouts/BaseLayout.astro";
+
+const title = "Claude Code and Codex Guides";
+const description =
+  "Guides for switching Claude Code and Codex CLI accounts on macOS, reading usage limits, staying inside provider terms, and fixing expired logins.";
+
+const structuredData = [
+  {
+    "@type": "CollectionPage",
+    "@id": `${product.siteUrl}/guides#collection`,
+    name: title,
+    description,
+    url: `${product.siteUrl}/guides`,
+    isPartOf: { "@id": `${product.siteUrl}/#website` },
+    inLanguage: "en",
+  },
+  {
+    "@type": "ItemList",
+    "@id": `${product.siteUrl}/guides#list`,
+    name: title,
+    numberOfItems: guides.length,
+    itemListOrder: "https://schema.org/ItemListUnordered",
+    itemListElement: guides.map((guide, index) => ({
+      "@type": "ListItem",
+      position: index + 1,
+      name: guide.title,
+      description: guide.summary,
+      url: new URL(guide.path, product.siteUrl).toString(),
+    })),
+  },
+];
+---
+
+<BaseLayout
+  title={title}
+  metaTitle="Claude Code & Codex Guides"
+  description={description}
+  breadcrumbs={[{ name: "Home", href: "/" }]}
+  structuredData={structuredData}
+>
+  <section class="page-hero">
+    <div class="container page-hero-inner">
+      <nav class="breadcrumbs" aria-label="Breadcrumb">
+        <a href="/">Home</a><span aria-hidden="true">/</span><span>Guides</span>
+      </nav>
+      <p class="eyebrow">Practical guides</p>
+      <h1>Claude Code and Codex guides</h1>
+      <p>
+        {guides.length} guides on running more than one Claude Code or Codex CLI account on a Mac: how
+        the official login flows work, what a switch should and should not write, what the usage
+        windows actually measure, and where provider terms draw the line.
+      </p>
+    </div>
+  </section>
+
+  <section class="section guides-index">
+    <div class="container">
+      {
+        guideGroups.map((group) => (
+          <section class="guides-group" id={group.id}>
+            <div class="guides-group-heading">
+              <h2>{group.name}</h2>
+              <p>{group.blurb}</p>
+            </div>
+            <ul class="guides-group-list">
+              {guidesInGroup(group.id).map((guide) => (
+                <li>
+                  <a href={guide.path}>
+                    <span class="guides-group-eyebrow">{guide.eyebrow}</span>
+                    <h3>{guide.title}</h3>
+                    <p>{guide.summary}</p>
+                    <span class="guides-group-meta">
+                      <time datetime={guide.dateModified}>{formatLongDate(guide.dateModified)}</time>
+                      <span aria-hidden="true">·</span>
+                      {guide.readingTime}
+                    </span>
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ))
+      }
+    </div>
+  </section>
+
+  <section class="guide-cta">
+    <div class="container guide-cta-inner">
+      <BrandMark size={56} />
+      <div>
+        <p class="eyebrow">Free and open source</p>
+        <h2>Every account visible. Every switch reversible.</h2>
+        <p>Monitor usage and switch deliberately without replacing the rest of your setup.</p>
+      </div>
+      <a class="button button--primary button--large" href="/download">Download for Mac</a>
+    </div>
+  </section>
+</BaseLayout>

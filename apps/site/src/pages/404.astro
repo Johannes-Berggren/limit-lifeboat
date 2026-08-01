@@ -4,18 +4,28 @@ import { product } from "../config";
 import BaseLayout from "../layouts/BaseLayout.astro";
 ---
 
-<BaseLayout title="Page not found" noindex={true}>
+<BaseLayout
+  title="Page not found"
+  description="That page does not exist on limitlifeboat.com. The home page, the guides index, the download page, and support are all still one hop away."
+  noindex={true}
+>
   <section class="not-found">
     <div class="not-found-orbit" aria-hidden="true"><span></span><span></span><span></span></div>
     <div class="not-found-content">
       <BrandMark size={80} />
       <p class="error-code">404</p>
       <h1>That page doesn’t exist.</h1>
-      <p>The link may be out of date. The download and the docs are still where you left them.</p>
+      <p>The link may be out of date. Everything is still one hop away.</p>
       <div class="hero-actions">
         <a class="button button--primary button--large" href="/">Return home</a>
-        <a class="button button--secondary button--large" href={product.links.repository}>Visit GitHub</a>
+        <a class="button button--secondary button--large" href="/guides">Browse the guides</a>
       </div>
+      <p class="not-found-links">
+        <a href="/download">Download</a>
+        <a href="/support">Support</a>
+        <a href="/changelog">Changelog</a>
+        <a href={product.links.repository}>GitHub</a>
+      </p>
     </div>
   </section>
 </BaseLayout>

@@ -237,6 +237,8 @@ jobs:
         run: npm run site:build
       - name: Check internal links
         run: node .github/scripts/check-site-links.mjs apps/site/dist
+      - name: Check SEO structure
+        run: node .github/scripts/check-site-seo.mjs apps/site/dist
 
   scripts:
     name: Shell scripts

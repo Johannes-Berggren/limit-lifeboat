@@ -1,0 +1,245 @@
+---
+import BrandMark from "../components/BrandMark.astro";
+import { product } from "../config";
+import { formatLongDate } from "../data/pages";
+import { latestRelease } from "../data/releases";
+import BaseLayout from "../layouts/BaseLayout.astro";
+
+const title = "Download Limit Lifeboat for Mac";
+const description = `Install Limit Lifeboat ${product.version} on macOS with Homebrew or the signed DMG. Requires an ${product.architecture} Mac running ${product.minimumMacOS} or newer.`;
+
+const faqs = [
+  {
+    question: "Is Limit Lifeboat free?",
+    answer:
+      "Yes. It is free and open source under the MIT License. There is no paid tier, no account to create, and no telemetry.",
+  },
+  {
+    question: "Does it work on an Intel Mac?",
+    answer: `No. Limit Lifeboat ${product.version} is built for Apple Silicon only and requires ${product.minimumMacOS} or newer. Intel Macs are not supported.`,
+  },
+  {
+    question: "How do I verify the download?",
+    answer:
+      "Each GitHub release publishes the DMG alongside a .sha256 checksum file. Run shasum -a 256 on the downloaded DMG and compare the result with the published checksum. The app is also signed with a Developer ID certificate and notarized by Apple, so macOS verifies it on first launch.",
+  },
+  {
+    question: "How does the app update itself?",
+    answer:
+      "It checks a signed release feed once a day by default, and automatic checks can be turned off in Settings. Updates are never installed silently: every one waits for you to choose Install and Relaunch. Replacing the app in Applications preserves its Application Support and Keychain data.",
+  },
+  {
+    question: "What permissions does it ask for?",
+    answer:
+      "None on install. Notifications are optional. Launch at login is off until you enable it. macOS Terminal Automation is requested the first time you switch an account, and Keychain access is requested only for explicit actions that need it.",
+  },
+];
+
+const structuredData = [
+  {
+    "@type": "FAQPage",
+    "@id": `${product.siteUrl}/download#faq`,
+    mainEntity: faqs.map((item) => ({
+      "@type": "Question",
+      name: item.question,
+      acceptedAnswer: { "@type": "Answer", text: item.answer },
+    })),
+  },
+  {
+    "@type": "HowTo",
+    "@id": `${product.siteUrl}/download#howto`,
+    name: "Install Limit Lifeboat on macOS",
+    description:
+      "Install the signed and notarized macOS menu-bar app, then register the Claude Code and Codex CLI accounts you already use.",
+    totalTime: "PT5M",
+    step: [
+      {
+        "@type": "HowToStep",
+        position: 1,
+        name: "Install the app",
+        text: `Run ${product.homebrewCommand} in Terminal, or download the signed DMG from the GitHub release and drag Limit Lifeboat to Applications.`,
+        url: `${product.siteUrl}/download#install`,
+      },
+      {
+        "@type": "HowToStep",
+        position: 2,
+        name: "Sign in to each CLI once",
+        text: "Authenticate each account with its own official flow: /login inside Claude Code, or codex login in Terminal for Codex CLI.",
+        url: `${product.siteUrl}/download#register`,
+      },
+      {
+        "@type": "HowToStep",
+        position: 3,
+        name: "Refresh Limit Lifeboat",
+        text: "Open the menu-bar app and refresh. The active account registers itself, and a credential snapshot is saved to the macOS Keychain so you can return to it later.",
+        url: `${product.siteUrl}/download#register`,
+      },
+    ],
+  },
+];
+---
+
+<BaseLayout
+  title={title}
+  metaTitle="Download for Mac"
+  description={description}
+  breadcrumbs={[{ name: "Home", href: "/" }]}
+  dateModified={latestRelease.date}
+  structuredData={structuredData}
+>
+  <section class="page-hero">
+    <div class="container page-hero-inner">
+      <nav class="breadcrumbs" aria-label="Breadcrumb">
+        <a href="/">Home</a><span aria-hidden="true">/</span><span>Download</span>
+      </nav>
+      <p class="eyebrow">Free, signed, and notarized</p>
+      <h1>Download Limit Lifeboat for Mac</h1>
+      <p>
+        Version {product.version}, released <time datetime={latestRelease.date}
+          >{formatLongDate(latestRelease.date)}</time
+        >. Free and open source under the MIT License, with no account to create and no telemetry.
+      </p>
+      <div class="hero-actions page-actions">
+        <a class="button button--primary button--large" href={product.links.download}
+          >Download the DMG</a
+        >
+        <a class="button button--secondary button--large" href={product.links.latestRelease}
+          >View the release on GitHub</a
+        >
+      </div>
+      <ul class="hero-notes" aria-label="Download details">
+        <li>{product.architecture} only</li>
+        <li>{product.minimumMacOS} or newer</li>
+        <li>No Dock icon — it lives in the menu bar</li>
+      </ul>
+    </div>
+  </section>
+
+  <div class="container article-layout">
+    <aside class="article-nav" aria-label="On this page">
+      <p>On this page</p>
+      <a href="#install">Install</a>
+      <a href="#requirements">Requirements</a>
+      <a href="#register">First run</a>
+      <a href="#verify">Verify the download</a>
+      <a href="#updates">Updates</a>
+      <a href="#questions">Questions</a>
+    </aside>
+
+    <article class="prose">
+      <section id="install">
+        <h2>Two ways to install</h2>
+        <p>
+          Both routes deliver the same artifact. The Homebrew cask installs the very same published
+          DMG as the GitHub release, so pick whichever fits your setup.
+        </p>
+        <h3>Homebrew</h3>
+        <pre><code>{product.homebrewCommand}</code></pre>
+        <p>
+          The cask is published from a personal tap and is marked <code>auto_updates true</code>,
+          because the app manages its own updates through a signed feed.
+        </p>
+        <h3>Signed DMG</h3>
+        <p>
+          Download <code>{`Limit-Lifeboat-${product.version}-arm64.dmg`}</code> from the
+          <a href={product.links.latestRelease}>latest GitHub release</a>, open it, and drag
+          <strong>Limit Lifeboat</strong> to Applications. GitHub Releases is the only direct-download
+          source for release artifacts; there are no mirrors.
+        </p>
+      </section>
+
+      <section id="requirements">
+        <h2>Requirements</h2>
+        <ul>
+          <li>An {product.architecture} Mac running {product.minimumMacOS} or newer. Intel Macs are not supported.</li>
+          <li>Claude Code, the Codex CLI, or both — whichever providers you want to monitor and switch.</li>
+          <li>Nothing else. There are no API keys to paste and no new account system to create.</li>
+        </ul>
+        <p>
+          The app is signed with a Developer ID certificate, notarized by Apple, stapled, and built
+          with the hardened runtime. It deliberately does not use the App Sandbox, because switching
+          has to read and update provider-owned CLI files; the release entitlement is limited to
+          optional Terminal automation.
+        </p>
+      </section>
+
+      <section id="register">
+        <h2>First run: register the accounts you already have</h2>
+        <p>
+          Limit Lifeboat does not create accounts and cannot log in on your behalf. Each account is
+          authenticated once through the provider’s own flow, and then registers itself.
+        </p>
+        <ol>
+          <li>Sign in with <code>/login</code> inside Claude Code, or <code>codex login</code> in Terminal.</li>
+          <li>Open Limit Lifeboat from the menu bar and refresh.</li>
+          <li>
+            The active account is detected, linked to a local profile, and an encrypted credential
+            snapshot is saved to the macOS Keychain.
+          </li>
+          <li>Repeat for each account you want to be able to return to.</li>
+        </ol>
+        <p>
+          After that, switching restores a saved snapshot and verifies the resulting identity. The
+          first switch may ask for macOS Terminal Automation permission. Full walkthroughs live in
+          the <a href="/guides/switch-claude-code-accounts-mac">Claude Code guide</a> and the
+          <a href="/guides/manage-multiple-codex-accounts-mac">Codex CLI guide</a>.
+        </p>
+      </section>
+
+      <section id="verify">
+        <h2>Verify the download</h2>
+        <p>
+          Every release publishes a <code>.sha256</code> file next to the DMG. Compare it against
+          the file you downloaded:
+        </p>
+        <pre><code>{`shasum -a 256 ~/Downloads/Limit-Lifeboat-${product.version}-arm64.dmg`}</code></pre>
+        <p>
+          Published tags, versions, DMGs, checksums, and appcasts are immutable. A fix always ships
+          as a new patch release rather than a replaced artifact, so a checksum that once matched
+          will always match.
+        </p>
+      </section>
+
+      <section id="updates">
+        <h2>How updates work</h2>
+        <p>
+          The app checks a signed GitHub release feed once a day by default. You can disable
+          automatic checks in Settings. Nothing installs silently: every update waits for you to
+          choose <strong>Install and Relaunch</strong>. Overwriting the app in Applications keeps
+          its Application Support data and Keychain entries.
+        </p>
+        <p>
+          The <a href="/changelog">changelog</a> lists what changed in each version.
+        </p>
+      </section>
+
+      <section id="questions">
+        <h2>Questions</h2>
+        <div class="guide-faqs">
+          {
+            faqs.map((item) => (
+              <div>
+                <h3>{item.question}</h3>
+                <p>{item.answer}</p>
+              </div>
+            ))
+          }
+        </div>
+      </section>
+    </article>
+  </div>
+
+  <section class="guide-cta">
+    <div class="container guide-cta-inner">
+      <BrandMark size={56} />
+      <div>
+        <p class="eyebrow">Free and open source</p>
+        <h2>Inspect it before you install it.</h2>
+        <p>The source, the release process, and the signing setup are all public.</p>
+      </div>
+      <a class="button button--secondary button--large" href={product.links.repository}
+        >View on GitHub</a
+      >
+    </div>
+  </section>
+</BaseLayout>

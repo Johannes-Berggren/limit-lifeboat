@@ -7,10 +7,12 @@
     "dev": "astro dev",
     "check": "astro check",
     "build": "astro build",
+    "postbuild": "node scripts/generate-llms-full.mjs dist",
     "preview": "astro preview"
   },
   "devDependencies": {
     "@astrojs/check": "0.9.9",
+    "@astrojs/rss": "4.0.19",
     "@astrojs/sitemap": "3.7.3",
     "astro": "7.0.9",
     "sharp": "0.35.3",

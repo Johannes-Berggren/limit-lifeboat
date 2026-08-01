@@ -1,29 +1,136 @@
 ---
 import BrandMark from "../components/BrandMark.astro";
 import { navigation, product } from "../config";
+import { ogCardPaths, ogImageFor } from "../data/pages";
 import "../styles/global.css";
+
+export interface Breadcrumb {
+  name: string;
+  href: string;
+}
 
 interface Props {
   title?: string;
+  /** Shorter variant used for the <title> tag when the on-page heading would truncate. */
+  metaTitle?: string;
   description?: string;
+  /** Overrides the generated per-page Open Graph card. */
   image?: string;
   noindex?: boolean;
   pageType?: "website" | "article";
+  /** Trail from the home page down to, but not including, the current page. */
+  breadcrumbs?: readonly Breadcrumb[];
+  datePublished?: string;
+  dateModified?: string;
+  /** Page-specific schema.org nodes, merged into the site-wide @graph. */
   structuredData?: Record<string, unknown> | Record<string, unknown>[];
 }
 
 const {
   title = product.name,
-  description = product.shortDescription,
-  image = "/og-card.png",
+  metaTitle,
+  description = product.metaDescription,
+  image,
   noindex = false,
   pageType = "website",
+  breadcrumbs,
+  datePublished,
+  dateModified,
   structuredData,
 } = Astro.props;
 
-const pageTitle = title === product.name ? title : `${title} — ${product.name}`;
+const documentTitle = metaTitle ?? title;
+const pageTitle =
+  documentTitle === product.name ? documentTitle : `${documentTitle} — ${product.name}`;
 const canonicalURL = new URL(Astro.url.pathname, product.siteUrl);
-const socialImageURL = new URL(image, product.siteUrl);
+const canonicalHref = canonicalURL.toString();
+
+// Pages in the registry get their own generated card; anything else falls back to the
+// static one, so a page added without a registry entry still shares correctly.
+const generatedCard = ogImageFor(Astro.url.pathname);
+const hasGeneratedCard = ogCardPaths.has(generatedCard);
+const socialImageURL = new URL(image ?? (hasGeneratedCard ? generatedCard : "/og-card.png"), product.siteUrl);
+const socialImageAlt = `${title} — ${product.name}`;
+
+const organizationId = `${product.siteUrl}/#organization`;
+const websiteId = `${product.siteUrl}/#website`;
+const webPageId = `${canonicalHref}#webpage`;
+const breadcrumbId = `${canonicalHref}#breadcrumb`;
+
+// Stable entity nodes every page shares, so page-specific nodes can reference them by
+// @id instead of redeclaring the publisher inline.
+const organizationNode = {
+  "@type": "Organization",
+  "@id": organizationId,
+  name: product.name,
+  url: product.siteUrl,
+  logo: {
+    "@type": "ImageObject",
+    "@id": `${product.siteUrl}/#logo`,
+    url: new URL("/web-app-icon-512.png", product.siteUrl).toString(),
+    width: 512,
+    height: 512,
+    caption: product.name,
+  },
+  sameAs: [product.links.repository, product.author.url],
+};
+
+const websiteNode = {
+  "@type": "WebSite",
+  "@id": websiteId,
+  url: product.siteUrl,
+  name: product.name,
+  description: product.metaDescription,
+  inLanguage: "en",
+  publisher: { "@id": organizationId },
+};
+
+const breadcrumbTrail = breadcrumbs
+  ? [...breadcrumbs, { name: title, href: Astro.url.pathname }]
+  : undefined;
+
+const breadcrumbNode = breadcrumbTrail && {
+  "@type": "BreadcrumbList",
+  "@id": breadcrumbId,
+  itemListElement: breadcrumbTrail.map((crumb, index) => ({
+    "@type": "ListItem",
+    position: index + 1,
+    name: crumb.name,
+    item: new URL(crumb.href, product.siteUrl).toString(),
+  })),
+};
+
+const webPageNode = {
+  "@type": "WebPage",
+  "@id": webPageId,
+  url: canonicalHref,
+  name: pageTitle,
+  description,
+  isPartOf: { "@id": websiteId },
+  about: { "@id": organizationId },
+  inLanguage: "en",
+  primaryImageOfPage: { "@type": "ImageObject", url: socialImageURL.toString() },
+  ...(breadcrumbNode ? { breadcrumb: { "@id": breadcrumbId } } : {}),
+  ...(datePublished ? { datePublished } : {}),
+  ...(dateModified ? { dateModified } : {}),
+};
+
+const pageNodes = structuredData
+  ? Array.isArray(structuredData)
+    ? structuredData
+    : [structuredData]
+  : [];
+
+const graph = {
+  "@context": "https://schema.org",
+  "@graph": [
+    organizationNode,
+    websiteNode,
+    webPageNode,
+    ...(breadcrumbNode ? [breadcrumbNode] : []),
+    ...pageNodes,
+  ],
+};
 ---
 
 <!doctype html>
@@ -34,36 +141,52 @@ const socialImageURL = new URL(image, product.siteUrl);
     <meta name="generator" content={Astro.generator} />
     <title>{pageTitle}</title>
     <meta name="description" content={description} />
+    <meta name="author" content={product.author.name} />
     <meta name="theme-color" content="#f7f7fb" />
     <meta name="color-scheme" content="light" />
     <meta name="robots" content={noindex ? "noindex, nofollow" : "index, follow"} />
-    <link rel="canonical" href={canonicalURL} />
+    <link rel="canonical" href={canonicalHref} />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/site.webmanifest" />
+    <link
+      rel="alternate"
+      type="application/rss+xml"
+      title={`${product.name} releases and guides`}
+      href="/rss.xml"
+    />
     <meta property="og:type" content={pageType} />
     <meta property="og:site_name" content={product.name} />
+    <meta property="og:locale" content="en_US" />
     <meta property="og:title" content={pageTitle} />
     <meta property="og:description" content={description} />
-    <meta property="og:url" content={canonicalURL} />
+    <meta property="og:url" content={canonicalHref} />
     <meta property="og:image" content={socialImageURL} />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
-    <meta property="og:image:alt" content={`${product.name} — ${product.headline}`} />
+    <meta property="og:image:alt" content={socialImageAlt} />
+    {
+      pageType === "article" && datePublished && (
+        <meta property="article:published_time" content={datePublished} />
+      )
+    }
+    {
+      pageType === "article" && dateModified && (
+        <meta property="article:modified_time" content={dateModified} />
+      )
+    }
+    {pageType === "article" && <meta property="article:author" content={product.author.name} />}
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content={pageTitle} />
     <meta name="twitter:description" content={description} />
     <meta name="twitter:image" content={socialImageURL} />
-    {
-      structuredData && (
-        <script
-          type="application/ld+json"
-          is:inline
-          set:html={JSON.stringify(structuredData)}
-        />
-      )
-    }
+    <meta name="twitter:image:alt" content={socialImageAlt} />
+    <script
+      type="application/ld+json"
+      is:inline
+      set:html={JSON.stringify(graph)}
+    />
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to content</a>
@@ -105,13 +228,16 @@ const socialImageURL = new URL(image, product.siteUrl);
           <p class="footer-label">Product</p>
           <a href="/#features">Features</a>
           <a href="/#setup">How it works</a>
-          <a href={product.links.download}>Download</a>
+          <a href="/#security">Security</a>
+          <a href="/download">Download</a>
+          <a href="/changelog">Changelog</a>
         </div>
         <div>
           <p class="footer-label">Resources</p>
-          <a href="/#resources">Guides</a>
+          <a href="/guides">Guides</a>
           <a href="/support">Support</a>
           <a href="/privacy">Privacy</a>
+          <a href="/rss.xml">RSS</a>
           <a href={product.links.repository}>GitHub</a>
         </div>
       </div>

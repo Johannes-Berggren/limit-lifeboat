@@ -1,28 +1,57 @@
 ---
 import { product } from "../config";
+import { formatLongDate } from "../data/pages";
 import BaseLayout from "../layouts/BaseLayout.astro";
 
-const description = `How ${product.name} handles credentials, usage data, network access, and ordinary website hosting logs.`;
+const description = `How ${product.name} handles credentials, usage data, network access, and ordinary website hosting logs. No analytics, advertising, or product telemetry.`;
+const datePublished = "2026-07-15";
+const dateModified = "2026-08-01";
+
+// schema.org has no PrivacyPolicy type, so the policy is modelled as a CreativeWork that
+// the page is about. BaseLayout already emits the WebPage node with the same dates.
+const structuredData = [
+  {
+    "@type": "CreativeWork",
+    "@id": `${product.siteUrl}/privacy#policy`,
+    name: `${product.name} privacy policy`,
+    url: `${product.siteUrl}/privacy`,
+    description,
+    datePublished,
+    dateModified,
+    inLanguage: "en",
+    publisher: { "@id": `${product.siteUrl}/#organization` },
+  },
+];
 ---
 
-<BaseLayout title="Privacy" description={description} pageType="article">
+<BaseLayout
+  title="Privacy"
+  description={description}
+  pageType="article"
+  breadcrumbs={[{ name: "Home", href: "/" }]}
+  datePublished={datePublished}
+  dateModified={dateModified}
+  structuredData={structuredData}
+>
   <section class="page-hero page-hero--legal">
     <div class="container page-hero-inner">
       <p class="eyebrow">Privacy</p>
       <h1>Your accounts are yours.</h1>
       <p>Limit Lifeboat has no analytics, advertising, or product telemetry. Here is what the app and this website handle, in plain language.</p>
-      <p class="last-updated">Last updated July 15, 2026</p>
+      <p class="last-updated">
+        Last updated <time datetime={dateModified}>{formatLongDate(dateModified)}</time>
+      </p>
     </div>
   </section>
 
   <div class="container article-layout">
     <aside class="article-nav" aria-label="On this page">
       <p>On this page</p>
-      <a href="#summary">Summary</a>
+      <a href="#summary">The short version</a>
       <a href="#stored">Data stored locally</a>
-      <a href="#network">Network access</a>
+      <a href="#network">When the app uses the network</a>
       <a href="#website">This website</a>
-      <a href="#control">Your control</a>
+      <a href="#control">Your choices and control</a>
     </aside>
 
     <article class="prose">
@@ -34,8 +63,8 @@ const description = `How ${product.name} handles credentials, usage data, networ
       <section id="stored">
         <h2>Data stored locally</h2>
         <p>Limit Lifeboat stores account profiles and usage history under <code>~/Library/Application Support/LimitLifeboat</code>. App settings use the standard macOS preferences domain <code>{product.bundleIdentifier}</code>.</p>
-        <p>App-managed credential snapshots are encrypted by macOS Keychain under the service <code>{product.bundleIdentifier}.credentials</code>. The app may read Claude Code’s provider-owned Keychain item when necessary, but it does not create or take ownership of that item.</p>
-        <p>When you switch an account, the app temporarily prepares rollback material with restricted filesystem permissions. It removes that material after a verified switch or successful rollback. If another process changes the live credentials during recovery, Limit Lifeboat keeps a protected recovery copy rather than overwriting the external change.</p>
+        <p>App-managed credential snapshots are encrypted by macOS Keychain under the service <code>{product.bundleIdentifier}.credentials</code>. They are stored so that they are available only after the device is first unlocked, only on this device: they are not synced to iCloud and are excluded from device backups. The app may read Claude Code’s provider-owned Keychain item when necessary, but it does not create or take ownership of that item.</p>
+        <p>When you switch an account, the app temporarily prepares rollback material under <code>~/Library/Application Support/LimitLifeboat/Backups</code>. While those files exist they are protected by filesystem permissions rather than Keychain encryption, readable only by your user account. The app removes them after a verified switch or successful rollback. If a safe rollback is not possible, the recovery directory stays on disk and the app tells you, so you can inspect and remove it yourself. If another process changes the live credentials during recovery, Limit Lifeboat keeps a protected recovery copy rather than overwriting the external change.</p>
       </section>
 
       <section id="network">
