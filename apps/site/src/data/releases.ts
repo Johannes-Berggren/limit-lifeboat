@@ -15,6 +15,14 @@ export interface Release {
 
 export const releases: readonly Release[] = [
   {
+    version: "1.1.8",
+    date: "2026-08-04",
+    highlights: [
+      "Expanded the marketing site with changelog, download, guide, RSS, sitemap, llms.txt, and answer-engine pages.",
+      "Adjusted automatic account switching so near-limit accounts refresh more aggressively before a switch decision.",
+    ],
+  },
+  {
     version: "1.1.7",
     date: "2026-07-31",
     highlights: [
