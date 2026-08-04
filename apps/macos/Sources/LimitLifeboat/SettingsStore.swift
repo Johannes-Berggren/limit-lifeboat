@@ -16,7 +16,8 @@ final class SettingsStore: ObservableObject {
     }
 
     /// Opt-in: switch the CLI automatically when the active account reaches
-    /// 5% remaining and another account has clearly more headroom.
+    /// 5% session remaining or 1% weekly remaining and another account has
+    /// clearly more headroom.
     @Published var autoSwitchEnabled: Bool {
         didSet { defaults.set(autoSwitchEnabled, forKey: Keys.autoSwitchEnabled) }
     }

@@ -60,8 +60,8 @@ ${product.architecture} Mac running ${product.minimumMacOS} or newer. MIT licens
   window of 7 days, and 7-day windows scoped to individual model families.
 - Codex windows are labelled from the durations OpenAI reports, not from a fixed pair.
   Some plans expose only a weekly window.
-- Automatic switching is off by default. When enabled it triggers at 5% remaining on the
-  tightest window, follows a user-defined priority order, and requires the target account
+- Automatic switching is off by default. When enabled it triggers at 5% session remaining
+  or 1% weekly remaining, follows a user-defined priority order, and requires the target account
   to have at least 30% headroom and to be at least 20 points better than the active one.
 - Earned Codex resets are issued and enforced by OpenAI. The app can display and redeem
   them; it cannot create resets or bypass a limit.

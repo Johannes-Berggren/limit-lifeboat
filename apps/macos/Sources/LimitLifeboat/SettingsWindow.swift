@@ -127,6 +127,12 @@ struct SettingsView: View {
                                 Text("\(minutes) minutes").tag(minutes)
                             }
                         }
+                        Label(
+                            "Near a switch threshold, usage refreshes every minute.",
+                            systemImage: "info.circle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
 
                         Toggle("Launch at login", isOn: $launchAtLogin)
                             .onChange(of: launchAtLogin) { _, newValue in
@@ -161,9 +167,9 @@ struct SettingsView: View {
                     }
 
                     Section("Switching") {
-                        Toggle("Switch CLI automatically at 5% remaining", isOn: $settings.autoSwitchEnabled)
+                        Toggle("Switch CLI automatically near limits", isOn: $settings.autoSwitchEnabled)
                         Label(
-                            "Chooses the first eligible saved account in your priority order and sends a notification. The target must have at least 30% remaining and 20 percentage points more headroom.",
+                            "Switches at 5% session remaining or 1% weekly remaining. Chooses the first eligible saved account in your priority order; the target must have at least 30% remaining and 20 percentage points more headroom.",
                             systemImage: "info.circle"
                         )
                         .font(.caption)

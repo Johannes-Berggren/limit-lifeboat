@@ -73,18 +73,22 @@ public struct SwitchAdvice: Equatable, Sendable {
 /// quota regardless of staleness) or whose reading is fresh and whose
 /// tightest window is not depleted. Targets rank in the user's priority
 /// order (repository order per provider), not by headroom. An automatic
-/// switch requires either an active account at or below the configured
-/// remaining-quota trigger (or authoritatively depleted) and a target clearing
-/// both headroom bars, or a recovered higher-priority account clearing the
-/// rebalance bar.
+/// switch requires either an active account with a window at or below its
+/// configured remaining-quota trigger (or authoritatively depleted) and a
+/// target clearing both headroom bars, or a recovered higher-priority account
+/// clearing the rebalance bar.
 public struct SwitchAdvisor: Sendable {
     public struct Configuration: Sendable {
         /// Candidate readings older than this only count once every
         /// window's reset has elapsed.
         public var staleAfter: TimeInterval
-        /// The active account switches before depletion once its tightest
-        /// measurable window has this percentage of quota remaining or less.
+        /// The active account switches before depletion once a measurable
+        /// session or unclassified window has this percentage of quota
+        /// remaining or less.
         public var autoSwitchTriggerRemainingPercent: Double
+        /// Weekly and model-scoped weekly windows are allowed to run closer
+        /// to depletion before an automatic switch.
+        public var weeklyAutoSwitchTriggerRemainingPercent: Double
         /// Candidate must have at least this much headroom to auto-switch.
         public var minimumHeadroomPercent: Double
         /// And beat the active account's headroom by at least this much.
@@ -100,15 +104,29 @@ public struct SwitchAdvisor: Sendable {
         public init(
             staleAfter: TimeInterval = 3 * 3600,
             autoSwitchTriggerRemainingPercent: Double = 5,
+            weeklyAutoSwitchTriggerRemainingPercent: Double = 1,
             minimumHeadroomPercent: Double = 30,
             minimumImprovementPercent: Double = 20,
             rebalanceMinimumHeadroomPercent: Double = 50
         ) {
             self.staleAfter = staleAfter
             self.autoSwitchTriggerRemainingPercent = autoSwitchTriggerRemainingPercent
+            self.weeklyAutoSwitchTriggerRemainingPercent = weeklyAutoSwitchTriggerRemainingPercent
             self.minimumHeadroomPercent = minimumHeadroomPercent
             self.minimumImprovementPercent = minimumImprovementPercent
             self.rebalanceMinimumHeadroomPercent = rebalanceMinimumHeadroomPercent
+        }
+
+        /// The remaining-quota trigger for a provider-reported window. Unknown
+        /// windows retain the session-compatible threshold used before weekly
+        /// windows received their own stricter trigger.
+        public func autoSwitchTriggerRemainingPercent(for kind: UsageWindowKind) -> Double {
+            switch kind {
+            case .weekly, .weeklyScoped:
+                return weeklyAutoSwitchTriggerRemainingPercent
+            case .session, .other:
+                return autoSwitchTriggerRemainingPercent
+            }
         }
     }
 
@@ -278,14 +296,15 @@ public struct SwitchAdvisor: Sendable {
               let activeSnapshot = active.snapshot else {
             return false
         }
-        let measurableHeadroom = measurableHeadroomScore(of: activeSnapshot, now: now)
         let isAuthoritativelyDepleted = effectiveRiskLevel(of: activeSnapshot) == .depleted
         let reachedEarlySwitchPoint = !activeSnapshot.isStale(
             asOf: now,
             maxAge: configuration.staleAfter
-        ) && (measurableHeadroom.map {
-            $0 <= configuration.autoSwitchTriggerRemainingPercent
-        } ?? false)
+        ) && activeSnapshot.orderedDisplayWindows.contains { window in
+            !window.resetHasElapsed(asOf: now)
+                && window.remainingPercent
+                    <= configuration.autoSwitchTriggerRemainingPercent(for: window.kind)
+        }
         guard isAuthoritativelyDepleted || reachedEarlySwitchPoint else {
             return false
         }
