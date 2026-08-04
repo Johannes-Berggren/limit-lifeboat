@@ -78,9 +78,16 @@ final class AppState: ObservableObject {
     private let eventStore: AppEventStore
     private let burnRateEstimator = BurnRateEstimator()
     private let switchAdvisor = SwitchAdvisor()
+    private let usageRefreshCadencePolicy = UsageRefreshCadencePolicy()
     private let settingsWindowController = SettingsWindowController()
     private let terminalLauncher = TerminalCommandLauncher()
     private var refreshTask: Task<Void, Never>?
+    private var refreshScheduleGeneration: UUID?
+    private var backgroundRefreshStarted = false
+    /// Keeps rescheduling from cancelling the scheduled task while that task
+    /// is inside `refreshAll`; its wrapper re-arms the timer after the refresh
+    /// returns, including when the refresh was deferred.
+    private var refreshTaskIsExecutingRefresh = false
     private var loginFollowUpTasks: [Provider: Task<Void, Never>] = [:]
     private var authPollTask: Task<Void, Never>?
     private var authStateMonitor: AuthStateMonitor?
@@ -242,7 +249,7 @@ final class AppState: ObservableObject {
             .dropFirst()
             .removeDuplicates()
             .sink { [weak self] _ in
-                guard let self, self.refreshTask != nil else {
+                guard let self, self.backgroundRefreshStarted else {
                     return
                 }
                 self.startBackgroundRefresh()
@@ -272,6 +279,8 @@ final class AppState: ObservableObject {
     /// this process has disappeared or been replaced. The app delegate shows a
     /// single explanation and terminates immediately afterwards.
     func stopForInvalidatedBundle() {
+        backgroundRefreshStarted = false
+        refreshScheduleGeneration = nil
         refreshTask?.cancel()
         refreshTask = nil
         loginFollowUpTasks.values.forEach { $0.cancel() }
@@ -318,15 +327,57 @@ final class AppState: ObservableObject {
     }
 
     func startBackgroundRefresh() {
-        refreshTask?.cancel()
-        refreshTask = Task { [weak self] in
-            while !Task.isCancelled {
-                let minutes = self?.settings.refreshIntervalMinutes ?? 10
-                try? await Task.sleep(nanoseconds: UInt64(max(1, minutes)) * 60_000_000_000)
-                guard !Task.isCancelled else { return }
-                await self?.refreshAll()
-            }
+        backgroundRefreshStarted = true
+        scheduleNextBackgroundRefresh()
+    }
+
+    private func scheduleNextBackgroundRefresh() {
+        guard backgroundRefreshStarted,
+              !refreshTaskIsExecutingRefresh,
+              !isRefreshing else {
+            return
         }
+        refreshTask?.cancel()
+        let generation = UUID()
+        refreshScheduleGeneration = generation
+        let delay = backgroundRefreshInterval()
+        refreshTask = Task { [weak self] in
+            do {
+                try await Task.sleep(
+                    nanoseconds: UInt64(max(1, delay) * 1_000_000_000)
+                )
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, let self,
+                  self.backgroundRefreshStarted,
+                  self.refreshScheduleGeneration == generation else {
+                return
+            }
+            self.refreshTaskIsExecutingRefresh = true
+            await self.refreshAll()
+            self.refreshTaskIsExecutingRefresh = false
+            guard self.backgroundRefreshStarted,
+                  self.refreshScheduleGeneration == generation else {
+                return
+            }
+            self.scheduleNextBackgroundRefresh()
+        }
+    }
+
+    private func backgroundRefreshInterval(now: Date = Date()) -> TimeInterval {
+        let successfulActiveSnapshots = profiles.compactMap { profile -> UsageSnapshot? in
+            guard profile.isActiveCLI,
+                  refreshStates[profile.id] == .ok else {
+                return nil
+            }
+            return snapshots[profile.id]
+        }
+        return usageRefreshCadencePolicy.interval(
+            configuredInterval: TimeInterval(max(1, settings.refreshIntervalMinutes) * 60),
+            successfulActiveSnapshots: successfulActiveSnapshots,
+            now: now
+        )
     }
 
     /// The `Task.sleep` loop does not fire while the Mac sleeps, so the menu
@@ -430,6 +481,7 @@ final class AppState: ObservableObject {
         defer {
             scheduledCredentialReadsInProgress.subtract(scheduledProviders)
             isRefreshing = false
+            scheduleNextBackgroundRefresh()
         }
 
         // Reset alerts are evaluated against the pre-refresh snapshots first:
@@ -540,7 +592,8 @@ final class AppState: ObservableObject {
 
     /// Recomputes the best-switch-target hint from the fresh readings and,
     /// when the opt-in is enabled, performs the switch: active account at 5%
-    /// remaining, another account with clearly more headroom.
+    /// session remaining or 1% weekly remaining, another account with clearly
+    /// more headroom.
     private func updateSwitchAdvice() {
         // Candidates never mix providers: credentials and quota are
         // provider-scoped, so a Claude account can't be a switch target for a
@@ -1515,6 +1568,7 @@ final class AppState: ObservableObject {
             lastManualSwitchAt[provider] = Date()
             lastAutoSwitchAttempt[provider] = nil
             activeWasManuallySelected[provider] = true
+            scheduleNextBackgroundRefresh()
         }
         updateMenuBarSummary()
         return active
@@ -2397,6 +2451,7 @@ final class AppState: ObservableObject {
         }
         saveSnapshots()
         statusMessage = "\(profile.label): \(snapshot.message)"
+        scheduleNextBackgroundRefresh()
     }
 
     /// "On pace to run out before the reset" — weekly windows (plus sessions
@@ -3654,6 +3709,7 @@ final class AppState: ObservableObject {
             if !automatic {
                 lastManualSwitchAt[profile.provider] = Date()
             }
+            scheduleNextBackgroundRefresh()
             return true
         } catch {
             AppLog.switching.error("Switch to account \(profile.id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
@@ -5282,7 +5338,12 @@ final class AppState: ObservableObject {
         // outer operation; never discard the queued explicit intent.
         let ownsRefreshFlag = !isRefreshing
         if ownsRefreshFlag { isRefreshing = true }
-        defer { if ownsRefreshFlag { isRefreshing = false } }
+        defer {
+            if ownsRefreshFlag {
+                isRefreshing = false
+                scheduleNextBackgroundRefresh()
+            }
+        }
 
         var retryLiveRecord: LiveClaudeOAuthCredentialRecord?
         if profile.provider == .claude, profile.isActiveCLI {

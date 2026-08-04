@@ -68,6 +68,84 @@ final class SwitchAdvisorTests: XCTestCase {
         XCTAssertFalse(advice.shouldAutoSwitch)
     }
 
+    func testWeeklyAtFivePercentRemainingDoesNotAutoSwitch() {
+        let active = candidate(
+            label: "Claude A",
+            isActiveCLI: true,
+            snapshot: snapshot(
+                windows: [window(id: "weekly-all", kind: .weekly, label: "Weekly", usedPercent: 95)]
+            )
+        )
+        let target = candidate(label: "Claude B", snapshot: freshSnapshot(usedPercent: 15))
+
+        let advice = advisor.advise(candidates: [active, target], now: now)
+
+        XCTAssertFalse(advice.shouldAutoSwitch)
+    }
+
+    func testWeeklyAtOnePercentRemainingAutoSwitches() {
+        let active = candidate(
+            label: "Claude A",
+            isActiveCLI: true,
+            snapshot: snapshot(
+                windows: [window(id: "weekly-all", kind: .weekly, label: "Weekly", usedPercent: 99)]
+            )
+        )
+        let target = candidate(label: "Claude B", snapshot: freshSnapshot(usedPercent: 15))
+
+        let advice = advisor.advise(candidates: [active, target], now: now)
+
+        XCTAssertTrue(advice.shouldAutoSwitch)
+    }
+
+    func testWeeklyAboveOnePercentRemainingDoesNotAutoSwitch() {
+        let active = candidate(
+            label: "Claude A",
+            isActiveCLI: true,
+            snapshot: snapshot(
+                windows: [window(id: "weekly-all", kind: .weekly, label: "Weekly", usedPercent: 98.9)]
+            )
+        )
+        let target = candidate(label: "Claude B", snapshot: freshSnapshot(usedPercent: 15))
+
+        let advice = advisor.advise(candidates: [active, target], now: now)
+
+        XCTAssertFalse(advice.shouldAutoSwitch)
+    }
+
+    func testWeeklyScopedUsesWeeklyTrigger() {
+        let active = candidate(
+            label: "Claude A",
+            isActiveCLI: true,
+            snapshot: snapshot(
+                windows: [window(id: "weekly-opus", kind: .weeklyScoped, label: "Weekly Opus", usedPercent: 99)]
+            )
+        )
+        let target = candidate(label: "Claude B", snapshot: freshSnapshot(usedPercent: 15))
+
+        let advice = advisor.advise(candidates: [active, target], now: now)
+
+        XCTAssertTrue(advice.shouldAutoSwitch)
+    }
+
+    func testQualifyingSessionIsNotMaskedByTighterWeeklyWindow() {
+        let active = candidate(
+            label: "Claude A",
+            isActiveCLI: true,
+            snapshot: snapshot(
+                windows: [
+                    window(id: "session", kind: .session, label: "Session", usedPercent: 95),
+                    window(id: "weekly-all", kind: .weekly, label: "Weekly", usedPercent: 98)
+                ]
+            )
+        )
+        let target = candidate(label: "Claude B", snapshot: freshSnapshot(usedPercent: 15))
+
+        let advice = advisor.advise(candidates: [active, target], now: now)
+
+        XCTAssertTrue(advice.shouldAutoSwitch)
+    }
+
     func testStaleActiveAtFivePercentRemainingDoesNotAutoSwitch() {
         let active = candidate(
             label: "Claude A",
@@ -143,7 +221,7 @@ final class SwitchAdvisorTests: XCTestCase {
         XCTAssertFalse(advice.shouldAutoSwitch)
     }
 
-    func testTightestActiveWindowTriggersWhileElapsedWindowCountsAsFull() {
+    func testWeeklyTriggerWhileElapsedSessionCountsAsFull() {
         let activeSnapshot = UsageSnapshot(
             accountID: UUID(),
             provider: .claude,
@@ -159,7 +237,7 @@ final class SwitchAdvisorTests: XCTestCase {
                     id: "weekly-all",
                     kind: .weekly,
                     label: "Weekly (all models)",
-                    usedPercent: 95,
+                    usedPercent: 99,
                     resetDate: now.addingTimeInterval(5 * 86_400)
                 )
             ],
@@ -243,6 +321,40 @@ final class SwitchAdvisorTests: XCTestCase {
 
         XCTAssertEqual(advice.bestCandidateID, targetCodex.profileID)
         XCTAssertTrue(advice.shouldAutoSwitch)
+    }
+
+    func testCodexWeeklyUsesOnePercentRemainingTrigger() {
+        let target = candidate(
+            label: "Codex B",
+            snapshot: codexSnapshot(
+                usedPercent: 15,
+                lastRefreshed: now.addingTimeInterval(-600),
+                resetDate: nil
+            )
+        )
+        let atOldTrigger = candidate(
+            label: "Codex A",
+            isActiveCLI: true,
+            snapshot: codexSnapshot(
+                usedPercent: 95,
+                lastRefreshed: now.addingTimeInterval(-600),
+                resetDate: nil,
+                kind: .weekly
+            )
+        )
+        let atNewTrigger = candidate(
+            label: "Codex A",
+            isActiveCLI: true,
+            snapshot: codexSnapshot(
+                usedPercent: 99,
+                lastRefreshed: now.addingTimeInterval(-600),
+                resetDate: nil,
+                kind: .weekly
+            )
+        )
+
+        XCTAssertFalse(advisor.advise(candidates: [atOldTrigger, target], now: now).shouldAutoSwitch)
+        XCTAssertTrue(advisor.advise(candidates: [atNewTrigger, target], now: now).shouldAutoSwitch)
     }
 
     func testStaleTargetWithElapsedSessionButPendingWeeklyIsIneligible() {
@@ -631,12 +743,34 @@ final class SwitchAdvisorTests: XCTestCase {
         )
     }
 
-    private func codexSnapshot(usedPercent: Double, lastRefreshed: Date, resetDate: Date?) -> UsageSnapshot {
+    private func snapshot(windows: [UsageWindow]) -> UsageSnapshot {
+        UsageSnapshot(
+            accountID: UUID(),
+            provider: .claude,
+            windows: windows,
+            source: "test",
+            lastRefreshed: now.addingTimeInterval(-600),
+            parseConfidence: .high
+        )
+    }
+
+    private func codexSnapshot(
+        usedPercent: Double,
+        lastRefreshed: Date,
+        resetDate: Date?,
+        kind: UsageWindowKind = .session
+    ) -> UsageSnapshot {
         UsageSnapshot(
             accountID: UUID(),
             provider: .codex,
             windows: [
-                window(id: "codex-300", kind: .session, label: "Session", usedPercent: usedPercent, resetDate: resetDate)
+                window(
+                    id: kind == .weekly ? "codex-10080" : "codex-300",
+                    kind: kind,
+                    label: kind == .weekly ? "Weekly" : "Session",
+                    usedPercent: usedPercent,
+                    resetDate: resetDate
+                )
             ],
             resetDate: resetDate,
             riskLevel: UsageThresholds.standard.riskLevel(usedPercent: usedPercent),

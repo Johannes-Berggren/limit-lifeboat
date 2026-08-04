@@ -28,7 +28,7 @@ const faqs = [
   {
     question: "How often does the app refresh usage?",
     answer:
-      "Every 5 minutes by default. The interval is configurable to 2, 5, 10, 15, 30, or 60 minutes. A reading older than 30 minutes is marked stale rather than shown as current.",
+      "Every 5 minutes by default. The normal interval is configurable to 2, 5, 10, 15, 30, or 60 minutes. When an active account reaches 90% session usage or 94% weekly usage, refreshes run every minute until it moves away from that switch threshold or the window resets. A reading older than 30 minutes is marked stale rather than shown as current.",
   },
 ] as const;
 ---
@@ -53,7 +53,7 @@ const faqs = [
       "Claude Code reports a roughly 5-hour session window, a weekly all-models window, and weekly windows scoped to individual models.",
       "Codex windows are labelled from the durations OpenAI reports, commonly a short rolling window and a multi-day one.",
       "A percentage without a reset time and a reading age is not enough to plan a long task around.",
-      "Limit Lifeboat refreshes every 5 minutes by default and marks any reading older than 30 minutes as stale.",
+      "Limit Lifeboat refreshes every 5 minutes by default, accelerates to every minute near a session or weekly switch threshold, and marks any reading older than 30 minutes as stale.",
     ]}
   >
     <p>
@@ -94,10 +94,10 @@ const faqs = [
   <section id="menu-bar">
     <h2>What does a menu-bar monitor add?</h2>
     <p>Limit Lifeboat is a native macOS menu-bar app for Claude Code and Codex CLI accounts. It shows the active identity, session and weekly readings, reset timing, and reading age for every saved account. Local history and pace warnings help make the number actionable without turning the app into another large dashboard.</p>
-    <p>Readings refresh every 5 minutes by default, adjustable to 2, 5, 10, 15, 30, or 60 minutes. Usage history is retained for 30 days, up to 5,000 records per account, and can be exported as CSV. That export deliberately omits identity fields such as emails and organization names.</p>
+    <p>Readings refresh every 5 minutes by default, adjustable to 2, 5, 10, 15, 30, or 60 minutes. When an active account reaches 90% session usage or 94% weekly usage, refreshes run every minute even if automatic switching is off. Usage history is retained for 30 days, up to 5,000 records per account, and can be exported as CSV. That export deliberately omits identity fields such as emails and organization names.</p>
     <p>When the installed Codex app server exposes earned resets, each Codex account shows OpenAI’s authoritative available count. The reset panel includes any titles, descriptions, and expirations OpenAI returned. Manual use always asks for confirmation and works with active or inactive saved accounts.</p>
     <p>Automatic reset use is off by default and enabled separately for each account. It applies only to the active Codex account after a fresh <code>rate_limit_reached</code> response—not near a limit or for workspace billing states. When that hard-limit response occurs, the enabled reset runs before automatic account switching is evaluated.</p>
-    <p>Warnings are optional. You can be notified when an account approaches a configured limit or when a previously depleted account is likely available again. Manual switching is the default; an optional switch at 5% remaining stays off until you explicitly enable it.</p>
+    <p>Warnings are optional. You can be notified when an account approaches a configured limit or when a previously depleted account is likely available again. Manual switching is the default; optional switching at 5% session remaining or 1% weekly remaining stays off until you explicitly enable it.</p>
     <p>If you do choose another account, the same menu-bar app performs a verified, reversible CLI authentication switch while leaving unrelated settings alone. Read the focused setup guides for <a href="/guides/switch-claude-code-accounts-mac">Claude Code accounts</a> and <a href="/guides/manage-multiple-codex-accounts-mac">Codex CLI accounts</a>.</p>
   </section>
 

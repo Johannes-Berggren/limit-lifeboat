@@ -18,7 +18,7 @@ const faqs = [
   {
     question: "Can two Claude Code accounts run simultaneously through Limit Lifeboat?",
     answer:
-      "No. Limit Lifeboat switches the global Claude Code CLI login one account at a time. It does not launch isolated simultaneous profiles. Optional switching at 5% remaining is disabled by default and must be explicitly enabled.",
+      "No. Limit Lifeboat switches the global Claude Code CLI login one account at a time. It does not launch isolated simultaneous profiles. Optional switching at 5% session remaining or 1% weekly remaining is disabled by default and must be explicitly enabled.",
   },
   {
     question: "Do I need to log in through the browser every time I switch?",
@@ -87,7 +87,7 @@ const faqs = [
     <p>Limit Lifeboat registers the account that is currently authenticated by Claude Code and stores an app-managed credential snapshot in macOS Keychain. Once work and personal accounts are registered, the menu-bar view shows their identities, current or last-known usage, and which account is active.</p>
     <p>When you request a switch, the app captures the current login, prepares restricted rollback material, restores only the selected provider’s authentication fields, and verifies the resulting identity. Unrelated CLI and MCP settings remain in place. If verification fails, the app restores the previous state; if another process changes a credential during recovery, that external change wins and protected recovery material is retained.</p>
     <p>Concretely, the only keys it will write for Claude are <code>oauth:tokenCache</code> and <code>oauth:tokenCacheV2</code> in <code>~/Library/Application Support/Claude/config.json</code>, <code>oauthAccount</code> in <code>~/.claude.json</code>, and the value of Claude Code’s own Keychain item. <code>settings.json</code>, MCP server definitions, hooks, permissions, instructions, and local history are not in that list and are never written.</p>
-    <p>Manual switching is the default. An optional setting can switch accounts when the tightest reported limit window reaches 5% remaining, but it is off until you explicitly enable it, it follows your saved priority order, and the account it moves to must have at least 30% headroom and be at least 20 points better than the one you are leaving. To set up either path, install Limit Lifeboat, authenticate each account once with Claude Code’s official flow, and refresh the app after each login.</p>
+    <p>Manual switching is the default. An optional setting can switch accounts at 5% session remaining or 1% weekly remaining, but it is off until you explicitly enable it, it follows your saved priority order, and the account it moves to must have at least 30% headroom and be at least 20 points better than the one you are leaving. To set up either path, install Limit Lifeboat, authenticate each account once with Claude Code’s official flow, and refresh the app after each login.</p>
     <p>If you want to see how that compares with the other tools in this space, the <a href="/guides/claude-code-account-switchers-compared">switcher comparison</a> lays out what each one writes.</p>
   </section>
 

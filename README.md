@@ -21,10 +21,12 @@ you can see which account to move to before you move. When OpenAI supplies
 earned Codex rate-limit resets, it shows the authoritative available count for
 each Codex account.
 
-Switching is manual by default; optional switching when the active account's
-tightest reported limit window reaches 5% remaining is off until you explicitly
-enable it. Browser and desktop-app sessions are separate and unaffected. Quotas
-stay separate and provider-enforced: nothing is pooled, merged, or extended.
+Switching is manual by default; optional switching when the active account
+reaches 5% session remaining or 1% weekly remaining is off until you explicitly
+enable it. Near either switch point, usage refreshes every minute even when
+automatic switching is off. Browser and desktop-app sessions are separate and
+unaffected. Quotas stay separate and provider-enforced: nothing is pooled,
+merged, or extended.
 
 This monorepo contains the macOS app and its static Astro marketing site:
 
@@ -86,7 +88,8 @@ Support and Keychain data.
   `rate_limit_reached` reading. When that hard-limit response occurs, the
   enabled reset runs before automatic account switching is evaluated.
 - **Switching is transactional and user-controlled.** Manual switching is the
-  default, and switching at 5% remaining is off until you enable it. The first
+  default, and switching at 5% session or 1% weekly remaining is off until you
+  enable it. The first
   eligible account in your saved priority order must still have clearly more
   headroom. Every switch captures the current login, stages private rollback
   material, restores and validates the selected identity, then removes the
