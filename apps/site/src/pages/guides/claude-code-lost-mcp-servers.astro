@@ -1,0 +1,240 @@
+---
+import AnswerBlock from "../../components/AnswerBlock.astro";
+import { getGuide } from "../../data/pages";
+import GuideLayout from "../../layouts/GuideLayout.astro";
+
+const meta = getGuide("/guides/claude-code-lost-mcp-servers");
+
+const faqs = [
+  {
+    question: "Where does Claude Code actually store MCP servers?",
+    answer:
+      "Not in settings.json. User-scoped and project-scoped MCP servers live in ~/.claude.json, and a project can also define servers in a committed .mcp.json at its root. settings.json holds hooks, permissions, statusLine, environment variables and plugin settings — which is why a tool can destroy your hooks while leaving MCP servers intact, or the reverse.",
+  },
+  {
+    question: "Does logging out of Claude Code delete MCP servers?",
+    answer:
+      "No. A logout replaces authentication only. If MCP servers disappeared around the same time as a login change, the cause was something else that ran nearby — an update, a config-directory swap, or a switching tool that rewrote the whole file rather than the authentication fields inside it.",
+  },
+  {
+    question: "Why do my MCP servers come back after I remove them?",
+    answer:
+      "Because the same server is defined at more than one scope. Removing it at user scope leaves a project-scoped copy in place, and it reappears. This was reported against Claude Code in issue #7936. Check every scope before concluding a removal failed.",
+  },
+  {
+    question: "Can an account switcher overwrite settings.json?",
+    answer:
+      "Some do, by design. cc-switch performs a full overwrite of ~/.claude/settings.json when it switches providers; a field-level merge was tried in v3.11.0 and reverted in v3.11.1 because it caused state conflicts, and the project now carries shared configuration across providers through a separate general-config feature instead.",
+  },
+  {
+    question: "How do I stop this happening again?",
+    answer:
+      "Keep a copy of ~/.claude.json, ~/.claude/settings.json and any .mcp.json under version control or in a backup, and prefer tools that write named fields rather than whole files. A tool that cannot tell you exactly which keys it writes will eventually write one you cared about.",
+  },
+];
+---
+
+<GuideLayout
+  meta={meta}
+  introduction="MCP servers gone, hooks missing, permissions reset to nothing. It reads like Claude Code deleted your configuration, and occasionally it did — but three of the four common causes are something else, and the one you are looking at determines whether the file is recoverable."
+  faqs={faqs}
+  ctaHeading="Change the login, not the configuration around it."
+>
+  <Fragment slot="nav">
+    <a href="#where">Where the configuration lives</a>
+    <a href="#causes">The four causes</a>
+    <a href="#recover">Recovery, in order</a>
+    <a href="#overwrite">Tools that overwrite</a>
+    <a href="#prevent">Preventing a repeat</a>
+    <a href="#questions">Questions</a>
+    <a href="#related">Related guides</a>
+  </Fragment>
+
+  <AnswerBlock
+    facts={[
+      "MCP servers live in ~/.claude.json and project .mcp.json files, not in settings.json.",
+      "settings.json holds hooks, permissions, statusLine, env and plugin settings.",
+      "Logging out or switching accounts does not remove either — authentication is a separate field set.",
+      "A server that reappears after removal is defined at a second scope, not failing to delete.",
+      "Some switchers full-overwrite settings.json rather than merging into it.",
+    ]}
+  >
+    <p>
+      Claude Code keeps MCP server definitions in <code>~/.claude.json</code> and in project-level
+      <code>.mcp.json</code> files, while hooks, permissions and plugin settings live separately in
+      <code>~/.claude/settings.json</code>. Because those are different files with different owners,
+      "my configuration vanished" almost always means one specific file was rewritten — by an update,
+      by a directory swap, or by a tool that copies whole files instead of the authentication fields
+      inside them. Identifying which file is empty tells you which cause you are dealing with.
+    </p>
+  </AnswerBlock>
+
+  <section id="where">
+    <h2>Where the configuration actually lives</h2>
+    <p>
+      Most of the confusion here comes from assuming one file holds everything. It does not, and the
+      split matters because different failures hit different files.
+    </p>
+    <ul>
+      <li>
+        <strong><code>~/.claude.json</code></strong> — user-scoped MCP servers, plus project entries
+        that can carry their own local-scoped servers. This is the file people mean when they say
+        "my MCP servers are gone".
+      </li>
+      <li>
+        <strong><code>.mcp.json</code></strong> in a project root — project-scoped servers, intended
+        to be committed and shared with collaborators.
+      </li>
+      <li>
+        <strong><code>~/.claude/settings.json</code></strong> — hooks, permissions,
+        <code>statusLine</code>, environment variables, enabled plugins and marketplaces. No MCP
+        servers.
+      </li>
+      <li>
+        <strong>The <code>Claude Code-credentials</code> Keychain item</strong>, plus
+        <code>oauthAccount</code> in <code>~/.claude.json</code> and the <code>oauth:tokenCache</code>
+        fields in <code>~/Library/Application Support/Claude/config.json</code> — authentication, and
+        nothing else.
+      </li>
+    </ul>
+    <p>
+      That last line is the important one. Authentication is a small, named set of fields. Anything
+      that changes your login has no reason to touch the other three bullets, and a tool that does is
+      making a choice, not meeting a requirement.
+    </p>
+  </section>
+
+  <section id="causes">
+    <h2>The four causes, in rough order of likelihood</h2>
+    <h3>1. A tool rewrote the file wholesale</h3>
+    <p>
+      The most common cause, and the only one that is somebody's deliberate design. Account and
+      provider switchers frequently work by keeping a copy of a whole configuration file per profile
+      and writing it into place on switch. Everything the tool does not know about is gone, because
+      it was never in the copy. See <a href="#overwrite">below</a> for which tools do this.
+    </p>
+    <h3>2. A configuration directory swap</h3>
+    <p>
+      Approaches built on <code>CLAUDE_CONFIG_DIR</code> give each profile a completely separate
+      configuration directory. That is a legitimate technique — it is how you get genuinely parallel
+      sessions — but it means each profile has its own MCP servers, its own history and its own
+      settings. Nothing was deleted; you are looking at a different directory. If your servers come
+      back when you unset the variable, this is your answer.
+    </p>
+    <h3>3. An update rewrote it</h3>
+    <p>
+      Claude Code has historically rewritten <code>~/.claude.json</code> during auto-update and lost
+      MCP configuration in the process, reported in
+      <a href="https://github.com/anthropics/claude-code/issues/1788" rel="nofollow">issue #1788</a>,
+      with a related configuration-loss report in
+      <a href="https://github.com/anthropics/claude-code/issues/1676" rel="nofollow">issue #1676</a>.
+      Both are closed, so a current version is unlikely to reproduce them — but if the loss coincided
+      with a version bump on an older install, this is the likely cause.
+    </p>
+    <h3>4. Nothing was lost, and the scope is wrong</h3>
+    <p>
+      A server you removed that keeps reappearing, or one you defined that Claude Code will not see,
+      is usually a scope problem rather than a data-loss problem. The same server can exist at user,
+      project and local scope, and removing it at one leaves the others.
+      <a href="https://github.com/anthropics/claude-code/issues/7936" rel="nofollow">Issue #7936</a>
+      covers this case. Check all three before assuming a write failed.
+    </p>
+  </section>
+
+  <section id="recover">
+    <h2>Recovery, in order</h2>
+    <p>Stop at the first step that returns your configuration.</p>
+    <ol>
+      <li>
+        <strong>Check whether the file is empty or merely different.</strong> Open
+        <code>~/.claude.json</code> and <code>~/.claude/settings.json</code> and look. A file that
+        still has content but lacks your servers points at a merge or scope problem; a file reset to
+        near-empty points at a wholesale rewrite.
+      </li>
+      <li>
+        <strong>Check for a config-directory swap.</strong> If <code>CLAUDE_CONFIG_DIR</code> is set
+        in your shell, your configuration is in that directory, not the default one.
+      </li>
+      <li>
+        <strong>Look for the tool's own backup.</strong> Most switchers keep the profile copy they
+        wrote from. If a tool put your configuration in this state, its stored profile is usually the
+        cleanest copy of what you had.
+      </li>
+      <li>
+        <strong>Recover from version control or Time Machine.</strong> Project
+        <code>.mcp.json</code> files are typically committed, which makes project-scoped servers the
+        easiest to restore. For the home-directory files, Time Machine keeps hourly local snapshots
+        even without an external disk attached.
+      </li>
+      <li>
+        <strong>Re-add what is left.</strong> <code>claude mcp add</code> rebuilds servers one at a
+        time. Tedious, but it is the floor, and it is worth doing while you have the failure fresh
+        enough to also fix the cause.
+      </li>
+    </ol>
+  </section>
+
+  <section id="overwrite">
+    <h2>Tools that overwrite rather than merge</h2>
+    <p>
+      This is worth stating precisely rather than as a general warning, because the behaviour varies
+      and one very widely used tool is explicit about it.
+    </p>
+    <p>
+      <strong>cc-switch</strong> — a cross-platform provider switcher, and by a wide margin the most
+      starred tool in this space — performs a full overwrite of
+      <code>~/.claude/settings.json</code> when it switches providers. A field-level merge was
+      shipped in v3.11.0 and reverted in v3.11.1 after it introduced state conflicts; the maintainer
+      closed the request as a considered design decision and points users at a separate general-config
+      feature that carries hooks and plugins across providers instead. If you use it, that feature is
+      the mechanism you need, and it is opt-in.
+    </p>
+    <p>
+      Note that cc-switch switches <em>providers</em> — API endpoints and keys — rather than
+      subscription accounts. It is frequently confused with the several similarly named account
+      switchers, which is its own problem; the
+      <a href="/guides/claude-code-account-switchers-compared">switcher comparison</a> disentangles
+      the names and covers how each tool handles write scope.
+    </p>
+    <p>
+      The general test to apply to any of them: <em>can the tool tell you exactly which keys it
+      writes?</em> A tool that documents a field list has bounded its blast radius. A tool that
+      describes itself as backing up and restoring configuration files has not.
+    </p>
+    <p>
+      Limit Lifeboat writes only the authentication fields named
+      <a href="#where">above</a> and never opens <code>settings.json</code>, hooks, permissions,
+      instructions or history at all. That is the entire design, and it is why the failure on this
+      page cannot originate here.
+    </p>
+  </section>
+
+  <section id="prevent">
+    <h2>Preventing a repeat</h2>
+    <ul>
+      <li>
+        <strong>Put the files somewhere recoverable.</strong> Commit project
+        <code>.mcp.json</code> files. Keep a copy of <code>~/.claude/settings.json</code> in a
+        dotfiles repository. This turns a bad afternoon into a checkout.
+      </li>
+      <li>
+        <strong>Prefer field-scoped writers.</strong> For anything that runs regularly against your
+        configuration, a documented field list beats a file copy.
+      </li>
+      <li>
+        <strong>Know which mechanism you chose.</strong> Config-directory isolation and
+        credential swapping are both valid, and they behave very differently. Isolation gives you
+        parallel sessions and separate configuration per profile; credential swapping gives you one
+        shared configuration and one active login.
+        <a href="/guides/switch-claude-code-accounts-mac">Switching Claude Code accounts on Mac</a>
+        covers the trade-off.
+      </li>
+      <li>
+        <strong>Verify after a switch.</strong> Losing configuration and landing on the wrong account
+        are the same class of failure — a change you assumed completed.
+        <a href="/guides/check-active-claude-code-account">Checking which account is active</a> is
+        the other half of it.
+      </li>
+    </ul>
+  </section>
+</GuideLayout>

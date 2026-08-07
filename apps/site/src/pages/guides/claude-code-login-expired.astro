@@ -27,6 +27,11 @@ const faqs = [
       "Saved credentials can expire on their own, the Keychain can deny background access, or a provider request can fail. A tool showing that account can only report its last successful reading. Limit Lifeboat shows the age of that reading and offers a Log In action rather than presenting stale data as live.",
   },
   {
+    question: "Why am I logged out every morning?",
+    answer:
+      "An overnight logout usually means the token needed renewing while the machine was asleep or offline, and the renewal either never ran or several sessions attempted it together on wake. The shape to look for is whether every terminal demands a login at once, which points at a rotation race rather than an ordinary expiry. Closing sessions you are not using before you finish for the day reduces it.",
+  },
+  {
     question: "Should I switch to an API key instead?",
     answer:
       "Setting ANTHROPIC_API_KEY bypasses the OAuth flow entirely and will stop the logout loop, but it moves you onto metered API billing rather than your subscription. It is a reasonable emergency measure, not a fix for the underlying cause.",
@@ -127,8 +132,10 @@ const faqs = [
     <p>
       Two things worth knowing while you do this. Re-authenticating replaces authentication only —
       your <code>settings.json</code>, MCP servers, hooks, permissions and history are not involved.
-      And keep Claude Code itself up to date: token-refresh handling has been improved more than
-      once, and an old version can reproduce a problem that has already been fixed upstream.
+      If those did disappear around the same time, something else was responsible, and
+      <a href="/guides/claude-code-lost-mcp-servers">recovering a lost MCP configuration</a> covers
+      what. And keep Claude Code itself up to date: token-refresh handling has been improved more
+      than once, and an old version can reproduce a problem that has already been fixed upstream.
     </p>
   </section>
 
@@ -181,10 +188,13 @@ const faqs = [
       app restores it.
     </p>
     <p>
-      More on reading usage accurately in the
-      <a href="/guides/claude-code-codex-usage-monitor-mac">usage monitoring guide</a>, and if the
-      problem turns out to be capacity rather than authentication, see
-      <a href="/guides/claude-code-limit-reached">what to do when the limit is reached</a>.
+      More on reading usage accurately in
+      <a href="/guides/claude-code-codex-usage-monitor-mac">why usage numbers disagree</a>, and if
+      the problem turns out to be capacity rather than authentication, see
+      <a href="/guides/claude-code-limit-reached">what to do when the limit is reached</a>. If the
+      login works but names the wrong account,
+      <a href="/guides/check-active-claude-code-account">checking which account is active</a> is the
+      faster route.
     </p>
   </section>
 </GuideLayout>
