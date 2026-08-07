@@ -6,14 +6,24 @@ import GuideLayout from "../../layouts/GuideLayout.astro";
 const meta = getGuide("/guides/claude-code-codex-usage-monitor-mac");
 const faqs = [
   {
-    question: "Does Limit Lifeboat estimate token cost?",
+    question: "Why does a cost tracker show a different number from /usage?",
     answer:
-      "No. It focuses on subscription usage windows, remaining capacity, reset timing, reading age, and local history rather than translating subscription activity into API prices.",
+      "Because they answer different questions. Cost trackers such as ccusage read your local session logs and report what that activity would have cost at API prices. /usage reports how much of your subscription window you have consumed. Neither converts into the other, and a subscription plan has no dollar figure to compare against, so the two numbers will never agree.",
   },
   {
-    question: "Why can an inactive account show an older reading?",
+    question: "Which usage number should I trust?",
     answer:
-      "A saved login can expire, Keychain may deny background access, or a provider request can fail. Limit Lifeboat keeps the last successful reading and shows its age rather than presenting stale data as live.",
+      "The provider's own display, always. Whenever a local view and the provider disagree, the provider is right. Everything a third-party tool adds — multiple accounts at once, reading age, consumption pace — is context around that number, not a replacement for it.",
+  },
+  {
+    question: "Why did my remaining usage go up without me doing anything?",
+    answer:
+      "The Claude Code session window rolls continuously rather than resetting at a fixed time, so capacity returns gradually as older activity ages out of the window. Two readings a few minutes apart can legitimately differ in your favour. The weekly window has a definite reset point and does not behave this way.",
+  },
+  {
+    question: "How old is too old for a usage reading?",
+    answer:
+      "Old enough that you would not bet an hour of work on it. Limit Lifeboat marks anything over 30 minutes as stale rather than presenting it as current, and shows the age of every reading. A percentage without an age attached is not enough information to plan a long task around.",
   },
   {
     question: "Does checking usage consume a meaningful part of the limit?",
@@ -21,91 +31,199 @@ const faqs = [
       "No coding prompt or model turn is submitted. Codex readings use the locally installed Codex app server's rate-limit request, while Claude uses provider usage services with a local Claude Code usage fallback.",
   },
   {
-    question: "Do earned Codex resets bypass OpenAI rate limits?",
+    question: "Why can an inactive account show an older reading?",
     answer:
-      "No. They are provider-issued reset entitlements reported and enforced by OpenAI. Limit Lifeboat can display and redeem them, but it cannot create resets or bypass a limit.",
-  },
-  {
-    question: "How often does the app refresh usage?",
-    answer:
-      "Every 5 minutes by default. The normal interval is configurable to 2, 5, 10, 15, 30, or 60 minutes. When an active account reaches 90% session usage or 94% weekly usage, refreshes run every minute until it moves away from that switch threshold or the window resets. A reading older than 30 minutes is marked stale rather than shown as current.",
+      "A saved login can expire, Keychain may deny background access, or a provider request can fail. Limit Lifeboat keeps the last successful reading and shows its age rather than presenting stale data as live.",
   },
 ] as const;
 ---
 
 <GuideLayout
   meta={meta}
-  introduction="Claude Code and Codex usage is easy to check once. The harder problem is seeing every work and personal account, noticing when a reading is stale, and understanding whether a new task fits before a limit interrupts it."
+  introduction="Run /usage, open a menu-bar monitor, and check a cost tracker, and you will often get three different answers about the same account. None of them is necessarily broken. They measure different things, from different sources, at different moments — and knowing which is which tells you whether you can start a long task."
   faqs={faqs}
-  ctaHeading="See every account's remaining usage at once."
+  ctaHeading="Know which number is the one that will stop you."
 >
   <Fragment slot="nav">
-    <a href="#official-checks">Official checks</a>
-    <a href="#what-to-watch">What to watch</a>
-    <a href="#menu-bar">Menu-bar monitoring</a>
-    <a href="#accuracy">Privacy and accuracy</a>
+    <a href="#sources">Four tools, four sources</a>
+    <a href="#why">Five reasons they disagree</a>
+    <a href="#window">Which window actually stops you</a>
+    <a href="#stale">Reading age</a>
+    <a href="#authoritative">What is authoritative</a>
     <a href="#questions">Questions</a>
     <a href="#related">Related guides</a>
   </Fragment>
 
   <AnswerBlock
     facts={[
+      "Cost trackers report API-equivalent spend; /usage reports subscription window consumption. These are different quantities.",
       "Claude Code reports a roughly 5-hour session window, a weekly all-models window, and weekly windows scoped to individual models.",
-      "Codex windows are labelled from the durations OpenAI reports, commonly a short rolling window and a multi-day one.",
-      "A percentage without a reset time and a reading age is not enough to plan a long task around.",
-      "Limit Lifeboat refreshes every 5 minutes by default, accelerates to every minute near a session or weekly switch threshold, and marks any reading older than 30 minutes as stale.",
+      "The session window rolls continuously, so remaining capacity can rise without a reset.",
+      "Every tool caches, so a reading without an age attached is not evidence about now.",
+      "When a local view and the provider's own display disagree, the provider is right.",
     ]}
   >
     <p>
-      Run <code>/usage</code> inside Claude Code or Codex CLI to see the current account's limits —
-      that is the authoritative view. A menu-bar monitor adds the parts the CLI cannot show: every
-      saved account at once rather than only the active one, how old each reading is, and how fast
-      the current window is being consumed relative to how long is left on it.
+      Claude Code, Codex CLI, menu-bar monitors and cost trackers disagree about usage because they
+      are not measuring the same thing. A cost tracker reads local session logs and reports what the
+      activity would have cost at API prices; <code>/usage</code> reports how much of a subscription
+      window has been consumed; a menu-bar monitor reports a cached copy of the latter across several
+      accounts. The number that actually stops you is the tightest of your current windows, as the
+      provider reports it.
     </p>
   </AnswerBlock>
 
-  <section id="official-checks">
-    <h2>What is the authoritative way to check usage?</h2>
-    <p>In Claude Code, run <code>/usage</code> to view plan limits and rate-limit status. In Codex CLI, use <code>/usage</code> inside the interactive interface; OpenAI documents it as the command for account token activity and available rate-limit resets.</p>
+  <section id="sources">
+    <h2>Four tools, four sources</h2>
+    <p>
+      Almost every disagreement resolves once you know where each number came from.
+    </p>
+    <ul>
+      <li>
+        <strong><code>/usage</code> inside Claude Code or Codex CLI</strong> — asks the provider and
+        reports plan limits and rate-limit status for the account the CLI is currently authenticated
+        as. Authoritative, and scoped to one account.
+      </li>
+      <li>
+        <strong>The provider's own web dashboard</strong> — the same underlying data, for whichever
+        account the browser is signed into. That is frequently a <em>different</em> account from the
+        one your CLI is using, which is a common source of apparent contradiction; see
+        <a href="/guides/check-active-claude-code-account">checking which account is active</a>.
+      </li>
+      <li>
+        <strong>Cost trackers such as ccusage</strong> — read local session logs and compute what the
+        recorded activity would have cost at published API rates. This is a genuinely useful number
+        and it is not a quota percentage. On a subscription there is no dollar budget for it to be a
+        percentage of.
+      </li>
+      <li>
+        <strong>Menu-bar monitors</strong> — poll the provider on a schedule and cache the result, so
+        they can show several accounts at once. Their number is the provider's number, delayed by
+        however long ago the poll ran.
+      </li>
+    </ul>
+  </section>
+
+  <section id="why">
+    <h2>Five reasons the numbers disagree</h2>
+    <h3>1. They are answering different questions</h3>
+    <p>
+      Spend and quota are not convertible. A cost tracker telling you that yesterday was worth $47 of
+      API usage says nothing about how much of your weekly window remains, because the subscription
+      does not meter in dollars. Both numbers are correct; only one of them can stop you working.
+    </p>
+    <h3>2. They are reading different windows</h3>
+    <p>
+      Claude Code reports several windows at once: a rolling session window of about five hours, a
+      weekly all-models window, and weekly windows scoped to individual model families. A tool that
+      displays only one of them will look wrong to anyone watching a different one. Codex windows are
+      labelled from the durations OpenAI reports rather than a fixed pair, and some plans expose only
+      a weekly window.
+    </p>
+    <h3>3. The session window rolls</h3>
+    <p>
+      The five-hour window is not a bucket that empties at a fixed time. It rolls, so older activity
+      ages out continuously and remaining capacity climbs back on its own. Two readings taken minutes
+      apart can legitimately differ, and remaining usage going <em>up</em> while you sit still is
+      expected behaviour rather than a bug.
+    </p>
+    <h3>4. One of them is cached</h3>
+    <p>
+      Everything that shows several accounts at once is showing you cached data, because polling the
+      provider continuously for every saved account is neither free nor kind. The question is not
+      whether a tool caches — they all do — but whether it tells you how stale the number is.
+    </p>
+    <h3>5. They are looking at different accounts</h3>
+    <p>
+      The most common cause and the easiest to miss. Your browser, your desktop app and your CLI each
+      hold their own session, and the CLI's identity is the only one that governs what the CLI
+      spends.
+    </p>
+  </section>
+
+  <section id="window">
+    <h2>Which window actually stops you</h2>
+    <p>
+      The tightest one. That is the whole rule, and it is why a single headline percentage is
+      misleading: 60% remaining on the session window is irrelevant if the weekly all-models window
+      is at 4%.
+    </p>
+    <p>
+      A percentage on its own is also not enough to plan around. What makes a reading actionable is
+      the combination of the number, the reset time, and the pace — how fast the current window is
+      being consumed relative to how much time is left on it. Forty percent remaining is comfortable
+      on a Monday and a problem on a Friday afternoon if the last hour consumed fifteen points.
+    </p>
+    <p>
+      For what each Claude window measures and how each one rolls over, see
+      <a href="/guides/claude-code-usage-limits-explained">Claude Code usage limits explained</a>;
+      for the Codex equivalents and earned rate-limit resets, see
+      <a href="/guides/codex-cli-rate-limits-explained">Codex CLI rate limits explained</a>.
+    </p>
+  </section>
+
+  <section id="stale">
+    <h2>Reading age is a feature, not a detail</h2>
+    <p>
+      A tool that shows a cached percentage as though it were live is worse than one that shows
+      nothing, because it invites you to commit an hour of work to a number from half an hour ago.
+    </p>
+    <p>
+      Limit Lifeboat refreshes every 5 minutes by default, adjustable to 2, 5, 10, 15, 30 or 60
+      minutes, and accelerates to every minute when an active account reaches 90% session usage or
+      94% weekly usage — even when automatic switching is off. Any reading older than 30 minutes is
+      marked stale rather than displayed as current, and an account whose saved login has failed
+      keeps its last successful reading with the age attached instead of silently showing a number it
+      cannot justify. Local usage history is retained for 30 days, up to 5,000 records per account,
+      and exports to CSV with identity fields such as emails and organization names deliberately
+      omitted.
+    </p>
+  </section>
+
+  <section id="authoritative">
+    <h2>What is authoritative, and where readings come from</h2>
+    <p>
+      Whenever a local view and the provider's own display disagree, the provider is right. Provider
+      limits also change, and consumption is workload-dependent — task size, complexity, model and
+      where the task runs all move it.
+    </p>
+    <p>
+      In Claude Code, run <code>/usage</code> to view plan limits and rate-limit status. In Codex CLI,
+      <code>/usage</code> reports account token activity and available rate-limit resets. OpenAI also
+      directs users approaching a Codex limit to the Codex usage page or the in-product limit banner;
+      see <a href="https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan"
+        >Using Codex with your ChatGPT plan</a
+      > and the app-server documentation for <a
+        href="https://learn.chatgpt.com/docs/app-server#8-earned-rate-limit-resets-chatgpt"
+        >earned rate-limit resets</a
+      >.
+    </p>
     <pre><code># Inside Claude Code
 /usage
 
 # Inside Codex CLI
 /usage</code></pre>
-    <p>OpenAI also directs users approaching a Codex limit to the Codex usage page or in-product limit banner. The amount consumed varies with task size, complexity, model, and where the task runs. See <a href="https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan">Using Codex with your ChatGPT plan</a> and the app-server documentation for <a href="https://learn.chatgpt.com/docs/app-server#8-earned-rate-limit-resets-chatgpt">earned rate-limit resets</a>.</p>
-    <p>Whenever a local view and the provider’s own display disagree, the provider is right. Everything below is about seeing more accounts and more context, not about replacing that source of truth.</p>
-  </section>
-
-  <section id="what-to-watch">
-    <h2>Why is a percentage on its own not enough?</h2>
-    <p>A useful Claude Code or Codex usage monitor should answer more than “how much is left?” Look for:</p>
-    <ul>
-      <li><strong>The active CLI identity</strong>, especially before work involving managed company or client accounts.</li>
-      <li><strong>Each available usage window</strong>, such as the current session and weekly allowance.</li>
-      <li><strong>The reset time</strong>, so you can decide whether a longer task fits now or should wait.</li>
-      <li><strong>Earned Codex resets</strong>, when OpenAI reports them for that ChatGPT-authenticated account.</li>
-      <li><strong>The reading age</strong>, because a last-known value from an inactive or expired login is not live data.</li>
-      <li><strong>Recent pace</strong>, which shows whether current consumption is moving faster than the remaining time.</li>
-    </ul>
-    <p>Pace is the one most monitors omit, and it is the one that changes decisions. Forty percent remaining is comfortable on a Monday and a problem on a Friday afternoon if the last hour consumed fifteen points. For what each Claude window actually measures, see <a href="/guides/claude-code-usage-limits-explained">Claude Code usage limits explained</a>.</p>
-    <p>Provider limits can change, and consumption is workload-dependent. Treat the provider’s own current display as authoritative whenever a local view differs.</p>
-  </section>
-
-  <section id="menu-bar">
-    <h2>What does a menu-bar monitor add?</h2>
-    <p>Limit Lifeboat is a native macOS menu-bar app for Claude Code and Codex CLI accounts. It shows the active identity, session and weekly readings, reset timing, and reading age for every saved account. Local history and pace warnings help make the number actionable without turning the app into another large dashboard.</p>
-    <p>Readings refresh every 5 minutes by default, adjustable to 2, 5, 10, 15, 30, or 60 minutes. When an active account reaches 90% session usage or 94% weekly usage, refreshes run every minute even if automatic switching is off. Usage history is retained for 30 days, up to 5,000 records per account, and can be exported as CSV. That export deliberately omits identity fields such as emails and organization names.</p>
-    <p>When the installed Codex app server exposes earned resets, each Codex account shows OpenAI’s authoritative available count. The reset panel includes any titles, descriptions, and expirations OpenAI returned. Manual use always asks for confirmation and works with active or inactive saved accounts.</p>
-    <p>Automatic reset use is off by default and enabled separately for each account. It applies only to the active Codex account after a fresh <code>rate_limit_reached</code> response—not near a limit or for workspace billing states. When that hard-limit response occurs, the enabled reset runs before automatic account switching is evaluated.</p>
-    <p>Warnings are optional. You can be notified when an account approaches a configured limit or when a previously depleted account is likely available again. Manual switching is the default; optional switching at 5% session remaining or 1% weekly remaining stays off until you explicitly enable it.</p>
-    <p>If you do choose another account, the same menu-bar app performs a verified, reversible CLI authentication switch while leaving unrelated settings alone. Read the focused setup guides for <a href="/guides/switch-claude-code-accounts-mac">Claude Code accounts</a> and <a href="/guides/manage-multiple-codex-accounts-mac">Codex CLI accounts</a>.</p>
-  </section>
-
-  <section id="accuracy">
-    <h2>Where do the readings and credentials come from?</h2>
-    <p>Claude usage is fetched with the saved account’s OAuth credentials, with Claude Code’s local usage view as a fallback. Codex usage and earned-reset redemption use the locally installed Codex app server with an isolated temporary credential copy for the selected account; token updates are saved only if no newer external CLI login replaced them. Recent local session data remains an active-account fallback, but it cannot expose or redeem resets. Failed accounts keep their last successful reading and display its age.</p>
-    <p>Earned resets are provider-supported subscription entitlements, not a rate-limit bypass or paid usage credit. If the backend or installed Codex version does not expose the capability, Limit Lifeboat hides the reset control.</p>
-    <p>Profiles and history stay under your user Library. App-managed credential snapshots are encrypted by macOS Keychain and are neither synced to iCloud nor included in device backups. During a switch, short-lived rollback files are protected by filesystem permissions rather than Keychain encryption, and are removed once the switch commits or rolls back. Limit Lifeboat has no product analytics, advertising, or telemetry, and the website has no analytics scripts or cookies set by the project.</p>
-    <p>Review the exact storage locations, network destinations, permissions, and recovery behavior in the <a href="/privacy">privacy documentation</a>. The source and release process are also public on GitHub, and <a href="/support">support</a> lists the checks to run when a reading looks wrong.</p>
+    <p>
+      Limit Lifeboat fetches Claude usage with the saved account's OAuth credentials, falling back to
+      Claude Code's local usage view. Codex usage and earned-reset redemption use the locally
+      installed Codex app server with an isolated temporary credential copy for the selected account;
+      token updates are saved only if no newer external CLI login replaced them. Earned resets are
+      provider-issued entitlements reported and enforced by OpenAI — they can be displayed and
+      redeemed, not created, and they do not bypass a limit.
+    </p>
+    <p>
+      Profiles and history stay under your user Library. Credential snapshots are encrypted by the
+      macOS Keychain and are neither synced to iCloud nor included in device backups; during a switch,
+      short-lived rollback files are protected by filesystem permissions rather than Keychain
+      encryption, and are removed once the switch commits or rolls back. The exact storage locations,
+      network destinations and permissions are in the <a href="/privacy">privacy documentation</a>,
+      and <a href="/support">support</a> lists the checks to run when a reading looks wrong.
+    </p>
+    <p>
+      Once you trust the reading, the decision it feeds is which account to work on. That is covered
+      in <a href="/guides/claude-code-limit-reached">what to do when the limit is reached</a>, and the
+      mechanics in <a href="/guides/switch-claude-code-accounts-mac">switching Claude Code accounts</a>
+      and <a href="/guides/manage-multiple-codex-accounts-mac">using multiple Codex CLI accounts</a>.
+    </p>
   </section>
 </GuideLayout>

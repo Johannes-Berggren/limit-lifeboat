@@ -1,0 +1,200 @@
+---
+import AnswerBlock from "../../components/AnswerBlock.astro";
+import { getGuide } from "../../data/pages";
+import GuideLayout from "../../layouts/GuideLayout.astro";
+
+const meta = getGuide("/guides/check-active-claude-code-account");
+
+const faqs = [
+  {
+    question: "How do I see which Claude Code account I am logged in as?",
+    answer:
+      "Run /status inside Claude Code. It reports the authenticated account, including the email and organization. For Codex CLI the equivalent is codex login status. Both read local state, so they tell you what the CLI believes rather than what the provider just charged.",
+  },
+  {
+    question: "Why does Claude Code show the wrong account after switching?",
+    answer:
+      "Because the credential and the displayed identity are stored separately. The credential lives in the Claude Code-credentials Keychain item; the displayed account comes from the oauthAccount field in the .claude.json config file. A switcher that updates the first and not the second leaves the CLI authenticating as one account while reporting another.",
+  },
+  {
+    question: "I switched accounts and it still says my limit is reached. Why?",
+    answer:
+      "Three common reasons: the switch did not complete and you are still on the depleted account; a Claude Code session started before the switch is still holding the old credential; or you switched the CLI while reading a limit from the browser session, which is a separate login. Check the active identity first, then restart the session.",
+  },
+  {
+    question: "Does the browser session tell me which account the CLI is using?",
+    answer:
+      "No. claude.ai in a browser, the Claude desktop app, and Claude Code each hold their own session. The same is true of chatgpt.com and Codex CLI. Being signed into one account on the web says nothing about which account your CLI will bill.",
+  },
+  {
+    question: "Is checking the account after a switch really necessary?",
+    answer:
+      "It is the difference between a switch that worked and a switch that appeared to. The cost of getting it wrong is not an error message — it is an afternoon of work billed to an employer or client who did not authorize it, which you find out about later.",
+  },
+];
+---
+
+<GuideLayout
+  meta={meta}
+  introduction="Every account switcher moves a credential. Far fewer confirm which account the CLI actually landed on afterwards — and because the credential and the displayed identity are stored in different places, those two things can disagree without anything appearing to go wrong."
+  faqs={faqs}
+  ctaHeading="Confirm the account, do not assume it."
+>
+  <Fragment slot="nav">
+    <a href="#check">Checking, per CLI</a>
+    <a href="#where">Where identity is stored</a>
+    <a href="#diverge">How the two disagree</a>
+    <a href="#still-limited">"I switched and it still says limit reached"</a>
+    <a href="#surfaces">Browser, desktop app and CLI</a>
+    <a href="#questions">Questions</a>
+    <a href="#related">Related guides</a>
+  </Fragment>
+
+  <AnswerBlock
+    facts={[
+      "Claude Code: run /status. Codex CLI: run codex login status.",
+      "The credential lives in the Claude Code-credentials Keychain item.",
+      "The displayed account comes from oauthAccount in the .claude.json config file.",
+      "Updating one without the other makes the CLI authenticate as A and report B.",
+      "A session started before a switch keeps using the credential it started with.",
+    ]}
+  >
+    <p>
+      To confirm which account Claude Code is using, run <code>/status</code> inside Claude Code; for
+      Codex CLI, run <code>codex login status</code>. Both report local state. On macOS the working
+      credential is held in the <code>Claude Code-credentials</code> Keychain item while the account
+      shown to you comes from the <code>oauthAccount</code> field in the <code>.claude.json</code>
+      config file, so a tool that writes one and not the other produces a CLI that is authenticated
+      as one account and labelled as another.
+    </p>
+  </AnswerBlock>
+
+  <section id="check">
+    <h2>Checking, per CLI</h2>
+    <h3>Claude Code</h3>
+    <p>
+      Run <code>/status</code> in a Claude Code session. It reports the authenticated account —
+      email, organization and plan — along with version and configuration details. Use
+      <code>/usage</code> separately when what you want is remaining capacity rather than identity;
+      the two questions are related but the commands are not interchangeable.
+    </p>
+    <h3>Codex CLI</h3>
+    <p>
+      Run <code>codex login status</code>. Codex CLI caches its own login under
+      <code>~/.codex/auth.json</code>, independently of ChatGPT on the web, and the IDE extension
+      shares that CLI authentication rather than holding its own.
+    </p>
+    <h3>What these commands cannot tell you</h3>
+    <p>
+      Both read local state. They report the identity the CLI believes it holds, which is the right
+      answer almost always — but if a switch left the two stores inconsistent, a local read can
+      faithfully report the wrong thing. The authoritative check is a request that the provider
+      answers, which is why verification after a switch is worth more than verification before one.
+    </p>
+  </section>
+
+  <section id="where">
+    <h2>Where identity is actually stored</h2>
+    <p>
+      There are three separate locations, and understanding the split is what makes the failure mode
+      predictable rather than mysterious.
+    </p>
+    <ul>
+      <li>
+        <strong>The <code>Claude Code-credentials</code> Keychain item</strong> — the working
+        credential. This is what actually authenticates a request, and therefore what determines
+        which account is billed.
+      </li>
+      <li>
+        <strong><code>oauthAccount</code> in the <code>.claude.json</code> config file</strong> — the
+        account metadata: email, account UUID, organization name. This is what
+        <code>/status</code> displays.
+      </li>
+      <li>
+        <strong><code>oauth:tokenCache</code> and <code>oauth:tokenCacheV2</code> in
+        <code>~/Library/Application Support/Claude/config.json</code></strong> — cached token state.
+      </li>
+    </ul>
+    <p>
+      Nothing enforces agreement between them. They are written by the same tool at the same moment
+      under normal operation, so they agree under normal operation — and a switcher that writes a
+      subset breaks that invariant silently.
+    </p>
+  </section>
+
+  <section id="diverge">
+    <h2>How the two disagree in practice</h2>
+    <p>
+      This is not hypothetical. It was reported against Claude-Usage-Tracker in
+      <a href="https://github.com/hamed-elfayome/Claude-Usage-Tracker/issues/175" rel="nofollow"
+        >issue #175</a
+      >, in unusually precise terms: switching profiles correctly updated the Keychain credential —
+      confirmed by reading <code>subscriptionType</code> back out of the Keychain and watching it
+      change — while <code>oauthAccount</code> retained the previous profile's email, account UUID
+      and organization name. The result was that <code>/status</code> displayed the wrong account
+      after every switch. That issue has since been closed, but the failure class is the one to
+      understand: <em>the switch worked and the label lied.</em>
+    </p>
+    <p>
+      The reason it is expensive is that nothing errors. There is no failed command to notice and no
+      warning to dismiss. You look at the account name, see the one you expected, and work for three
+      hours against a different subscription — sometimes one with pay-as-you-go overage enabled.
+    </p>
+    <p>
+      The defence is for the tool to verify rather than report. Limit Lifeboat confirms which account
+      the CLI actually landed on after every switch, and rolls the switch back if it cannot complete
+      that confirmation; when a safe rollback is not possible it keeps a protected recovery directory
+      and says so rather than guessing. How the alternatives handle verification is covered in the
+      <a href="/guides/claude-code-account-switchers-compared">switcher comparison</a>.
+    </p>
+  </section>
+
+  <section id="still-limited">
+    <h2>"I switched accounts and it still says my limit is reached"</h2>
+    <p>This is the most common way people discover the problem. In rough order of likelihood:</p>
+    <ol>
+      <li>
+        <strong>The switch did not complete.</strong> Check the active identity first. If it still
+        names the depleted account, nothing else in this list applies.
+      </li>
+      <li>
+        <strong>An existing session is holding the old credential.</strong> A Claude Code session
+        that started before the switch keeps the credential it started with. Restart the session —
+        and note that on macOS an IDE extension tab may need reopening rather than just reloading.
+      </li>
+      <li>
+        <strong>You are reading the limit from a different surface.</strong> A limit message in the
+        browser reflects the browser's session, not the CLI's.
+      </li>
+      <li>
+        <strong>The reading is stale.</strong> Usage figures are cached by every tool that shows
+        them, including this one. A number from twenty minutes ago is not evidence about now — see
+        <a href="/guides/claude-code-codex-usage-monitor-mac">why usage numbers disagree</a>.
+      </li>
+      <li>
+        <strong>The second account is genuinely depleted too.</strong> Quotas are separate and
+        provider-enforced. Switching gives you access to that account's own allowance; it does not
+        pool, merge or extend anything. If both are spent, see
+        <a href="/guides/claude-code-limit-reached">what to do when the limit is reached</a>.
+      </li>
+    </ol>
+  </section>
+
+  <section id="surfaces">
+    <h2>Browser, desktop app and CLI are separate</h2>
+    <p>
+      Each surface holds its own session. Signing into claude.ai in a browser does not change which
+      account Claude Code uses, and switching Claude Code does not sign the browser in or out. The
+      same separation applies to chatgpt.com and Codex CLI, with the wrinkle that the Codex IDE
+      extension shares the CLI's authentication and therefore follows a CLI switch.
+    </p>
+    <p>
+      This matters most in the employer-provisioned case, where the browser is signed into a work
+      account and the CLI is meant to be on a personal one, or the reverse. Keeping that boundary
+      visible is the subject of
+      <a href="/guides/work-and-personal-claude-accounts">work and personal accounts</a>, and where
+      the policy line actually sits is covered in
+      <a href="/guides/multiple-claude-accounts-allowed">are multiple accounts allowed</a>.
+    </p>
+  </section>
+</GuideLayout>

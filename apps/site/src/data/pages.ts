@@ -106,11 +106,11 @@ export const guides: readonly GuideMeta[] = [
     description:
       "An honest comparison of the tools that switch Claude Code and Codex CLI logins on macOS, covering write scope, verification, rollback, and licensing.",
     summary:
-      "How Limit Lifeboat, claude-swap, clauth, cc-account-switcher and the menu-bar monitors differ on write scope, verification, and rollback.",
+      "How claude-swap, CCSwitcher, clauth and the rest differ on write scope, verification and rollback — and which of the similar names is not a switcher at all.",
     eyebrow: "Comparison",
     group: "switching",
     datePublished: "2026-08-01",
-    dateModified: "2026-08-01",
+    dateModified: "2026-08-06",
     readingTime: "8 minute read",
     imageAlt:
       "Limit Lifeboat menu-bar dashboard listing several saved Claude Code and Codex CLI accounts with their remaining usage.",
@@ -173,16 +173,16 @@ export const guides: readonly GuideMeta[] = [
   },
   {
     path: "/guides/claude-code-codex-usage-monitor-mac",
-    title: "How to Monitor Claude Code and Codex Usage on Mac",
-    metaTitle: "Monitor Claude Code & Codex Usage on Mac",
+    title: "Why Claude Code and Codex Usage Numbers Disagree",
+    metaTitle: "Why Claude Code Usage Numbers Disagree",
     description:
-      "Monitor Claude Code and Codex usage limits from the Mac menu bar, understand reset windows and stale readings, and get optional warnings before interruptions.",
+      "Claude Code, Codex, and third-party monitors rarely report the same remaining usage. Here is which number to trust, and when a reading is simply stale.",
     summary:
-      "Checking usage once is easy. Seeing every account, spotting a stale reading, and knowing whether a task fits is the harder problem.",
-    eyebrow: "AI coding usage guide",
+      "Checking usage once is easy. Knowing which of four disagreeing numbers is the one that will actually stop you is the harder problem.",
+    eyebrow: "Reading usage accurately",
     group: "limits",
     datePublished: "2026-07-15",
-    dateModified: "2026-08-01",
+    dateModified: "2026-08-06",
     readingTime: "7 minute read",
     imageAlt:
       "Limit Lifeboat menu-bar dashboard showing session and weekly usage meters for three Claude Code accounts and one Codex CLI account.",
@@ -200,7 +200,7 @@ export const guides: readonly GuideMeta[] = [
     eyebrow: "Policy and boundaries",
     group: "policy",
     datePublished: "2026-08-01",
-    dateModified: "2026-08-01",
+    dateModified: "2026-08-06",
     readingTime: "7 minute read",
     imageAlt:
       "Limit Lifeboat showing separate saved accounts, each with its own provider-enforced usage windows.",
@@ -236,12 +236,48 @@ export const guides: readonly GuideMeta[] = [
     eyebrow: "Troubleshooting",
     group: "troubleshooting",
     datePublished: "2026-08-01",
-    dateModified: "2026-08-01",
+    dateModified: "2026-08-06",
     readingTime: "7 minute read",
     imageAlt:
       "Limit Lifeboat showing a Claude Code account whose saved login has expired, with a Log In action available.",
     figcaption:
       "An expired login stays actionable instead of silently reporting stale usage.",
+  },
+  {
+    path: "/guides/claude-code-lost-mcp-servers",
+    title: "Claude Code Lost Your MCP Servers or settings.json",
+    metaTitle: "Claude Code Lost Your MCP Servers",
+    description:
+      "Why Claude Code loses MCP servers, hooks, and permissions, the order to recover them in, and which tools overwrite the file instead of merging into it.",
+    summary:
+      "Four things actually cause this, only one of them is Claude Code's own doing, and the recovery order matters more than the cause.",
+    eyebrow: "Troubleshooting",
+    group: "troubleshooting",
+    datePublished: "2026-08-06",
+    dateModified: "2026-08-06",
+    readingTime: "8 minute read",
+    imageAlt:
+      "Limit Lifeboat switching a Claude Code account while the MCP server and hook configuration stays untouched.",
+    figcaption:
+      "A switch writes authentication fields. Everything configured around them is not the switch's business.",
+  },
+  {
+    path: "/guides/check-active-claude-code-account",
+    title: "How to Check Which Claude Code Account Is Active",
+    metaTitle: "Check Which Claude Code Account Is Active",
+    description:
+      "Confirm which account Claude Code and Codex CLI are actually using, where that identity is stored, and why a switch can look finished before it is.",
+    summary:
+      "The credential and the displayed identity live in different places, and they can disagree. Here is how to check rather than assume.",
+    eyebrow: "Troubleshooting",
+    group: "troubleshooting",
+    datePublished: "2026-08-06",
+    dateModified: "2026-08-06",
+    readingTime: "7 minute read",
+    imageAlt:
+      "Limit Lifeboat showing which saved Claude Code account the CLI is currently authenticated as, with its usage meters.",
+    figcaption:
+      "The active login is stated, not inferred, so a switch is something you confirm rather than assume.",
   },
 ] as const;
 
@@ -273,7 +309,7 @@ export const staticPages: readonly StaticPageMeta[] = [
     title: "Claude Code and Codex Guides",
     summary: "Every guide, grouped by switching, usage limits, policy, and troubleshooting.",
     kicker: "Practical guides",
-    dateModified: "2026-08-01",
+    dateModified: "2026-08-06",
     changefreq: "weekly",
     priority: 0.8,
   },

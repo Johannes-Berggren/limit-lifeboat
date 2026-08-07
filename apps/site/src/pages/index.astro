@@ -8,10 +8,12 @@ import { guides } from "../data/pages";
 import { latestRelease } from "../data/releases";
 import BaseLayout from "../layouts/BaseLayout.astro";
 
+// Three cards, three intents: how to switch, how to confirm it worked, and whether it is
+// allowed at all. The grid is fixed at three columns, so adding a fourth orphans a card.
 const featuredGuides = [
   "/guides/switch-claude-code-accounts-mac",
+  "/guides/check-active-claude-code-account",
   "/guides/multiple-claude-accounts-allowed",
-  "/guides/claude-code-limit-reached",
 ].map((path) => guides.find((guide) => guide.path === path)!);
 
 const faqs = [

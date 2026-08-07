@@ -59,10 +59,34 @@ in the menu bar and does not add a Dock icon. GitHub Releases is the only
 direct-download source for release artifacts.
 
 If version 1.1.3 quits immediately after updating, overwrite the app in
-Applications with version 1.1.4 or newer. Until 1.1.4 is published, the signed
-[1.1.2 release](https://github.com/Johannes-Berggren/limit-lifeboat/releases/tag/v1.1.2)
-is the recovery build. Replacing the app bundle preserves its Application
-Support and Keychain data.
+Applications with version 1.1.4 or newer. Replacing the app bundle preserves
+its Application Support and Keychain data.
+
+## Guides
+
+Longer write-ups live on the website. These are the ones that answer a specific
+question rather than describing the app:
+
+- [How to switch Claude Code accounts on Mac](https://limitlifeboat.com/guides/switch-claude-code-accounts-mac)
+  — the official login flow, and how to change authentication without replacing
+  the configuration around it.
+- [How to check which Claude Code account is active](https://limitlifeboat.com/guides/check-active-claude-code-account)
+  — the credential and the displayed identity are stored separately and can
+  disagree. Why a switch can look finished before it is.
+- [Claude Code lost your MCP servers or settings.json](https://limitlifeboat.com/guides/claude-code-lost-mcp-servers)
+  — the four things that actually cause it, and the recovery order.
+- [Claude Code account switchers compared](https://limitlifeboat.com/guides/claude-code-account-switchers-compared)
+  — write scope, verification and rollback across claude-swap, CCSwitcher,
+  clauth and the rest, plus which similarly named project is not a switcher.
+- [Are multiple Claude Code accounts allowed?](https://limitlifeboat.com/guides/multiple-claude-accounts-allowed)
+  — what the terms actually prohibit, separated from what people assume.
+- [Fixing Claude Code login expired and repeated logouts](https://limitlifeboat.com/guides/claude-code-login-expired)
+  — refresh tokens are single-use, and two processes renewing one is a race.
+- [Why Claude Code and Codex usage numbers disagree](https://limitlifeboat.com/guides/claude-code-codex-usage-monitor-mac)
+  — cost trackers, `/usage` and menu-bar monitors measure different things.
+
+The [full index](https://limitlifeboat.com/guides) also covers Codex CLI
+accounts, usage limits, and keeping work and personal accounts separate.
 
 ## How it works
 
