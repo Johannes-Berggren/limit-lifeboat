@@ -117,6 +117,22 @@ private func runExpectProbe(
         throw ClaudeCodeUsageReaderError.launchFailed(error.localizedDescription)
     }
 
+    // Drain both pipes while the probe runs: expect echoes the full rendered
+    // TUI, so output can exceed the kernel pipe buffer long before the
+    // process exits, and an undrained pipe would block it forever.
+    final class PipeDrain {
+        var data = Data()
+    }
+    let outputDrain = PipeDrain()
+    let errorDrain = PipeDrain()
+    let drainGroup = DispatchGroup()
+    DispatchQueue.global(qos: .utility).async(group: drainGroup) {
+        outputDrain.data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+    }
+    DispatchQueue.global(qos: .utility).async(group: drainGroup) {
+        errorDrain.data = errorPipe.fileHandleForReading.readDataToEndOfFile()
+    }
+
     let waitGroup = DispatchGroup()
     waitGroup.enter()
     DispatchQueue.global(qos: .utility).async {
@@ -130,15 +146,14 @@ private func runExpectProbe(
         throw ClaudeCodeUsageReaderError.timedOut
     }
 
-    let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-    let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-    let output = String(decoding: outputData, as: UTF8.self)
-    let errorOutput = String(decoding: errorData, as: UTF8.self)
+    drainGroup.wait()
+    let output = String(decoding: outputDrain.data, as: UTF8.self)
+    let errorOutput = String(decoding: errorDrain.data, as: UTF8.self)
 
     guard process.terminationStatus == 0 else {
         let stderrSummary = errorOutput.isEmpty
             ? "no stderr"
-            : "\(errorData.count) bytes of stderr"
+            : "\(errorDrain.data.count) bytes of stderr"
         throw ClaudeCodeUsageReaderError.launchFailed(
             "exit \(process.terminationStatus), \(stderrSummary)"
         )

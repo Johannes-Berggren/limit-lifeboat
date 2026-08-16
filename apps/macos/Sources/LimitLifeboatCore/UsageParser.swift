@@ -201,7 +201,7 @@ public struct UsageTextParser: Sendable {
     }
 
     private func firstPercentage(in text: String) -> PercentageMatch? {
-        let pattern = #"(?i)([0-9](?:[0-9])?(?:\.[0-9]+)?|100(?:\.0+)?)\s*%"#
+        let pattern = #"(?i)(?<![0-9.,])([0-9]{1,3}(?:\.[0-9]+)?)\s*%"#
         guard let match = firstMatch(pattern, in: text),
               let value = number(from: text, range: match.range(at: 1)) else {
             return nil

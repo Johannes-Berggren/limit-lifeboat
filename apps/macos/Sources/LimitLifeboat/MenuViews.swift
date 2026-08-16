@@ -8,6 +8,10 @@ struct MenuRootView: View {
     @State private var expandedAccounts: [Provider: UUID] = [:]
     @State private var sessionPolicyNow = Date()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    // Stored, not built in `body`: a publisher created during a body
+    // evaluation is resubscribed on every re-render, which restarts the
+    // 60 s countdown and can keep it from ever firing.
+    private let sessionTicker = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
     var body: some View {
         ZStack {
@@ -31,9 +35,7 @@ struct MenuRootView: View {
         .frame(width: DS.Popover.width, height: DS.Popover.height)
         .tint(DS.accent)
         .onAppear { sessionPolicyNow = Date() }
-        .onReceive(
-            Timer.publish(every: 60, on: .main, in: .common).autoconnect()
-        ) { sessionPolicyNow = $0 }
+        .onReceive(sessionTicker) { sessionPolicyNow = $0 }
     }
 
     private var header: some View {
