@@ -15,6 +15,15 @@ export interface Release {
 
 export const releases: readonly Release[] = [
   {
+    version: "1.1.9",
+    date: "2026-08-16",
+    highlights: [
+      "Retired the orange pace badges in favor of a quieter gauge caption in the account menu.",
+      "Fixed account-row timers, switch-advice edge cases, CLI reporting, usage parsing, and credential probing bugs.",
+      "Added guides for checking the active Claude Code account and recovering lost Claude Code MCP servers.",
+    ],
+  },
+  {
     version: "1.1.8",
     date: "2026-08-04",
     highlights: [
