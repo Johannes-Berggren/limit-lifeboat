@@ -155,7 +155,7 @@ public enum CLIStatusLine {
             return "\(account.provider) —"
         }
         guard let percent = reading.mostConstrainedPercent else {
-            return nil
+            return "\(account.provider) —"
         }
 
         let stale = TimeInterval(reading.ageSeconds) > staleAfter ? "?" : ""
@@ -199,7 +199,7 @@ public enum CLIStatusReportBuilder {
     }
 
     private static func reading(from snapshot: UsageSnapshot, now: Date) -> CLIUsageReading {
-        let windows = snapshot.windows.map {
+        let windows = snapshot.orderedDisplayWindows.map {
             CLIUsageWindow(
                 id: $0.id,
                 kind: $0.kind.rawValue,

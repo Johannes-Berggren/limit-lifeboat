@@ -253,6 +253,43 @@ final class SwitchAdvisorTests: XCTestCase {
         XCTAssertTrue(advice.shouldAutoSwitch)
     }
 
+    func testDepletedSessionWhoseResetElapsedDoesNotAuthorizeAutoSwitch() {
+        // The session hit 100% but its reset rolled over ten minutes ago, so
+        // its quota is back; only the weekly (70% left) still binds. The
+        // depletion escape hatch must be as reset-aware as the early-switch
+        // trigger, or the advisor abandons an account with real headroom.
+        let activeSnapshot = UsageSnapshot(
+            accountID: UUID(),
+            provider: .claude,
+            windows: [
+                window(
+                    id: "session",
+                    kind: .session,
+                    label: "Session",
+                    usedPercent: 100,
+                    resetDate: now.addingTimeInterval(-600)
+                ),
+                window(
+                    id: "weekly-all",
+                    kind: .weekly,
+                    label: "Weekly (all models)",
+                    usedPercent: 30,
+                    resetDate: now.addingTimeInterval(5 * 86_400)
+                )
+            ],
+            source: "test",
+            lastRefreshed: now.addingTimeInterval(-600),
+            parseConfidence: .high
+        )
+        let active = candidate(label: "Claude A", isActiveCLI: true, snapshot: activeSnapshot)
+        let target = candidate(label: "Claude B", snapshot: freshSnapshot(usedPercent: 5))
+
+        let advice = advisor.advise(candidates: [active, target], now: now)
+
+        XCTAssertEqual(advice.bestCandidateID, target.profileID)
+        XCTAssertFalse(advice.shouldAutoSwitch)
+    }
+
     func testStaleTargetWithoutElapsedResetIsIneligible() {
         let target = candidate(label: "Claude B", snapshot: staleSnapshot(usedPercent: 15))
 

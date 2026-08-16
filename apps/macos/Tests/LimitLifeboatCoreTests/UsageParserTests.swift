@@ -35,6 +35,34 @@ final class UsageParserTests: XCTestCase {
         XCTAssertEqual(snapshot.parseConfidence, .medium)
     }
 
+    /// Overage accounts can exceed 100%. The percentage pattern must match
+    /// the whole number rather than a suffix of it — "100.5%" once parsed as
+    /// its tail "00.5%", reporting a fully-exhausted account as untouched.
+    func testParsesOverOneHundredPercentAsDepleted() {
+        let account = AccountProfile(provider: .claude, label: "Claude")
+        let snapshot = parser.parse(
+            text: "Settings Usage 100.5% used Your usage resets in 2 hours",
+            account: account
+        )
+
+        XCTAssertEqual(snapshot.includedRemaining, 0)
+        XCTAssertEqual(snapshot.includedLimit, 100)
+        XCTAssertEqual(snapshot.usedFraction, 1)
+        XCTAssertEqual(snapshot.riskLevel, .depleted)
+    }
+
+    func testParsesTwentyPercentOverLimitAsDepletedNotTwentyPercentUsed() {
+        let account = AccountProfile(provider: .claude, label: "Claude")
+        let snapshot = parser.parse(
+            text: "Settings Usage 120% used Your usage resets in 2 hours",
+            account: account
+        )
+
+        XCTAssertEqual(snapshot.includedRemaining, 0)
+        XCTAssertEqual(snapshot.usedFraction, 1)
+        XCTAssertEqual(snapshot.riskLevel, .depleted)
+    }
+
     func testParsesDepletedLimitReached() {
         let account = AccountProfile(provider: .claude, label: "Claude")
         let snapshot = parser.parse(

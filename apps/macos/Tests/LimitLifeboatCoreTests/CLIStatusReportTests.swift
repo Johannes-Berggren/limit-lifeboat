@@ -101,7 +101,47 @@ final class CLIStatusReportTests: XCTestCase {
 
         let reading = try XCTUnwrap(report.accounts[0].reading)
         XCTAssertEqual(reading.mostConstrainedPercent, 85)
-        XCTAssertEqual(reading.windows.map(\.usedPercent), [34, 85, 2])
+        // Windows follow `orderedDisplayWindows` — the same order the app UI
+        // presents (kind rank, then label).
+        XCTAssertEqual(reading.windows.map(\.usedPercent), [34, 2, 85])
+    }
+
+    /// Legacy files and the web-dashboard fallback persist only the scalar
+    /// remaining/limit pair with `windows == []`; the report must surface the
+    /// window `displayWindows` synthesizes for them, not hide the account.
+    func testScalarOnlySnapshotStillReportsAPercent() throws {
+        let account = profile("Work", .claude, active: true)
+        let scalar = UsageSnapshot(
+            accountID: account.id,
+            provider: .claude,
+            includedRemaining: 38,
+            includedLimit: 100,
+            riskLevel: .healthy,
+            source: "web dashboard",
+            lastRefreshed: now.addingTimeInterval(-60)
+        )
+        let report = CLIStatusReportBuilder.report(
+            profiles: [account],
+            snapshots: [account.id: scalar],
+            now: now
+        )
+
+        let reading = try XCTUnwrap(report.accounts[0].reading)
+        XCTAssertEqual(reading.mostConstrainedPercent, 62)
+        XCTAssertEqual(CLIStatusLine.text(for: report), "claude 62%")
+    }
+
+    /// A reading with no measurable quota still belongs to an active account,
+    /// so the status line degrades to the no-reading dash — "no active
+    /// account" is reserved for when none is active.
+    func testActiveAccountWithMeasurelessReadingKeepsItsSegment() {
+        let account = profile("Work", .claude, active: true)
+        let report = CLIStatusReportBuilder.report(
+            profiles: [account],
+            snapshots: [account.id: snapshot(account.id, .claude, percents: [])],
+            now: now
+        )
+        XCTAssertEqual(CLIStatusLine.text(for: report), "claude —")
     }
 
     /// Age is the field a caller checks before trusting a number, so it has to

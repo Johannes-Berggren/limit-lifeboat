@@ -234,7 +234,7 @@ public struct SwitchAdvisor: Sendable {
                 )
             }
             guard !snapshot.isStale(asOf: now, maxAge: configuration.staleAfter),
-                  effectiveRiskLevel(of: snapshot) != .depleted else {
+                  effectiveRiskLevel(of: snapshot, now: now) != .depleted else {
                 return nil
             }
             // No usage data to score, so the candidate ranks last and never
@@ -296,7 +296,7 @@ public struct SwitchAdvisor: Sendable {
               let activeSnapshot = active.snapshot else {
             return false
         }
-        let isAuthoritativelyDepleted = effectiveRiskLevel(of: activeSnapshot) == .depleted
+        let isAuthoritativelyDepleted = effectiveRiskLevel(of: activeSnapshot, now: now) == .depleted
         let reachedEarlySwitchPoint = !activeSnapshot.isStale(
             asOf: now,
             maxAge: configuration.staleAfter
@@ -341,8 +341,15 @@ public struct SwitchAdvisor: Sendable {
 
     /// The snapshot's most-constrained window leads; the scalar risk level is
     /// the fallback for snapshots with no windows and no used fraction.
-    private func effectiveRiskLevel(of snapshot: UsageSnapshot) -> RiskLevel {
-        snapshot.mostConstrainedWindow?.riskLevel ?? snapshot.riskLevel
+    /// A window whose reset has rolled over since the reading counts as full
+    /// headroom, mirroring `effectiveHeadroom`.
+    private func effectiveRiskLevel(of snapshot: UsageSnapshot, now: Date) -> RiskLevel {
+        let windows = snapshot.orderedDisplayWindows
+        guard !windows.isEmpty else {
+            return snapshot.resetHasElapsed(asOf: now) ? .healthy : snapshot.riskLevel
+        }
+        let live = windows.filter { !$0.resetHasElapsed(asOf: now) }
+        return live.max { $0.usedPercent < $1.usedPercent }?.riskLevel ?? .healthy
     }
 
     private func reason(for target: ScoredTarget) -> String {
