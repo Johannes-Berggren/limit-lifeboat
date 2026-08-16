@@ -457,6 +457,12 @@ struct AccountRowView: View {
     @State private var isHovered = false
     @State private var presentationNow = Date()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    // Stored, not built in `body`, for the same reason as MenuRootView's
+    // session ticker: a publisher created during a body evaluation is a new
+    // instance each time, so `onReceive` resubscribes and restarts the 60 s
+    // countdown. This row re-renders on its own hover state, so moving the
+    // pointer across cards could keep the clock from ever firing.
+    private let presentationTicker = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
     private var presentation: AccountRowPresentation {
         AccountRowPresentation(
@@ -496,9 +502,7 @@ struct AccountRowView: View {
         .animation(reduceMotion ? nil : DS.Motion.standard, value: isExpanded)
         .animation(reduceMotion ? nil : DS.Motion.quick, value: isHovered)
         .onAppear { presentationNow = Date() }
-        .onReceive(
-            Timer.publish(every: 60, on: .main, in: .common).autoconnect()
-        ) { presentationNow = $0 }
+        .onReceive(presentationTicker) { presentationNow = $0 }
         .accessibilityActions {
             if hasExpandableDetails {
                 Button(isExpanded ? "Collapse usage details" : "Expand usage details") {
