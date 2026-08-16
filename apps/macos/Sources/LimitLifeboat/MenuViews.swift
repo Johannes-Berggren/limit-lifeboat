@@ -691,7 +691,15 @@ struct AccountRowView: View {
                 spacing: 0
             ) {
                 ForEach(windows) { window in
-                    UsageGauge(window: window, estimate: estimates[window.id])
+                    // Only the window the presentation elected carries the
+                    // forecast, so a card never shows two competing pace
+                    // captions — and stale or pre-reset readings stay silent.
+                    UsageGauge(
+                        window: window,
+                        depletesAt: presentation.paceForecast?.windowID == window.id
+                            ? presentation.paceForecast?.depletesAt
+                            : nil
+                    )
                 }
             }
             .transition(.opacity.combined(with: .move(edge: .top)))
@@ -747,11 +755,11 @@ struct AccountRowView: View {
     private var statusStrip: some View {
         // A failed refresh takes precedence over the quiet note: the account is
         // showing stale or absent numbers for a reason the user can act on.
-        // A live depletion forecast outranks the quiet note the same way.
+        // Depletion forecasts stay out of here entirely — they ride along in
+        // the gauge caption rather than claiming a tinted strip of their own.
         let problems = presentation.rowMessages
-        let pace = problems.isEmpty ? presentation.paceForecast : nil
-        let note = (problems.isEmpty && pace == nil) ? presentation.footerNote : nil
-        if !problems.isEmpty || pace != nil || note != nil {
+        let note = problems.isEmpty ? presentation.footerNote : nil
+        if !problems.isEmpty || note != nil {
             VStack(alignment: .leading, spacing: DS.Spacing.tight) {
                 ForEach(Array(problems.enumerated()), id: \.offset) { _, problem in
                     HStack(spacing: DS.Spacing.sm) {
@@ -777,13 +785,7 @@ struct AccountRowView: View {
                         }
                     }
                 }
-                if let pace {
-                    Label(paceText(pace), systemImage: "clock.badge.exclamationmark")
-                        .font(.caption)
-                        .foregroundStyle(DS.presentationColor(.warning))
-                        .lineLimit(2)
-                        .help(paceHelp(pace))
-                } else if let note, problems.isEmpty {
+                if let note, problems.isEmpty {
                     Label(note.text, systemImage: note.icon)
                         .font(.caption)
                         .foregroundStyle(DS.presentationColor(note.tone))
@@ -796,7 +798,6 @@ struct AccountRowView: View {
             .padding(.vertical, DS.Spacing.sm)
             .background(
                 (problems.first.map { DS.presentationColor($0.tone) }
-                    ?? pace.map { _ in DS.presentationColor(.warning) }
                     ?? note.map { DS.presentationColor($0.tone) }
                     ?? Color.secondary).opacity(0.065),
                 in: RoundedRectangle(cornerRadius: DS.Radius.small, style: .continuous)
@@ -843,27 +844,6 @@ struct AccountRowView: View {
             return "This profile shares the active Claude login. Switch to it before renewing."
         }
         return nil
-    }
-
-    private func paceText(_ forecast: PaceForecast) -> String {
-        "On pace to run out around \(paceTime(forecast)) (\(forecast.windowLabel))"
-    }
-
-    private func paceHelp(_ forecast: PaceForecast) -> String {
-        var parts = [
-            "At the recent pace, the \(forecast.windowLabel) limit runs out around \(AbsoluteTimestamp.text(forecast.depletesAt))."
-        ]
-        if let reset = forecast.resetDate {
-            parts.append("The window resets \(AbsoluteTimestamp.text(reset)).")
-        }
-        return parts.joined(separator: " ")
-    }
-
-    private func paceTime(_ forecast: PaceForecast) -> String {
-        if Calendar.current.isDate(forecast.depletesAt, inSameDayAs: Date()) {
-            return forecast.depletesAt.formatted(date: .omitted, time: .shortened)
-        }
-        return AbsoluteTimestamp.text(forecast.depletesAt)
     }
 }
 
@@ -1147,7 +1127,8 @@ struct BillingStatusView: View {
 /// A compact quota gauge sized to share one row with every limit on the account.
 struct UsageGauge: View {
     let window: UsageWindow
-    var estimate: BurnRateEstimate? = nil
+    /// When the recent pace projects this limit running out before it resets.
+    var depletesAt: Date? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -1161,12 +1142,6 @@ struct UsageGauge: View {
                         .help(window.label)
 
                     Spacer(minLength: 0)
-
-                    if case .depletesAt = estimate {
-                        Image(systemName: "clock.badge.exclamationmark")
-                            .font(.caption2)
-                            .foregroundStyle(DS.riskColor(.warning))
-                    }
 
                     Text(usageValue)
                         .font(
@@ -1194,15 +1169,14 @@ struct UsageGauge: View {
                 }
                 .frame(height: 5)
 
-                if let resetText = UsageResetTiming.compactText(
-                    resetDate: window.resetDate,
-                    resetDescription: window.resetDescription,
-                    now: context.date
-                ) {
-                    Text(resetText)
+                if let caption = caption(now: context.date) {
+                    caption
                         .font(.caption2)
-                        .foregroundStyle(window.resetHasElapsed(asOf: context.date) ? .secondary : .tertiary)
                         .lineLimit(1)
+                        // Two-part captions run ~145pt; a card crowded with
+                        // four gauges gives each about 140pt. Shrinking beats
+                        // truncating the forecast off the end.
+                        .minimumScaleFactor(0.85)
                         .monospacedDigit()
                 }
             }
@@ -1210,6 +1184,36 @@ struct UsageGauge: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(window.label)
             .accessibilityValue(accessibilityValue(now: context.date))
+        }
+    }
+
+    /// The gauge footer: reset timing, plus the pace forecast when one is
+    /// live. The forecast sits one step brighter than the reset text so it
+    /// reads as the newer fact without needing an alarm color of its own.
+    private func caption(now: Date) -> Text? {
+        let resetText = UsageResetTiming.compactText(
+            resetDate: window.resetDate,
+            resetDescription: window.resetDescription,
+            now: now
+        )
+        let paceText = depletesAt.flatMap {
+            UsageResetTiming.compactPaceText(depletesAt: $0, now: now)
+        }
+        let resetStyle: HierarchicalShapeStyle = window.resetHasElapsed(asOf: now)
+            ? .secondary
+            : .tertiary
+
+        switch (resetText, paceText) {
+        case let (reset?, pace?):
+            return Text(reset).foregroundStyle(resetStyle)
+                + Text(" · ").foregroundStyle(resetStyle)
+                + Text(pace).foregroundStyle(HierarchicalShapeStyle.secondary)
+        case let (reset?, nil):
+            return Text(reset).foregroundStyle(resetStyle)
+        case let (nil, pace?):
+            return Text(pace).foregroundStyle(HierarchicalShapeStyle.secondary)
+        case (nil, nil):
+            return nil
         }
     }
 
@@ -1241,6 +1245,10 @@ struct UsageGauge: View {
         ) {
             parts.append(resetText)
         }
+        if let depletesAt,
+           let paceText = UsageResetTiming.compactPaceText(depletesAt: depletesAt, now: now) {
+            parts.append(paceText)
+        }
         return parts.joined(separator: ", ")
     }
 
@@ -1249,8 +1257,8 @@ struct UsageGauge: View {
         if let resetHelp {
             lines.append(resetHelp)
         }
-        if case .depletesAt(let date) = estimate {
-            lines.append("At the current pace, this limit runs out around \(Self.longClock(date)) before it resets.")
+        if let depletesAt {
+            lines.append("At the current pace, this limit runs out around \(Self.longClock(depletesAt)) before it resets.")
         }
         return lines.joined(separator: "\n")
     }

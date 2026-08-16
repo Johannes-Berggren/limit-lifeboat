@@ -187,4 +187,14 @@ public enum UsageResetTiming {
         }
         return "Resets \(description)"
     }
+
+    /// The pace half of a gauge caption ("empty in 1h"), reusing the same
+    /// round-up duration vocabulary as the reset half. Nil once the projected
+    /// moment has passed, so a stale forecast fades instead of freezing at "1m".
+    public static func compactPaceText(depletesAt: Date, now: Date = Date()) -> String? {
+        guard depletesAt > now else {
+            return nil
+        }
+        return "empty in \(DurationPhrase.short(depletesAt.timeIntervalSince(now)))"
+    }
 }

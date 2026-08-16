@@ -629,6 +629,23 @@ final class ModelsTests: XCTestCase {
         XCTAssertNil(UsageResetTiming.compactText(resetDate: nil, resetDescription: nil))
     }
 
+    func testUsagePaceTimingMatchesResetDurationTiersAndFadesOnceElapsed() {
+        let now = Date(timeIntervalSince1970: 1_783_000_000)
+
+        XCTAssertEqual(
+            UsageResetTiming.compactPaceText(depletesAt: now.addingTimeInterval(45 * 60), now: now),
+            "empty in 45m"
+        )
+        XCTAssertEqual(
+            UsageResetTiming.compactPaceText(depletesAt: now.addingTimeInterval(2 * 3_600), now: now),
+            "empty in 2h"
+        )
+        // A projection the clock has overtaken drops out rather than sticking
+        // at the "1m" floor the duration phrase would otherwise report.
+        XCTAssertNil(UsageResetTiming.compactPaceText(depletesAt: now.addingTimeInterval(-60), now: now))
+        XCTAssertNil(UsageResetTiming.compactPaceText(depletesAt: now, now: now))
+    }
+
     func testMostConstrainedWindowPicksHighestUsedPercent() {
         let snapshot = makeSnapshot(windows: [
             makeWindow(id: "session", kind: .session, usedPercent: 23),
