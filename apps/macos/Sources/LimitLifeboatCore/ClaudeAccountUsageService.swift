@@ -179,6 +179,9 @@ public enum ClaudeAccountUsageFetchError: Error, LocalizedError {
     case accountMismatch
     case unauthorized
     case forbidden
+    /// The provider is throttling usage requests. The credentials are fine and
+    /// nothing was spent — the caller backs off and keeps its last reading.
+    case rateLimited(retryAfter: TimeInterval?)
     case transport(Error)
 
     public var errorDescription: String? {
@@ -209,6 +212,8 @@ public enum ClaudeAccountUsageFetchError: Error, LocalizedError {
             return "The Anthropic usage API rejected the account's tokens."
         case .forbidden:
             return "The Anthropic usage API denied this login access to usage data. Renew the login or ask an organization administrator for access."
+        case .rateLimited:
+            return "The Anthropic usage API is rate limiting requests; the last reading is retained."
         case .transport(let underlying):
             return underlying.localizedDescription
         }
@@ -717,6 +722,8 @@ public struct ClaudeAccountUsageService {
             throw ClaudeAccountUsageFetchError.unauthorized
         } catch ClaudeUsageAPIError.forbidden {
             throw ClaudeAccountUsageFetchError.forbidden
+        } catch ClaudeUsageAPIError.rateLimited(let retryAfter) {
+            throw ClaudeAccountUsageFetchError.rateLimited(retryAfter: retryAfter)
         } catch {
             throw ClaudeAccountUsageFetchError.transport(error)
         }
@@ -857,9 +864,13 @@ public struct ClaudeAccountUsageService {
                 throw ClaudeAccountUsageFetchError.unauthorized
             } catch ClaudeUsageAPIError.forbidden {
                 throw ClaudeAccountUsageFetchError.forbidden
+            } catch ClaudeUsageAPIError.rateLimited(let retryAfter) {
+                throw ClaudeAccountUsageFetchError.rateLimited(retryAfter: retryAfter)
             }
         } catch ClaudeUsageAPIError.forbidden {
             throw ClaudeAccountUsageFetchError.forbidden
+        } catch ClaudeUsageAPIError.rateLimited(let retryAfter) {
+            throw ClaudeAccountUsageFetchError.rateLimited(retryAfter: retryAfter)
         } catch let error as ClaudeAccountUsageFetchError {
             throw error
         } catch {
@@ -884,6 +895,8 @@ public struct ClaudeAccountUsageService {
             throw ClaudeAccountUsageFetchError.unauthorized
         } catch ClaudeUsageAPIError.forbidden {
             throw ClaudeAccountUsageFetchError.forbidden
+        } catch ClaudeUsageAPIError.rateLimited(let retryAfter) {
+            throw ClaudeAccountUsageFetchError.rateLimited(retryAfter: retryAfter)
         } catch {
             throw ClaudeAccountUsageFetchError.transport(error)
         }
@@ -2136,9 +2149,13 @@ public struct ClaudeAccountUsageService {
                 throw ClaudeAccountUsageFetchError.unauthorized
             } catch ClaudeUsageAPIError.forbidden {
                 throw ClaudeAccountUsageFetchError.forbidden
+            } catch ClaudeUsageAPIError.rateLimited(let retryAfter) {
+                throw ClaudeAccountUsageFetchError.rateLimited(retryAfter: retryAfter)
             }
         } catch ClaudeUsageAPIError.forbidden {
             throw ClaudeAccountUsageFetchError.forbidden
+        } catch ClaudeUsageAPIError.rateLimited(let retryAfter) {
+            throw ClaudeAccountUsageFetchError.rateLimited(retryAfter: retryAfter)
         }
     }
 

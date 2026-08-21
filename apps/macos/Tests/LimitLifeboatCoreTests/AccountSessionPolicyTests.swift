@@ -297,13 +297,99 @@ final class AccountSessionPolicyTests: XCTestCase {
         XCTAssertEqual(evaluation.rowMessages.first?.help, "Always Allow is required.")
     }
 
+    // MARK: - Transient failures over still-current numbers
+
+    /// The complaint this exists to fix: a throttled cycle used to put an
+    /// orange "Couldn't refresh" on every card while all of them were showing
+    /// numbers read minutes ago.
+    func testTransientFailuresStaySilentWhileTheReadingIsRecent() {
+        for state: AccountRefreshState in [
+            .readFailed(reason: "The Anthropic usage API responded with status 502."),
+            .rateLimited(retryAt: now.addingTimeInterval(4 * 60))
+        ] {
+            let evaluation = evaluate(
+                refreshState: state,
+                expiresAt: nil,
+                lastSuccessfulRefresh: now.addingTimeInterval(-3 * 60)
+            )
+            XCTAssertTrue(evaluation.rowMessages.isEmpty, "\(state)")
+            // Silence is not a block: the account is still switchable.
+            XCTAssertTrue(evaluation.manualSwitchEligibility.isEligible)
+        }
+    }
+
+    func testTransientFailuresSurfaceOnceTheReadingAges() {
+        let stale = now.addingTimeInterval(-20 * 60)
+
+        let readFailed = evaluate(
+            refreshState: .readFailed(reason: "boom"),
+            expiresAt: nil,
+            lastSuccessfulRefresh: stale
+        )
+        XCTAssertEqual(readFailed.rowMessages.first?.text, "Couldn't refresh")
+        XCTAssertEqual(readFailed.rowMessages.first?.tone, .warning)
+
+        let throttled = evaluate(
+            refreshState: .rateLimited(retryAt: now.addingTimeInterval(4 * 60)),
+            expiresAt: nil,
+            lastSuccessfulRefresh: stale
+        )
+        // Calm, not alarming: nothing here is the user's to fix.
+        XCTAssertEqual(throttled.rowMessages.first?.text, "Usage service busy — retrying in 4m")
+        XCTAssertEqual(throttled.rowMessages.first?.tone, .stale)
+        XCTAssertEqual(throttled.rowMessages.first?.action, .retry)
+    }
+
+    func testThrottleWithoutARetryInstantStillReads() {
+        let evaluation = evaluate(
+            refreshState: .rateLimited(retryAt: nil),
+            expiresAt: nil,
+            lastSuccessfulRefresh: now.addingTimeInterval(-20 * 60)
+        )
+
+        XCTAssertEqual(evaluation.rowMessages.first?.text, "Usage service busy — retrying shortly")
+    }
+
+    func testWithNoReadingToProtectATransientFailureReportsImmediately() {
+        let evaluation = evaluate(
+            refreshState: .readFailed(reason: "boom"),
+            expiresAt: nil,
+            lastSuccessfulRefresh: nil
+        )
+
+        XCTAssertEqual(evaluation.rowMessages.first?.text, "Couldn't refresh")
+    }
+
+    /// The grace covers self-healing reads only. Anything needing the user is
+    /// reported however fresh the numbers are.
+    func testActionableStatesAreNeverSuppressedByTheGrace() {
+        let recent = now.addingTimeInterval(-30)
+        let actionable: [AccountRefreshState] = [
+            .needsLogin(reason: "Log in again."),
+            .providerAccessForbidden(reason: "Ask your administrator."),
+            .credentialRepairRequired(reason: "Repair needed."),
+            .switchRequired(reason: "Switch first."),
+            .usagePaused
+        ]
+
+        for state in actionable {
+            let evaluation = evaluate(
+                refreshState: state,
+                expiresAt: nil,
+                lastSuccessfulRefresh: recent
+            )
+            XCTAssertFalse(evaluation.rowMessages.isEmpty, "\(state)")
+        }
+    }
+
     private func evaluate(
         storedCredentials: StoredCredentialAvailability = .available,
         refreshState: AccountRefreshState,
         expiresAt: Date?,
         isActiveCLI: Bool = false,
         sharesActiveCredentialChain: Bool = false,
-        wasPreviouslyLinked: Bool = true
+        wasPreviouslyLinked: Bool = true,
+        lastSuccessfulRefresh: Date? = nil
     ) -> AccountSessionEvaluation {
         AccountSessionPolicy.evaluate(
             provider: .claude,
@@ -313,6 +399,7 @@ final class AccountSessionPolicyTests: XCTestCase {
             sharesActiveCredentialChain: sharesActiveCredentialChain,
             refreshState: refreshState,
             loginExpiresAt: expiresAt,
+            lastSuccessfulRefresh: lastSuccessfulRefresh,
             now: now
         )
     }

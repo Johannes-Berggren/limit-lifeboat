@@ -4,17 +4,17 @@ import XCTest
 /// Recording HTTPClienting mock, shared with ClaudeOAuthTokenRefresherTests.
 final class MockHTTPClient: HTTPClienting, @unchecked Sendable {
     private let lock = NSLock()
-    private var stubs: [Result<(status: Int, body: Data), Error>] = []
+    private var stubs: [Result<(status: Int, body: Data, headers: [String: String]?), Error>] = []
     private(set) var requests: [URLRequest] = []
 
-    func stub(status: Int, body: Data) {
+    func stub(status: Int, body: Data, headers: [String: String]? = nil) {
         lock.lock()
         defer { lock.unlock() }
-        stubs.append(.success((status, body)))
+        stubs.append(.success((status, body, headers)))
     }
 
-    func stub(status: Int, bodyText: String) {
-        stub(status: status, body: Data(bodyText.utf8))
+    func stub(status: Int, bodyText: String, headers: [String: String]? = nil) {
+        stub(status: status, body: Data(bodyText.utf8), headers: headers)
     }
 
     func stub(error: Error) {
@@ -24,27 +24,29 @@ final class MockHTTPClient: HTTPClienting, @unchecked Sendable {
     }
 
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        let (status, body) = try dequeueResponse(for: request)
+        let (status, body, headers) = try dequeueResponse(for: request)
         let response = HTTPURLResponse(
             url: request.url ?? URL(string: "https://example.invalid")!,
             statusCode: status,
             httpVersion: "HTTP/1.1",
-            headerFields: nil
+            headerFields: headers
         )!
         return (body, response)
     }
 
     /// Keep the synchronous primitive outside the async protocol requirement;
     /// direct lock/unlock calls are unavailable from Swift 6 async contexts.
-    private func dequeueResponse(for request: URLRequest) throws -> (Int, Data) {
+    private func dequeueResponse(
+        for request: URLRequest
+    ) throws -> (Int, Data, [String: String]?) {
         lock.lock()
         defer { lock.unlock() }
         requests.append(request)
         guard !stubs.isEmpty else {
             throw URLError(.unsupportedURL)
         }
-        let (status, body) = try stubs.removeFirst().get()
-        return (status, body)
+        let (status, body, headers) = try stubs.removeFirst().get()
+        return (status, body, headers)
     }
 }
 
@@ -207,13 +209,15 @@ final class ClaudeUsageAPIClientTests: XCTestCase {
         }
     }
 
-    func testThrowsHTTPStatusForRateLimitAndServerErrors() async {
+    /// The catch-all for statuses with no specific handling. 429 has its own
+    /// `.rateLimited` case and 5xx is retried once — both covered separately.
+    func testThrowsHTTPStatusForUnclassifiedFailures() async {
         let httpClient = MockHTTPClient()
-        httpClient.stub(status: 429, bodyText: "{}")
-        httpClient.stub(status: 500, bodyText: "{}")
+        httpClient.stub(status: 400, bodyText: "{}")
+        httpClient.stub(status: 418, bodyText: "{}")
         let client = ClaudeUsageAPIClient(httpClient: httpClient)
 
-        for expectedStatus in [429, 500] {
+        for expectedStatus in [400, 418] {
             do {
                 _ = try await client.fetchUsage(accessToken: "token")
                 XCTFail("Expected http(status:)")
@@ -736,6 +740,137 @@ final class ClaudeUsageAPIClientTests: XCTestCase {
         XCTAssertNil(planLabel())
         XCTAssertNil(planLabel(organizationTier: "mystery_tier"))
         XCTAssertNil(planLabel(organizationType: "claude_enterprise"))
+    }
+
+    // MARK: - Throttling and transient failures
+
+    /// A client whose retry costs no wall-clock time.
+    private func instantRetryClient(_ httpClient: MockHTTPClient) -> ClaudeUsageAPIClient {
+        ClaudeUsageAPIClient(httpClient: httpClient, retryDelay: 0, sleep: { _ in })
+    }
+
+    func testRateLimitCarriesServerRetryAfterAndIsNeverRetried() async {
+        let httpClient = MockHTTPClient()
+        httpClient.stub(status: 429, bodyText: "{}", headers: ["Retry-After": "120"])
+        let client = instantRetryClient(httpClient)
+
+        do {
+            _ = try await client.fetchUsage(accessToken: "token")
+            XCTFail("Expected rateLimited")
+        } catch let error as ClaudeUsageAPIError {
+            guard case .rateLimited(let retryAfter) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(retryAfter, 120)
+        } catch {
+            return XCTFail("Unexpected error: \(error)")
+        }
+        // Retrying is exactly what a throttled endpoint asked us not to do.
+        XCTAssertEqual(httpClient.requests.count, 1)
+    }
+
+    func testRateLimitWithoutRetryAfterLeavesTheDelayToTheCaller() async {
+        let httpClient = MockHTTPClient()
+        httpClient.stub(status: 429, bodyText: "{}")
+        let client = instantRetryClient(httpClient)
+
+        do {
+            _ = try await client.fetchUsage(accessToken: "token")
+            XCTFail("Expected rateLimited")
+        } catch let error as ClaudeUsageAPIError {
+            guard case .rateLimited(let retryAfter) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertNil(retryAfter)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testGatewayFailureSurvivesOneRetry() async throws {
+        let httpClient = MockHTTPClient()
+        httpClient.stub(status: 502, bodyText: "<html>bad gateway</html>")
+        httpClient.stub(status: 200, bodyText: liveResponseJSON)
+        let client = instantRetryClient(httpClient)
+
+        let usage = try await client.fetchUsage(accessToken: "token")
+
+        XCTAssertFalse(usage.windows.isEmpty)
+        XCTAssertEqual(httpClient.requests.count, 2)
+    }
+
+    func testDroppedConnectionSurvivesOneRetry() async throws {
+        let httpClient = MockHTTPClient()
+        httpClient.stub(error: URLError(.networkConnectionLost))
+        httpClient.stub(status: 200, bodyText: liveResponseJSON)
+        let client = instantRetryClient(httpClient)
+
+        let usage = try await client.fetchUsage(accessToken: "token")
+
+        XCTAssertFalse(usage.windows.isEmpty)
+        XCTAssertEqual(httpClient.requests.count, 2)
+    }
+
+    func testRetryHappensAtMostOnce() async {
+        let httpClient = MockHTTPClient()
+        httpClient.stub(status: 503, bodyText: "{}")
+        httpClient.stub(status: 503, bodyText: "{}")
+        httpClient.stub(status: 200, bodyText: liveResponseJSON)
+        let client = instantRetryClient(httpClient)
+
+        do {
+            _ = try await client.fetchUsage(accessToken: "token")
+            XCTFail("Expected the second failure to surface")
+        } catch let error as ClaudeUsageAPIError {
+            guard case .http(let status) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(status, 503)
+        } catch {
+            return XCTFail("Unexpected error: \(error)")
+        }
+        XCTAssertEqual(httpClient.requests.count, 2)
+    }
+
+    func testAuthorizationFailuresAreNeverRetried() async {
+        for status in [401, 403] {
+            let httpClient = MockHTTPClient()
+            httpClient.stub(status: status, bodyText: "{}")
+            httpClient.stub(status: 200, bodyText: liveResponseJSON)
+            let client = instantRetryClient(httpClient)
+
+            _ = try? await client.fetchUsage(accessToken: "token")
+
+            XCTAssertEqual(
+                httpClient.requests.count,
+                1,
+                "A \(status) is a decision, not a blip"
+            )
+        }
+    }
+
+    func testAccountInfoInheritsTheSameThrottleAndRetryHandling() async throws {
+        let httpClient = MockHTTPClient()
+        httpClient.stub(status: 500, bodyText: "{}")
+        httpClient.stub(status: 200, bodyText: #"{"account":{"email":"a@b.co"}}"#)
+        let client = instantRetryClient(httpClient)
+
+        let info = try await client.fetchAccountInfo(accessToken: "token")
+
+        XCTAssertEqual(info.identity?.email, "a@b.co")
+        XCTAssertEqual(httpClient.requests.count, 2)
+
+        let throttled = MockHTTPClient()
+        throttled.stub(status: 429, bodyText: "{}", headers: ["Retry-After": "30"])
+        do {
+            _ = try await instantRetryClient(throttled).fetchAccountInfo(accessToken: "token")
+            XCTFail("Expected rateLimited")
+        } catch let error as ClaudeUsageAPIError {
+            guard case .rateLimited(let retryAfter) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(retryAfter, 30)
+        }
     }
 
     private func planLabel(

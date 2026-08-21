@@ -33,6 +33,41 @@ public enum FlexibleISO8601 {
     }
 }
 
+/// Parses the `Retry-After` header both shapes RFC 9110 allows: delay seconds
+/// ("120") and an HTTP-date ("Wed, 20 Aug 2026 09:12:00 GMT"). A header that
+/// has already passed clamps to 0 rather than going negative, and anything
+/// unrecognizable reads as absent so a malformed header never becomes a
+/// nonsensical backoff.
+public enum HTTPRetryAfter {
+    /// The formatter is cached because every throttled response parses one and
+    /// DateFormatter construction is expensive. IMF-fixdate is locale- and
+    /// zone-invariant by definition, so a fixed POSIX locale and GMT are
+    /// required, not merely convenient.
+    private static let lock = NSLock()
+    private static let httpDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        return formatter
+    }()
+
+    public static func seconds(from headerValue: String?, now: Date = Date()) -> TimeInterval? {
+        guard let raw = headerValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+        if let delay = TimeInterval(raw) {
+            return delay.isFinite ? max(0, delay) : nil
+        }
+        let date: Date? = lock.withLock { httpDateFormatter.date(from: raw) }
+        guard let date else {
+            return nil
+        }
+        return max(0, date.timeIntervalSince(now))
+    }
+}
+
 /// Shared whole-number percent rendering. Quota percentages are 0-100 and
 /// every surface — gauges, menu-bar title, notifications, digests — rounds
 /// them the same way, so two surfaces can never disagree by a point.

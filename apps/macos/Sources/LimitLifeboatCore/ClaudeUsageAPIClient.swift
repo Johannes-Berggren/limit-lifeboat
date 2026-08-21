@@ -3,6 +3,10 @@ import Foundation
 public enum ClaudeUsageAPIError: Error, LocalizedError {
     case unauthorized
     case forbidden
+    /// The endpoint is throttling this caller. `retryAfter` carries the
+    /// server's own `Retry-After` when it sent one; nil means the caller picks
+    /// its own backoff. Nothing is wrong with the login.
+    case rateLimited(retryAfter: TimeInterval?)
     case http(status: Int)
     case network(Error)
     case malformedResponse
@@ -13,6 +17,8 @@ public enum ClaudeUsageAPIError: Error, LocalizedError {
             return "The Anthropic usage API rejected the access token; it needs a refresh or a new login."
         case .forbidden:
             return "The Anthropic usage API denied access to usage data. Renew the login or ask an organization administrator to allow usage access."
+        case .rateLimited:
+            return "The Anthropic usage API is rate limiting requests."
         case .http(let status):
             return "The Anthropic usage API responded with status \(status)."
         case .network(let underlying):
@@ -121,10 +127,32 @@ public struct ClaudeAPIAccountInfo: Equatable, Sendable {
 public struct ClaudeUsageAPIClient: Sendable {
     public static let source = "Anthropic usage API"
 
+    /// One extra attempt for a failure the very next request usually survives —
+    /// a gateway blip or a dropped connection. Deliberately not applied to 429:
+    /// an immediate retry is exactly what a throttled endpoint is asking us not
+    /// to do, so that one is answered by the caller's backoff ledger instead.
+    static let transientRetryDelay: TimeInterval = 1.5
+
     private let httpClient: HTTPClienting
+    private let retryDelay: TimeInterval
+    private let sleep: @Sendable (TimeInterval) async throws -> Void
 
     public init(httpClient: HTTPClienting = URLSessionHTTPClient()) {
+        self.init(httpClient: httpClient, retryDelay: Self.transientRetryDelay)
+    }
+
+    /// Test seam: a zero delay and an injectable sleep keep the retry path fast
+    /// and deterministic without weakening the production defaults.
+    init(
+        httpClient: HTTPClienting,
+        retryDelay: TimeInterval,
+        sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { seconds in
+            try await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+        }
+    ) {
         self.httpClient = httpClient
+        self.retryDelay = retryDelay
+        self.sleep = sleep
     }
 
     public func fetchUsage(accessToken: String) async throws -> ClaudeAPIUsage {
@@ -134,8 +162,13 @@ public struct ClaudeUsageAPIClient: Sendable {
 
     /// Shared GET plumbing for the OAuth endpoints: same header set and the
     /// same error mapping everywhere (401 -> unauthorized, 403 -> forbidden,
-    /// other non-2xx -> http, transport failures -> network, non-object JSON
-    /// -> malformed). A forbidden response must not consume a refresh token.
+    /// 429 -> rateLimited, other non-2xx -> http, transport failures ->
+    /// network, non-object JSON -> malformed). A forbidden response must not
+    /// consume a refresh token.
+    ///
+    /// A gateway or connection failure gets exactly one extra attempt before it
+    /// becomes a visible error, because a single 502 or dropped socket used to
+    /// be enough to put "Couldn't refresh" on every account card.
     private func fetchJSONObject(from url: URL, accessToken: String) async throws -> [String: Any] {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
@@ -144,6 +177,16 @@ public struct ClaudeUsageAPIClient: Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("LimitLifeboat", forHTTPHeaderField: "User-Agent")
 
+        do {
+            return try await attemptJSONObject(request)
+        } catch let error as ClaudeUsageAPIError where Self.isWorthOneRetry(error) {
+            try? await sleep(retryDelay)
+            return try await attemptJSONObject(request)
+        }
+    }
+
+    /// One round trip, fully classified. `fetchJSONObject` owns the retry.
+    private func attemptJSONObject(_ request: URLRequest) async throws -> [String: Any] {
         let data: Data
         let response: HTTPURLResponse
         do {
@@ -165,6 +208,12 @@ public struct ClaudeUsageAPIClient: Sendable {
             throw ClaudeUsageAPIError.unauthorized
         case 403:
             throw ClaudeUsageAPIError.forbidden
+        case 429:
+            throw ClaudeUsageAPIError.rateLimited(
+                retryAfter: HTTPRetryAfter.seconds(
+                    from: response.value(forHTTPHeaderField: "Retry-After")
+                )
+            )
         default:
             throw ClaudeUsageAPIError.http(status: response.statusCode)
         }
@@ -173,6 +222,31 @@ public struct ClaudeUsageAPIClient: Sendable {
             throw ClaudeUsageAPIError.malformedResponse
         }
         return object
+    }
+
+    /// Gateway-class statuses and the connection failures that routinely clear
+    /// on the next attempt. Never 401/403 (a decision, not a blip), never 429
+    /// (retrying is what deepens a throttle), and never a malformed body (a
+    /// second identical response would parse identically).
+    private static func isWorthOneRetry(_ error: ClaudeUsageAPIError) -> Bool {
+        switch error {
+        case .http(let status):
+            return [500, 502, 503, 504].contains(status)
+        case .network(let underlying):
+            guard let urlError = underlying as? URLError else {
+                return false
+            }
+            return [
+                URLError.timedOut,
+                .networkConnectionLost,
+                .cannotConnectToHost,
+                .dnsLookupFailed,
+                .cannotFindHost,
+                .notConnectedToInternet
+            ].contains(urlError.code)
+        case .unauthorized, .forbidden, .rateLimited, .malformedResponse:
+            return false
+        }
     }
 
     private static func oauthErrorCode(in data: Data) -> String? {

@@ -65,6 +65,61 @@ final class AccountRowPresentationTests: XCTestCase {
         XCTAssertNotNil(presentation.footerNote)
     }
 
+    /// The card's own snapshot time is what decides whether a transient failure
+    /// is worth saying out loud — a throttled cycle over three-minute-old
+    /// numbers is not news.
+    func testTransientFailureOverRecentNumbersShowsNothing() {
+        let now = Date()
+        let profile = AccountProfile(provider: .claude, label: "Claude", isActiveCLI: true)
+        let windows = [
+            UsageWindow(id: "session", kind: .session, label: "Session", usedPercent: 28,
+                        resetDate: now.addingTimeInterval(3600), riskLevel: .healthy)
+        ]
+
+        for state: AccountRefreshState in [
+            .rateLimited(retryAt: now.addingTimeInterval(4 * 60)),
+            .readFailed(reason: "The Anthropic usage API responded with status 502.")
+        ] {
+            let presentation = AccountRowPresentation(
+                profile: profile,
+                snapshot: paceSnapshot(
+                    profile: profile,
+                    windows: windows,
+                    lastRefreshed: now.addingTimeInterval(-3 * 60)
+                ),
+                hasStoredSnapshot: true,
+                refreshState: state,
+                adviceReason: nil,
+                now: now
+            )
+
+            XCTAssertTrue(presentation.rowMessages.isEmpty, "\(state)")
+            // The numbers are still there — this is silence, not a blank card.
+            XCTAssertEqual(presentation.gauges.visible.count, 1)
+        }
+    }
+
+    func testThrottleOverAgingNumbersReadsCalmlyRatherThanAsAFailure() {
+        let now = Date()
+        let profile = AccountProfile(provider: .claude, label: "Claude", isActiveCLI: true)
+        let presentation = AccountRowPresentation(
+            profile: profile,
+            snapshot: paceSnapshot(
+                profile: profile,
+                windows: [],
+                lastRefreshed: now.addingTimeInterval(-25 * 60)
+            ),
+            hasStoredSnapshot: true,
+            refreshState: .rateLimited(retryAt: now.addingTimeInterval(6 * 60)),
+            adviceReason: nil,
+            now: now
+        )
+
+        XCTAssertEqual(presentation.refreshProblem?.text, "Usage service busy — retrying in 6m")
+        XCTAssertEqual(presentation.refreshProblem?.tone, .stale)
+        XCTAssertEqual(presentation.refreshProblem?.action, .retry)
+    }
+
     func testUsagePausedShowsCalmRefreshAffordanceAndKeepsSwitchHealthy() {
         let profile = AccountProfile(provider: .claude, label: "Claude", isActiveCLI: true)
         let presentation = AccountRowPresentation(
