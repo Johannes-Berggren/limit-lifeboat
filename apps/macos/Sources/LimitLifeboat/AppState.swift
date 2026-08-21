@@ -122,6 +122,12 @@ final class AppState: ObservableObject {
     /// recovery would deadlock on the gate the poll itself holds.
     private var pendingScheduledClaudeRecoveries: [UUID] = []
     private let scheduledRotationRecoveryPolicy = ScheduledRotationRecoveryPolicy()
+    /// Cooldown in force after the Anthropic usage API throttled us. Scoped to
+    /// the provider, not the profile: a 429 is issued against this caller, so
+    /// every Claude account is throttled at once and polling any of them again
+    /// only deepens it. Cleared by the first successful fetch.
+    private var claudeUsageBackoff: UsageBackoffPolicy.State?
+    private let usageBackoffPolicy = UsageBackoffPolicy()
     /// A single read is enough when the provider-owned state has not changed
     /// since the last accepted observation. Only a newly observed key is
     /// followed by the delayed stability-confirmation read.
@@ -373,11 +379,18 @@ final class AppState: ObservableObject {
             }
             return snapshots[profile.id]
         }
-        return usageRefreshCadencePolicy.interval(
+        let interval = usageRefreshCadencePolicy.interval(
             configuredInterval: TimeInterval(max(1, settings.refreshIntervalMinutes) * 60),
             successfulActiveSnapshots: successfulActiveSnapshots,
             now: now
         )
+        // Wake *after* an active cooldown rather than waking into a skipped
+        // cycle — including when the accelerated near-threshold cadence would
+        // otherwise ask again every minute through a throttle.
+        let cooldown = usageBackoffPolicy.delayUntilRetry(claudeUsageBackoff, now: now)
+        // A little spread so several Macs on one account, and the app's own
+        // wake-up refresh, don't converge on the same instant.
+        return max(interval, cooldown) + Double.random(in: 0...min(30, interval * 0.1))
     }
 
     /// The `Task.sleep` loop does not fire while the Mac sleeps, so the menu
@@ -884,7 +897,19 @@ final class AppState: ObservableObject {
     }
 
     private func refreshClaudeUsageImpl() async {
+        // Stamped before the cooldown check: deciding not to ask is still an
+        // attempt, and the popover's staleness trigger throttles on attempts.
+        // Without this, every popover open during a cooldown would re-enter the
+        // whole refresh cycle to reach the same guard.
         lastClaudeRefreshAttempt = Date()
+        // A throttle applies to this caller, not to one account, so a scheduled
+        // cycle inside the cooldown is skipped whole — and silently. Touching
+        // `refreshStates` here would flicker every row through `.refreshing`
+        // and back for a request that was never made.
+        guard !usageBackoffPolicy.isCoolingDown(claudeUsageBackoff) else {
+            AppLog.usage.debug("Skipping scheduled Claude usage poll: rate-limit cooldown in force")
+            return
+        }
         let claudeProfiles = profiles
             .filter { $0.provider == .claude }
             .sorted { $0.isActiveCLI && !$1.isActiveCLI }
@@ -892,7 +917,11 @@ final class AppState: ObservableObject {
         warnIfSharedClaudeAccounts(claudeProfiles)
         let context = claudeRotationContext()
 
-        for profile in claudeProfiles {
+        for (index, profile) in claudeProfiles.enumerated() {
+            // Spread the accounts out rather than issuing them as one burst.
+            if index > 0 {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
             let liveElsewhere = claudeAccountIsLiveElsewhere(profile, context: context)
             refreshStates[profile.id] = .refreshing
             let liveContext: AutomaticClaudeUsageLiveContext?
@@ -985,8 +1014,27 @@ final class AppState: ObservableObject {
                         pendingScheduledClaudeRecoveries.append(profile.id)
                     }
                 }
+                // The throttle is provider-wide, so the accounts after this one
+                // would only spend doomed requests and deepen it. Abandon the
+                // cycle; they keep their existing state and last reading.
+                if case .rateLimited(let retryAfter) = fetchError {
+                    armClaudeUsageBackoff(retryAfter: retryAfter)
+                    break
+                }
             }
         }
+    }
+
+    /// Records a Claude usage throttle and reschedules the poll past it.
+    private func armClaudeUsageBackoff(retryAfter: TimeInterval?) {
+        let state = usageBackoffPolicy.next(
+            after: claudeUsageBackoff,
+            retryAfter: retryAfter
+        )
+        claudeUsageBackoff = state
+        AppLog.usage.error(
+            "Anthropic usage API rate limited Claude polling (consecutive: \(state.consecutiveThrottles, privacy: .public)); pausing for \(Int(self.usageBackoffPolicy.delayUntilRetry(state)), privacy: .public)s"
+        )
     }
 
     /// Runs at most one queued automatic recovery per eligible profile, after
@@ -998,6 +1046,12 @@ final class AppState: ObservableObject {
     private func drainScheduledClaudeRecoveries() async {
         let candidates = pendingScheduledClaudeRecoveries
         pendingScheduledClaudeRecoveries = []
+        // Recovery is unattended work and issues its own usage request, so it
+        // respects the same cooldown the scheduled poll does. Only an explicit
+        // user action refreshes through a throttle.
+        guard !usageBackoffPolicy.isCoolingDown(claudeUsageBackoff) else {
+            return
+        }
         for profileID in candidates {
             // Re-resolve: a switch while this recovery was queued may have
             // made the profile the live login, which unattended work never
@@ -1202,6 +1256,10 @@ final class AppState: ObservableObject {
         _ result: ClaudeAccountUsageFetchResult,
         for profile: AccountProfile
     ) {
+        // Any answered usage request proves the throttle has lifted — this is
+        // the one funnel every successful Claude API read passes through,
+        // scheduled, retried, or switch-driven.
+        claudeUsageBackoff = nil
         if let info = result.accountInfo {
             accountInfoFetched.insert(profile.id)
             if AccountProfileUpdater.enrich(
@@ -3903,6 +3961,11 @@ final class AppState: ObservableObject {
                         reason: reason
                     )
                 }
+                if case .rateLimited(let retryAfter) = fetchError {
+                    // The switch can't verify usage right now, but the throttle
+                    // it just observed is the same one the poll must respect.
+                    armClaudeUsageBackoff(retryAfter: retryAfter)
+                }
                 return .temporarilyUnavailable(reason: error.localizedDescription)
             }
         case .codex:
@@ -5302,6 +5365,14 @@ final class AppState: ObservableObject {
             case .rotationDeferred(let reason), .switchRequired(let reason):
                 workflowStatus = "deferred"
                 return .deferred(reason: reason)
+            case .rateLimited:
+                // Deferred, not failed: nothing is wrong and the app will pick
+                // it up on its own. This also lets a queued scheduled recovery
+                // back off instead of retrying into the same throttle.
+                workflowStatus = "rate_limited"
+                return .deferred(
+                    reason: "Anthropic is rate limiting usage requests. The last reading is still shown; it will update automatically."
+                )
             case .credentialRepairRequired(let reason), .readFailed(let reason):
                 workflowStatus = "failed"
                 return .failed(reason: reason)
@@ -5514,6 +5585,12 @@ final class AppState: ObservableObject {
                     )
                 } else {
                     applyClaudeRefreshState(outcome.state, for: profile)
+                }
+                // A user-initiated refresh is never blocked by the cooldown —
+                // they asked — but a throttled answer still extends it, so the
+                // scheduled poll does not resume into the same wall.
+                if case .rateLimited(let retryAfter) = fetchError {
+                    armClaudeUsageBackoff(retryAfter: retryAfter)
                 }
             }
         case .codex:

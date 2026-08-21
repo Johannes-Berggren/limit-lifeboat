@@ -37,7 +37,9 @@ public enum ClaudeCredentialOutcomePolicy {
             }
             return .refreshFailed
         case .keychainLocked, .liveCredentialAccessDenied, .credentialUnavailable,
-             .accountMismatch, .noCredentials, .transport:
+             .accountMismatch, .noCredentials, .transport, .rateLimited:
+            // A throttle spends no refresh token, so it is transient noise for
+            // the credential record just like a network failure.
             return nil
         }
     }

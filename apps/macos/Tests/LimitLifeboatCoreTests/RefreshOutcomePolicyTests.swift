@@ -181,4 +181,59 @@ final class RefreshOutcomePolicyTests: XCTestCase {
             XCTAssertFalse(outcome.attemptTUIFallback)
         }
     }
+
+    /// The probe would issue more requests against the very endpoint that just
+    /// told us to stop, and it cannot succeed while the throttle holds.
+    func testRateLimitNeverFallsBackToTheCLIProbe() {
+        let now = Date(timeIntervalSince1970: 1_787_000_000)
+        for active in [true, false] {
+            let outcome = RefreshOutcomePolicy.outcome(
+                for: .rateLimited(retryAfter: 90),
+                isActiveCLI: active,
+                now: now
+            )
+            guard case .rateLimited(let retryAt) = outcome.state else {
+                return XCTFail("Expected rateLimited, got \(outcome.state)")
+            }
+            XCTAssertEqual(retryAt, now.addingTimeInterval(90))
+            XCTAssertFalse(outcome.attemptTUIFallback)
+        }
+    }
+
+    func testRateLimitWithoutServerGuidanceCarriesNoRetryInstant() {
+        let outcome = RefreshOutcomePolicy.outcome(
+            for: .rateLimited(retryAfter: nil),
+            isActiveCLI: true
+        )
+        guard case .rateLimited(let retryAt) = outcome.state else {
+            return XCTFail("Expected rateLimited, got \(outcome.state)")
+        }
+        XCTAssertNil(retryAt)
+    }
+
+    /// A throttle spends no refresh token, so it must not enter the durable
+    /// credential record as an episode.
+    func testRateLimitIsNotACredentialOutcome() {
+        XCTAssertNil(
+            ClaudeCredentialOutcomePolicy.outcome(for: .rateLimited(retryAfter: 60))
+        )
+    }
+
+    func testOnlyReadFailureAndThrottleCountAsTransient() {
+        XCTAssertTrue(AccountRefreshState.readFailed(reason: "x").isTransientRefreshFailure)
+        XCTAssertTrue(AccountRefreshState.rateLimited(retryAt: nil).isTransientRefreshFailure)
+
+        let notTransient: [AccountRefreshState] = [
+            .idle, .refreshing, .ok, .usagePaused, .keychainLocked,
+            .needsLogin(reason: "x"),
+            .providerAccessForbidden(reason: "x"),
+            .rotationDeferred(reason: "x"),
+            .switchRequired(reason: "x"),
+            .credentialRepairRequired(reason: "x"),
+            .authorizationRequired(source: .claudeCode, reason: "x")
+        ]
+        for state in notTransient {
+            XCTAssertFalse(state.isTransientRefreshFailure, "\(state)")
+        }
+    }
 }

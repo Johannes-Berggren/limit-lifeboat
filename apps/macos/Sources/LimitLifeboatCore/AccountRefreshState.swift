@@ -11,6 +11,11 @@ public enum AccountRefreshState: Equatable, Sendable {
     case ok
     /// A transient read failure (network, server, malformed) — retryable.
     case readFailed(reason: String)
+    /// The provider is throttling usage requests (HTTP 429). Nothing is wrong
+    /// with the login and no token was spent, so this stays calm and heals on
+    /// its own; `retryAt` is when the app's backoff will try again, when known.
+    /// Distinct from `readFailed` so a throttle never reads as a failure.
+    case rateLimited(retryAt: Date?)
     /// The provider accepted the login but denied the usage endpoint (scope,
     /// organization, or administrator policy). Renewal may repair stale scope;
     /// unlike `needsLogin`, this never claims the credential has expired.
@@ -59,6 +64,7 @@ public enum AccountRefreshState: Equatable, Sendable {
         case .idle, .refreshing, .ok:
             return false
         case .readFailed,
+             .rateLimited,
              .providerAccessForbidden,
              .rotationDeferred,
              .switchRequired,
@@ -69,6 +75,20 @@ public enum AccountRefreshState: Equatable, Sendable {
              .needsLogin,
              .keychainLocked:
             return true
+        }
+    }
+
+    /// Whether this state is a self-healing read failure rather than something
+    /// the user has to act on. Presentation suppresses these while the shown
+    /// reading is still recent, so one flaky cycle stays invisible.
+    public var isTransientRefreshFailure: Bool {
+        switch self {
+        case .readFailed, .rateLimited:
+            return true
+        case .idle, .refreshing, .ok, .providerAccessForbidden, .rotationDeferred,
+             .switchRequired, .credentialRepairRequired, .authorizationRequired,
+             .credentialAccessBlocked, .usagePaused, .needsLogin, .keychainLocked:
+            return false
         }
     }
 
@@ -97,7 +117,11 @@ public struct RefreshOutcome: Equatable, Sendable {
 }
 
 public enum RefreshOutcomePolicy {
-    public static func outcome(for error: ClaudeAccountUsageFetchError, isActiveCLI: Bool) -> RefreshOutcome {
+    public static func outcome(
+        for error: ClaudeAccountUsageFetchError,
+        isActiveCLI: Bool,
+        now: Date = Date()
+    ) -> RefreshOutcome {
         switch error {
         case .noCredentials:
             // Expected until the account has been the active login once. No CLI
@@ -196,6 +220,14 @@ public enum RefreshOutcomePolicy {
             // the expired-login state.
             return RefreshOutcome(
                 state: .needsLogin(reason: "The provider rejected this account's credentials."),
+                attemptTUIFallback: false
+            )
+        case .rateLimited(let retryAfter):
+            // Never fall back to the CLI probe here: the probe would issue more
+            // requests against the same throttled endpoint, and the row keeps
+            // its last reading anyway.
+            return RefreshOutcome(
+                state: .rateLimited(retryAt: retryAfter.map { now.addingTimeInterval($0) }),
                 attemptTUIFallback: false
             )
         case .refreshFailed(let underlying):

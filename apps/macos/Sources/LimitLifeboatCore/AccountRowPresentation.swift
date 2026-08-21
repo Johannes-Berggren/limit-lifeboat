@@ -157,6 +157,7 @@ public struct AccountRowPresentation: Equatable, Sendable {
             sharesActiveCredentialChain: sharesActiveCredentialChain,
             refreshState: refreshState,
             loginExpiresAt: loginExpiresAt,
+            lastSuccessfulRefresh: snapshot?.lastRefreshed,
             now: now
         )
         self.rowMessages = session.rowMessages

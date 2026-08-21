@@ -68,6 +68,17 @@ public struct AccountSessionEvaluation: Equatable, Sendable {
 public enum AccountSessionPolicy {
     public static let loginExpiryWarningInterval: TimeInterval = 5 * 24 * 60 * 60
 
+    /// How long a *transient* refresh failure stays invisible while the shown
+    /// numbers are still recent. Three cycles at the default five-minute
+    /// cadence, and still inside `UsageThresholds.standard.staleAfter`, so a
+    /// throttled or flaky cycle never puts a warning on a card that is showing
+    /// current data — but genuinely aging data still says so.
+    public static let transientFailureGrace: TimeInterval = 15 * 60
+
+    /// - Parameters:
+    ///   - lastSuccessfulRefresh: when the displayed snapshot was read. Only
+    ///     transient states consult it; nil means "no reading to protect", so
+    ///     every failure is reported immediately.
     public static func evaluate(
         provider: Provider,
         isActiveCLI: Bool,
@@ -76,6 +87,8 @@ public enum AccountSessionPolicy {
         sharesActiveCredentialChain: Bool = false,
         refreshState: AccountRefreshState,
         loginExpiresAt: Date?,
+        lastSuccessfulRefresh: Date? = nil,
+        transientFailureGrace: TimeInterval = AccountSessionPolicy.transientFailureGrace,
         now: Date = Date()
     ) -> AccountSessionEvaluation {
         let accessMessage = accessMessage(
@@ -153,7 +166,12 @@ public enum AccountSessionPolicy {
             )
         }
 
-        if var refreshMessage = refreshMessage(for: refreshState) {
+        if var refreshMessage = refreshMessage(
+            for: refreshState,
+            lastSuccessfulRefresh: lastSuccessfulRefresh,
+            transientFailureGrace: transientFailureGrace,
+            now: now
+        ) {
             // Renewal must never run as a non-activating login for a profile
             // that still shares the live single-use chain. A 403 is still a
             // valid credential, but the CLI must own it before renewal.
@@ -197,7 +215,9 @@ public enum AccountSessionPolicy {
         automatic: Bool
     ) -> AccountSwitchEligibility {
         switch state {
-        case .idle, .ok, .readFailed:
+        // A stale reading, whether from a failed read or a throttle, says
+        // nothing about whether the saved credential can be switched to.
+        case .idle, .ok, .readFailed, .rateLimited:
             return .eligible
         case .providerAccessForbidden:
             return automatic
@@ -380,7 +400,23 @@ public enum AccountSessionPolicy {
         )
     }
 
-    private static func refreshMessage(for state: AccountRefreshState) -> AccountRowMessage? {
+    private static func refreshMessage(
+        for state: AccountRefreshState,
+        lastSuccessfulRefresh: Date?,
+        transientFailureGrace: TimeInterval,
+        now: Date
+    ) -> AccountRowMessage? {
+        // A transient failure over still-current numbers is not news. The
+        // header already says how old the reading is, so staying silent for the
+        // first few cycles keeps a server hiccup from putting a warning on every
+        // card at once. Only `readFailed` and `rateLimited` qualify: every other
+        // problem state needs the user, however fresh the numbers are.
+        if state.isTransientRefreshFailure,
+           let lastSuccessfulRefresh,
+           now.timeIntervalSince(lastSuccessfulRefresh) <= transientFailureGrace {
+            return nil
+        }
+
         switch state {
         case .idle, .refreshing, .ok, .needsLogin, .authorizationRequired,
              .credentialAccessBlocked, .keychainLocked:
@@ -391,6 +427,19 @@ public enum AccountSessionPolicy {
                 icon: "exclamationmark.triangle",
                 tone: .warning,
                 help: reason,
+                action: .retry
+            )
+        case .rateLimited(let retryAt):
+            // Calm on purpose: the provider is busy, the login is fine, and the
+            // app is already waiting. Nothing here is the user's to fix.
+            let retryPhrase = retryAt
+                .map { "retrying in \(DurationPhrase.short($0.timeIntervalSince(now)))" }
+                ?? "retrying shortly"
+            return AccountRowMessage(
+                text: "Usage service busy — \(retryPhrase)",
+                icon: "clock.arrow.circlepath",
+                tone: .stale,
+                help: "Anthropic is rate limiting usage requests. Limit Lifeboat is showing the last reading and will update itself; Retry asks again now.",
                 action: .retry
             )
         case .providerAccessForbidden(let reason):
