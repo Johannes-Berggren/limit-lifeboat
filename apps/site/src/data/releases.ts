@@ -15,6 +15,13 @@ export interface Release {
 
 export const releases: readonly Release[] = [
   {
+    version: "1.1.10",
+    date: "2026-08-25",
+    highlights: [
+      "Absorbed Claude API throttling and Retry-After backoff so recent usage stays visible instead of turning into a refresh failure.",
+    ],
+  },
+  {
     version: "1.1.9",
     date: "2026-08-16",
     highlights: [
