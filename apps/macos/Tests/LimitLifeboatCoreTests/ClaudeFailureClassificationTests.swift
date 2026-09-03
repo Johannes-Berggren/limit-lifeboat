@@ -1,3 +1,4 @@
+import Security
 import XCTest
 @testable import LimitLifeboatCore
 
@@ -81,6 +82,31 @@ final class ClaudeKeychainFailurePolicyTests: XCTestCase {
             .keychainLocked
         )
         XCTAssertEqual(transient(ClaudeAccountUsageFetchError.keychainLocked), .keychainLocked)
+    }
+
+    func testStaleItemReferenceStatusesAreTransientGenerationChanges() {
+        XCTAssertEqual(
+            transient(ClaudeCodeCredentialsKeychainError.keychainError(errSecNoAccessForItem)),
+            .itemChanged
+        )
+        XCTAssertEqual(
+            transient(ClaudeCodeCredentialsKeychainError.keychainError(errSecInvalidItemRef)),
+            .itemChanged
+        )
+        XCTAssertNil(
+            transient(ClaudeCodeCredentialsKeychainError.keychainError(errSecAuthFailed))
+        )
+        XCTAssertNil(
+            transient(ClaudeCodeCredentialsKeychainError.keychainError(errSecItemNotFound))
+        )
+        // The switcher wraps the stale status when the rollback path also hit it.
+        let wrapped = CLISwitcherError.rollbackConflict(
+            paths: [CLISwitcher.claudeKeychainItemPath],
+            recoveryDirectory: URL(fileURLWithPath: "/tmp/recovery"),
+            underlying: ClaudeCodeCredentialsKeychainError.keychainError(errSecNoAccessForItem),
+            disposition: nil
+        )
+        XCTAssertEqual(transient(wrapped), .itemChanged)
     }
 
     func testUnwrapsThroughTypedWrappers() {

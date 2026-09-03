@@ -86,6 +86,10 @@ public enum ClaudeKeychainFailurePolicy {
                 return .itemChanged
             case .securityToolError(.keychainLocked):
                 return .keychainLocked
+            case .keychainError where keychainError.isStaleItemReference:
+                // The in-process item cache lagged a helper write. The item's
+                // generation moved; nothing about its ACL was denied.
+                return .itemChanged
             case .credentialAccessUnavailable(let underlying):
                 return transientFailure(in: underlying, depth: nextDepth)
             default:

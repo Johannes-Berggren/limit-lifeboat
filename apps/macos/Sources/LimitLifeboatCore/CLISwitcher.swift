@@ -12,6 +12,8 @@ private func isTransientClaudeProviderKeychainFailure(
     case .securityToolError(.itemChanged),
          .securityToolError(.keychainLocked):
         return true
+    case .keychainError where error.isStaleItemReference:
+        return true
     case .credentialAccessUnavailable(let underlying):
         return isTransientClaudeProviderKeychainFailure(
             underlying,

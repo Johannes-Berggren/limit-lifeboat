@@ -236,6 +236,87 @@ final class ClaudeKeychainItemLocatorTests: XCTestCase {
         XCTAssertTrue(client.readCalls.isEmpty)
     }
 
+    func testStaleItemReferenceDuringAccessPreflightIsRetriedWithoutPrompting() throws {
+        let location = makeLocation()
+        let client = FakeClaudeKeychainSecurityClient(items: [location])
+        client.data = Data("secret".utf8)
+        var remainingStaleAnswers = 2
+        var accessStatusCalls = 0
+        client.accessStatusHook = {
+            accessStatusCalls += 1
+            guard remainingStaleAnswers > 0 else { return }
+            remainingStaleAnswers -= 1
+            throw ClaudeCodeCredentialsKeychainError.keychainError(errSecNoAccessForItem)
+        }
+        let delays = RecordedDelays()
+        let keychain = makeKeychain(client: client, retryDelay: delays.record)
+
+        XCTAssertEqual(
+            try keychain.readLiveItemJSON(accessMode: .nonInteractive),
+            client.data
+        )
+        XCTAssertEqual(accessStatusCalls, 3)
+        XCTAssertEqual(
+            delays.values,
+            Array(ClaudeCodeCredentialsKeychain.staleItemRetryDelays.prefix(2))
+        )
+        XCTAssertEqual(client.readCalls.count, 1)
+        XCTAssertEqual(client.readCalls.first?.accessMode, .nonInteractive)
+    }
+
+    func testPersistentStaleItemReferenceSurfacesAsTransientAfterBoundedRetries() {
+        let location = makeLocation()
+        let client = FakeClaudeKeychainSecurityClient(items: [location])
+        client.data = Data("secret".utf8)
+        var accessStatusCalls = 0
+        client.accessStatusHook = {
+            accessStatusCalls += 1
+            throw ClaudeCodeCredentialsKeychainError.keychainError(errSecInvalidItemRef)
+        }
+        let delays = RecordedDelays()
+        let keychain = makeKeychain(client: client, retryDelay: delays.record)
+
+        XCTAssertThrowsError(
+            try keychain.readLiveItemJSON(accessMode: .nonInteractive)
+        ) { error in
+            guard case ClaudeCodeCredentialsKeychainError.keychainError(
+                errSecInvalidItemRef
+            ) = error else {
+                return XCTFail("Expected the stale-reference status, got \(error)")
+            }
+            XCTAssertEqual(
+                ClaudeKeychainFailurePolicy.transientFailure(in: error),
+                .itemChanged
+            )
+        }
+        XCTAssertEqual(
+            accessStatusCalls,
+            ClaudeCodeCredentialsKeychain.staleItemRetryDelays.count + 1
+        )
+        XCTAssertEqual(delays.values, ClaudeCodeCredentialsKeychain.staleItemRetryDelays)
+        XCTAssertTrue(client.readCalls.isEmpty)
+    }
+
+    func testOtherKeychainStatusesDuringAccessPreflightAreNotRetried() {
+        let location = makeLocation()
+        let client = FakeClaudeKeychainSecurityClient(items: [location])
+        client.data = Data("secret".utf8)
+        var accessStatusCalls = 0
+        client.accessStatusHook = {
+            accessStatusCalls += 1
+            throw ClaudeCodeCredentialsKeychainError.keychainError(errSecAuthFailed)
+        }
+        let delays = RecordedDelays()
+        let keychain = makeKeychain(client: client, retryDelay: delays.record)
+
+        XCTAssertThrowsError(
+            try keychain.readLiveItemJSON(accessMode: .nonInteractive)
+        )
+        XCTAssertEqual(accessStatusCalls, 1)
+        XCTAssertTrue(delays.values.isEmpty)
+        XCTAssertTrue(client.readCalls.isEmpty)
+    }
+
     func testWriteVerifiesCompleteStoredValueAfterHelperSuccess() {
         let location = makeLocation()
         let client = FakeClaudeKeychainSecurityClient(items: [location])
@@ -479,13 +560,17 @@ final class ClaudeKeychainItemLocatorTests: XCTestCase {
     }
 
     private func makeKeychain(
-        client: FakeClaudeKeychainSecurityClient
+        client: FakeClaudeKeychainSecurityClient,
+        retryDelay: @escaping @Sendable (TimeInterval) -> Void = { _ in
+            XCTFail("The ACL preflight must not sleep in this test")
+        }
     ) -> ClaudeCodeCredentialsKeychain {
         ClaudeCodeCredentialsKeychain(
             serviceName: service,
             accountName: account,
             securityClient: client,
-            liveCredentialBackend: client
+            liveCredentialBackend: client,
+            staleItemRetryDelay: retryDelay
         )
     }
 
@@ -510,6 +595,14 @@ final class ClaudeKeychainItemLocatorTests: XCTestCase {
     }
 
     private func assertSendable<T: Sendable>(_ type: T.Type) {}
+}
+
+private final class RecordedDelays: @unchecked Sendable {
+    private(set) var values: [TimeInterval] = []
+
+    func record(_ delay: TimeInterval) {
+        values.append(delay)
+    }
 }
 
 private final class FakeClaudeKeychainSecurityClient:
