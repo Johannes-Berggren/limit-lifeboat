@@ -46,6 +46,27 @@ public enum ClaudeCodeCredentialsKeychainError: Error, LocalizedError {
         credentialAccessDisposition?.isAccessDenied ?? false
     }
 
+    /// Statuses the legacy Keychain returns for an item reference whose
+    /// backing record was just rewritten by another process (Claude Code's
+    /// `/usr/bin/security` helper, including our own forward write). The
+    /// in-process item cache lags the on-disk generation for a moment, so
+    /// `SecKeychainItemCopyAccess` reports "no access control" (-25243) or an
+    /// invalid reference even though the item is intact. Re-resolving the
+    /// persistent reference shortly afterwards succeeds.
+    public static func isStaleItemReferenceStatus(_ status: OSStatus) -> Bool {
+        status == errSecNoAccessForItem || status == errSecInvalidItemRef
+    }
+
+    /// Whether this error is the stale-reference outcome above, in which case
+    /// callers must treat it like an item generation change rather than an
+    /// authorization denial.
+    public var isStaleItemReference: Bool {
+        if case .keychainError(let status) = self {
+            return Self.isStaleItemReferenceStatus(status)
+        }
+        return false
+    }
+
     public var credentialAccessDisposition: CredentialAccessDisposition? {
         switch self {
         case .credentialAccessUnavailable(let underlying):
@@ -210,6 +231,14 @@ public struct ClaudeCodeCredentialsKeychain:
     private let validateAccess: @Sendable () throws -> Void
     private let securityClient: any ClaudeKeychainSecurityClient
     private let liveCredentialBackend: any ClaudeLiveCredentialBackend
+    /// Blocks the caller between ACL-preflight retries. Injected so tests can
+    /// observe the schedule without sleeping.
+    private let staleItemRetryDelay: @Sendable (TimeInterval) -> Void
+
+    /// Back-off schedule for re-resolving a stale item reference during the
+    /// prompt-free ACL preflight. Restore runs synchronously behind the
+    /// helper process, so the total budget is kept well under a second.
+    static let staleItemRetryDelays: [TimeInterval] = [0.05, 0.1, 0.2, 0.4]
 
     public var supportsExactItemLocations: Bool { true }
 
@@ -223,6 +252,7 @@ public struct ClaudeCodeCredentialsKeychain:
         self.validateAccess = validateAccess
         self.securityClient = SystemClaudeKeychainSecurityClient()
         self.liveCredentialBackend = ClaudeSecurityToolCredentialBackend()
+        self.staleItemRetryDelay = { Thread.sleep(forTimeInterval: $0) }
     }
 
     init(
@@ -230,13 +260,17 @@ public struct ClaudeCodeCredentialsKeychain:
         accountName: String = NSUserName(),
         validateAccess: @escaping @Sendable () throws -> Void = {},
         securityClient: any ClaudeKeychainSecurityClient,
-        liveCredentialBackend: any ClaudeLiveCredentialBackend
+        liveCredentialBackend: any ClaudeLiveCredentialBackend,
+        staleItemRetryDelay: @escaping @Sendable (TimeInterval) -> Void = {
+            Thread.sleep(forTimeInterval: $0)
+        }
     ) {
         self.serviceName = serviceName
         self.accountName = accountName
         self.validateAccess = validateAccess
         self.securityClient = securityClient
         self.liveCredentialBackend = liveCredentialBackend
+        self.staleItemRetryDelay = staleItemRetryDelay
     }
 
     public func locateLiveItem(
@@ -432,7 +466,7 @@ public struct ClaudeCodeCredentialsKeychain:
         at location: ClaudeKeychainItemLocation,
         accessMode: CredentialAccessMode
     ) throws {
-        switch try securityClient.securityToolAccessStatus(at: location) {
+        switch try securityToolAccessStatusRetryingStaleReference(at: location) {
         case .ready:
             return
         case .needsAuthorization:
@@ -445,6 +479,28 @@ public struct ClaudeCodeCredentialsKeychain:
             }
         case .unsupported(let detail):
             throw ClaudeCodeCredentialsKeychainError.unsupportedSecurityToolAccess(detail)
+        }
+    }
+
+    /// The ACL preflight runs immediately after `/usr/bin/security` rewrote
+    /// the item in another process. The legacy Keychain briefly answers with
+    /// a stale-reference status for the fresh persistent reference, which
+    /// used to fail a switch (and its rollback) that then succeeded on the
+    /// very next click. Each attempt re-resolves the item from scratch; the
+    /// inspection stays metadata-only and never prompts.
+    private func securityToolAccessStatusRetryingStaleReference(
+        at location: ClaudeKeychainItemLocation
+    ) throws -> ClaudeSecurityToolAccessStatus {
+        var delays = Self.staleItemRetryDelays[...]
+        while true {
+            do {
+                return try securityClient.securityToolAccessStatus(at: location)
+            } catch let error as ClaudeCodeCredentialsKeychainError
+                where error.isStaleItemReference
+            {
+                guard let delay = delays.popFirst() else { throw error }
+                staleItemRetryDelay(delay)
+            }
         }
     }
 
