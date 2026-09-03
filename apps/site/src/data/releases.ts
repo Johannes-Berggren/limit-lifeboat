@@ -15,6 +15,13 @@ export interface Release {
 
 export const releases: readonly Release[] = [
   {
+    version: "1.1.11",
+    date: "2026-09-03",
+    highlights: [
+      "Retried stale Claude Code Keychain item references after helper writes, preventing false switch failures when macOS hands back an outdated credential pointer.",
+    ],
+  },
+  {
     version: "1.1.10",
     date: "2026-08-25",
     highlights: [
