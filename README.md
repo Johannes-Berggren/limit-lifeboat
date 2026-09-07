@@ -128,9 +128,9 @@ accounts, usage limits, and keeping work and personal accounts separate.
   **Install and Relaunch**; automatic installation is disabled.
 
 Add, rename, or remove accounts from the popover. Settings cover refresh
-frequency, launch at login, automatic update checks, organization-name
-visibility, and notifications. Automatic reset use is configured separately
-on each Codex account's reset panel.
+frequency, launch at login, automatic update checks, a compact icon-only menu
+bar, organization-name visibility, and notifications. Automatic reset use is
+configured separately on each Codex account's reset panel.
 Browser, Claude Desktop, ChatGPT Desktop, and CLI sessions are separate:
 switching affects only the corresponding CLI login.
 
