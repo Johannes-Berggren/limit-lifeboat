@@ -67,6 +67,12 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(memoryGraphEnabled, forKey: Keys.memoryGraphEnabled) }
     }
 
+    /// Keeps the menu-bar footprint to the product mark. Detailed usage stays
+    /// available in the popover, tooltip, and accessibility label.
+    @Published var compactMenuBarEnabled: Bool {
+        didSet { defaults.set(compactMenuBarEnabled, forKey: Keys.compactMenuBarEnabled) }
+    }
+
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -85,6 +91,7 @@ final class SettingsStore: ObservableObject {
         self.budgetSuggestionsEnabled = defaults.object(forKey: Keys.budgetSuggestionsEnabled) as? Bool ?? true
         self.cacheAlertsEnabled = defaults.object(forKey: Keys.cacheAlertsEnabled) as? Bool ?? true
         self.memoryGraphEnabled = defaults.object(forKey: Keys.memoryGraphEnabled) as? Bool ?? false
+        self.compactMenuBarEnabled = defaults.object(forKey: Keys.compactMenuBarEnabled) as? Bool ?? false
     }
 
     private enum Keys {
@@ -99,5 +106,6 @@ final class SettingsStore: ObservableObject {
         static let budgetSuggestionsEnabled = "budgetSuggestionsEnabled"
         static let cacheAlertsEnabled = "cacheAlertsEnabled"
         static let memoryGraphEnabled = "memoryGraphEnabled"
+        static let compactMenuBarEnabled = "compactMenuBarEnabled"
     }
 }
