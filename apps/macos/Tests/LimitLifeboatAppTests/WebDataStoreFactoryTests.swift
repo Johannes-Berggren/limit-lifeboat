@@ -52,6 +52,17 @@ final class WebDataStoreFactoryTests: XCTestCase {
         )
     }
 
+    func testAProfileCreatedAfterTheFetchStillClaimsItsStore() {
+        // The sweep re-reads the profiles per removal precisely so a store
+        // created while it was suspended is not deleted out from under a live
+        // web view.
+        let late = UUID()
+        XCTAssertTrue(
+            WebDataStoreFactory.isClaimed(late, by: [profile(webDataStoreID: late)])
+        )
+        XCTAssertFalse(WebDataStoreFactory.isClaimed(late, by: []))
+    }
+
     func testCollectsEveryStoreWhenNoProfilesRemain() {
         let first = UUID()
         let second = UUID()

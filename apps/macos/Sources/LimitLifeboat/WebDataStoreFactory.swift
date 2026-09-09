@@ -43,7 +43,9 @@ enum WebDataStoreFactory {
     /// reclaims the stores leaked by versions that removed a profile but left
     /// its store behind.
     @MainActor
-    static func removeOrphanedDataStores(keeping profiles: [AccountProfile]) async {
+    static func removeOrphanedDataStores(
+        keeping currentProfiles: @MainActor () -> [AccountProfile]
+    ) async {
         // WebKit's class-level store APIs dispatch their completion onto
         // WebKit's main run loop, which does not exist until WebKit has been
         // initialized on the main thread. Creating a store instance does that
@@ -51,11 +53,14 @@ enum WebDataStoreFactory {
         // the process's first WebKit call, so the completion dispatched through
         // a null run loop.
         _ = WKWebsiteDataStore.default()
-        let identifiers = orphanedDataStoreIdentifiers(
-            existing: await WKWebsiteDataStore.allDataStoreIdentifiers,
-            profiles: profiles
-        )
+        let identifiers = await WKWebsiteDataStore.allDataStoreIdentifiers
         for identifier in identifiers {
+            // Re-read the profiles for every removal rather than filtering a
+            // snapshot taken before the fetch. A profile created while this
+            // was suspended owns a store the snapshot cannot know about, and
+            // deleting one a live web view holds is the very abort this change
+            // exists to prevent.
+            guard !isClaimed(identifier, by: currentProfiles()) else { continue }
             do {
                 try await WKWebsiteDataStore.remove(forIdentifier: identifier)
                 AppLog.persistence.info(
@@ -69,19 +74,20 @@ enum WebDataStoreFactory {
         }
     }
 
-    /// The stores in `existing` that no profile claims. A profile only claims
-    /// its identifier while it is `.isolated`: one switched to the shared
-    /// default store has stopped using its own, so that store is collectable
-    /// too.
+    /// The stores in `existing` that no profile claims.
     static func orphanedDataStoreIdentifiers(
         existing: [UUID],
         profiles: [AccountProfile]
     ) -> [UUID] {
-        let claimed = Set(
-            profiles
-                .filter { $0.webDataStoreKind == .isolated }
-                .map(\.webDataStoreID)
-        )
-        return existing.filter { !claimed.contains($0) }
+        existing.filter { !isClaimed($0, by: profiles) }
+    }
+
+    /// Whether any profile is still using the store behind `identifier`. Only
+    /// an `.isolated` profile claims one: a profile switched to the shared
+    /// default store has stopped using its own.
+    static func isClaimed(_ identifier: UUID, by profiles: [AccountProfile]) -> Bool {
+        profiles.contains {
+            $0.webDataStoreKind == .isolated && $0.webDataStoreID == identifier
+        }
     }
 }

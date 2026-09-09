@@ -2601,7 +2601,7 @@ final class AppState: ObservableObject {
     /// `WebDataStoreFactory.removeOrphanedDataStores(keeping:)`. Run once at
     /// launch, before any dashboard window has been opened.
     func removeOrphanedWebDataStores() async {
-        await WebDataStoreFactory.removeOrphanedDataStores(keeping: profiles)
+        await WebDataStoreFactory.removeOrphanedDataStores(keeping: { self.profiles })
     }
 
     func openDashboard(for profile: AccountProfile) {
@@ -2994,11 +2994,14 @@ final class AppState: ObservableObject {
         saveSnapshots()
         updateMenuBarSummary()
         statusMessage = "Removed \(profile.label)."
-        // Last, so nothing above waits on it. The signed-in dashboard session
-        // has to go now rather than at the next launch with the store itself:
-        // this app runs for weeks between launches, and "Remove" promises the
-        // account is gone.
-        await WebDataStoreFactory.eraseDataStoreContents(for: profile)
+        // The signed-in dashboard session has to go now rather than at the next
+        // launch with the store itself: this app runs for weeks between
+        // launches, and "Remove" promises the account is gone. Deliberately not
+        // awaited here -- this scope still holds the provider's credential
+        // mutation until its `defer` runs, and erasing cold-starts WebKit's
+        // networking process, which would gate refresh and switching for that
+        // whole time.
+        Task { await WebDataStoreFactory.eraseDataStoreContents(for: profile) }
     }
 
     // MARK: - CLI switching
