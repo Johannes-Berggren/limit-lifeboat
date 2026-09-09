@@ -2954,12 +2954,11 @@ final class AppState: ObservableObject {
             counts: counter.snapshot
         )
         guard deleted else { return }
-        // The dashboard window owns a WKWebView on this profile's isolated web
-        // data store, and WebKit requires that view to be released before the
-        // store may be removed. Closing the window here starts that teardown;
-        // the store is collected at the next launch, when nothing can still
-        // hold it. Removing it inline here instead ended the process a moment
-        // after the profile disappeared (issue #81).
+        // Ends the account's dashboard session and starts the web view's
+        // teardown. The store this view holds cannot be deleted until that
+        // teardown has finished, which is unprovable here, so deletion waits
+        // for the next launch; removing it inline instead ended the process a
+        // moment after the profile disappeared (issue #81).
         dashboardWindowManager.close(profileID: profileID)
         guard let index = profiles.firstIndex(where: { $0.id == profileID }) else {
             return
@@ -2995,6 +2994,11 @@ final class AppState: ObservableObject {
         saveSnapshots()
         updateMenuBarSummary()
         statusMessage = "Removed \(profile.label)."
+        // Last, so nothing above waits on it. The signed-in dashboard session
+        // has to go now rather than at the next launch with the store itself:
+        // this app runs for weeks between launches, and "Remove" promises the
+        // account is gone.
+        await WebDataStoreFactory.eraseDataStoreContents(for: profile)
     }
 
     // MARK: - CLI switching

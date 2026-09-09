@@ -12,6 +12,26 @@ enum WebDataStoreFactory {
         }
     }
 
+    /// Erases the browsing data inside `profile`'s isolated store, in place.
+    ///
+    /// Deleting the store itself has to wait for the next launch, but the
+    /// account's signed-in dashboard session must not: "Remove" is understood
+    /// to end it now, and this app stays running for weeks at a time. Clearing
+    /// a store's *contents* is the ordinary website-data call, which carries
+    /// none of the "must be released first" precondition that removing the
+    /// store does, so it is safe while a web view still holds the store.
+    @MainActor
+    static func eraseDataStoreContents(for profile: AccountProfile) async {
+        // Never for `.appDefault`: that store is shared, and every other
+        // profile on it would be signed out too.
+        guard profile.webDataStoreKind == .isolated else { return }
+        await WKWebsiteDataStore(forIdentifier: profile.webDataStoreID)
+            .removeData(
+                ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
+                modifiedSince: .distantPast
+            )
+    }
+
     /// Deletes every isolated store on disk that no current profile claims.
     ///
     /// WebKit requires that "WKWebView using the data store must be released
