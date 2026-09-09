@@ -122,6 +122,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await state.refreshAll()
                 state.startBackgroundRefresh()
             }
+
+            // Separate from the refresh chain: reclaiming disk is not worth
+            // delaying the first usage reading by, and no dashboard window can
+            // exist yet, which is the one moment these stores are removable.
+            Task {
+                await state.removeOrphanedWebDataStores()
+            }
         } catch {
             let alert = NSAlert()
             alert.messageText = "Limit Lifeboat could not start"

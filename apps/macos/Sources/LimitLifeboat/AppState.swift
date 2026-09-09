@@ -5,7 +5,6 @@ import LimitLifeboatAppWorkflows
 import LimitLifeboatCore
 import os
 import Security
-import WebKit
 
 @MainActor
 final class AppState: ObservableObject {
@@ -2597,6 +2596,14 @@ final class AppState: ObservableObject {
         return snapshot
     }
 
+    /// Deletes the isolated web data stores of profiles that no longer exist.
+    /// Removal cannot do this itself; see
+    /// `WebDataStoreFactory.removeOrphanedDataStores(keeping:)`. Run once at
+    /// launch, before any dashboard window has been opened.
+    func removeOrphanedWebDataStores() async {
+        await WebDataStoreFactory.removeOrphanedDataStores(keeping: profiles)
+    }
+
     func openDashboard(for profile: AccountProfile) {
         dashboardWindowManager.open(profile: profile) { [weak self] text in
             self?.ingestDashboardText(text, for: profile, source: profile.provider.dashboardURL.absoluteString)
@@ -2947,9 +2954,13 @@ final class AppState: ObservableObject {
             counts: counter.snapshot
         )
         guard deleted else { return }
-        if profile.webDataStoreKind == .isolated {
-            WKWebsiteDataStore.remove(forIdentifier: profile.webDataStoreID) { _ in }
-        }
+        // The dashboard window owns a WKWebView on this profile's isolated web
+        // data store, and WebKit requires that view to be released before the
+        // store may be removed. Closing the window here starts that teardown;
+        // the store is collected at the next launch, when nothing can still
+        // hold it. Removing it inline here instead ended the process a moment
+        // after the profile disappeared (issue #81).
+        dashboardWindowManager.close(profileID: profileID)
         guard let index = profiles.firstIndex(where: { $0.id == profileID }) else {
             return
         }
