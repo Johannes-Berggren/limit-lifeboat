@@ -37,6 +37,18 @@ final class DashboardWindowManager {
         controller.showWindow(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
+
+    /// Closes the dashboard window for `profileID` and drops the last
+    /// reference to its web view. Called when a profile is removed: a window
+    /// outliving its profile keeps ingesting captured usage text into an
+    /// account that no longer exists, and its web view keeps the profile's
+    /// isolated web data store alive, which blocks that store's deletion.
+    func close(profileID: UUID) {
+        guard let controller = windows.removeValue(forKey: profileID) else {
+            return
+        }
+        controller.window?.close()
+    }
 }
 
 struct DashboardContainerView: View {
