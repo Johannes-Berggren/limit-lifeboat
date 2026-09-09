@@ -44,6 +44,13 @@ enum WebDataStoreFactory {
     /// its store behind.
     @MainActor
     static func removeOrphanedDataStores(keeping profiles: [AccountProfile]) async {
+        // WebKit's class-level store APIs dispatch their completion onto
+        // WebKit's main run loop, which does not exist until WebKit has been
+        // initialized on the main thread. Creating a store instance does that
+        // initialization. Skipping it crashed the app on launch: the sweep was
+        // the process's first WebKit call, so the completion dispatched through
+        // a null run loop.
+        _ = WKWebsiteDataStore.default()
         let identifiers = orphanedDataStoreIdentifiers(
             existing: await WKWebsiteDataStore.allDataStoreIdentifiers,
             profiles: profiles
