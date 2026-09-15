@@ -15,6 +15,13 @@ export interface Release {
 
 export const releases: readonly Release[] = [
   {
+    version: "1.1.13",
+    date: "2026-09-15",
+    highlights: [
+      "Fixed recovery login and account switching after Claude Code clears both tokens. Its exact logged-out state (empty accessToken and refreshToken with expiresAt: 0) is now recognized, while malformed credential data is still rejected.",
+    ],
+  },
+  {
     version: "1.1.12",
     date: "2026-09-10",
     highlights: [
