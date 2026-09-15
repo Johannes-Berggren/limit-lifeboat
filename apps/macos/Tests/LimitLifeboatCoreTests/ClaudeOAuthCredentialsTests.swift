@@ -22,6 +22,37 @@ final class ClaudeOAuthCredentialsTests: XCTestCase {
     }
     """.utf8)
 
+    func testValidatedExtractAcceptsClaudeCodeClearedTokenChainAsLoggedOut() throws {
+        let data = Data(#"{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0,"scopes":["user:inference"],"subscriptionType":"max"},"mcpOAuth":{"server":{"accessToken":"keep"}}}"#.utf8)
+
+        XCTAssertNil(try ClaudeOAuthCredentials.validatedExtract(fromKeychainItemJSON: data))
+    }
+
+    func testValidatedExtractStillRejectsIncompleteOrMalformedTokenChains() {
+        let payloads = [
+            #"{"accessToken":"","refreshToken":"still-present","expiresAt":0}"#,
+            #"{"accessToken":"","refreshToken":"","expiresAt":1800000000000}"#,
+            #"{"accessToken":"","refreshToken":"","expiresAt":false}"#,
+            #"{"accessToken":"","refreshToken":"","expiresAt":"0"}"#,
+            #"{"accessToken":"","refreshToken":""}"#,
+            #"{"refreshToken":"","expiresAt":0}"#,
+            #"{"accessToken":"","expiresAt":0}"#,
+            #"{"accessToken":null,"refreshToken":"","expiresAt":0}"#,
+            #"{}"#,
+            #"null"#
+        ]
+        for payload in payloads {
+            let data = Data("{\"claudeAiOauth\":\(payload)}".utf8)
+            XCTAssertThrowsError(
+                try ClaudeOAuthCredentials.validatedExtract(fromKeychainItemJSON: data)
+            ) { error in
+                guard case ClaudeCodeCredentialsKeychainError.malformedCredentialJSON = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+            }
+        }
+    }
+
     func testExtractsCredentialsFromKeychainItemJSON() throws {
         let credentials = try XCTUnwrap(
             ClaudeOAuthCredentials.extract(fromKeychainItemJSON: keychainItemJSON)
