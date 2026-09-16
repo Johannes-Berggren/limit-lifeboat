@@ -15,6 +15,7 @@ final class SettingsWindowController {
                     settings: state.settings,
                     updater: state.updater,
                     sessionMonitor: state.sessionMonitor,
+                    budgetMode: state.budgetMode,
                     exportUsageHistory: { [weak state] in state?.exportAllUsageHistoryCSV() },
                     applicationSupportDirectory: state.applicationSupportDirectory
                 )
@@ -92,6 +93,7 @@ struct SettingsView: View {
     @ObservedObject var settings: SettingsStore
     @ObservedObject var updater: AppUpdater
     @ObservedObject var sessionMonitor: SessionMonitor
+    @ObservedObject var budgetMode: BudgetModeModel
     /// Optional so previews and tests can construct the view without an
     /// AppState behind it.
     var exportUsageHistory: (() -> Void)? = nil
@@ -177,6 +179,44 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     }
+
+                    Section("Budget Mode") {
+                        Picker("Claude Code", selection: Binding(
+                            get: { budgetMode.status.mode },
+                            set: { budgetMode.apply($0) }
+                        )) {
+                            ForEach(BudgetMode.allCases) { mode in
+                                Text(mode.displayName).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        Text(budgetMode.status.mode.summary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if case .modified(let mode) = budgetMode.status {
+                            Label(
+                                "Some \(mode.displayName) settings were changed in Claude Code since. Pick a mode again to reapply it; switching to Quality keeps your changes.",
+                                systemImage: "pencil.circle"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        }
+                        Toggle("Suggest a cheaper mode when no account is left to switch to", isOn: $settings.budgetSuggestionsEnabled)
+                        Label(
+                            "Writes to ~/.claude/settings.json and restores your previous values when you go back to Quality. Applies to new sessions: changing model or effort mid-session re-reads the whole conversation uncached.",
+                            systemImage: "info.circle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        if let error = budgetMode.error {
+                            StatusBanner(
+                                text: error,
+                                systemImage: "exclamationmark.triangle.fill",
+                                color: DS.danger
+                            )
+                        }
+                    }
+                    .onAppear { budgetMode.reload() }
 
                     Section("Sessions & Memory") {
                         Toggle("Warn when memory is too tight for more agent sessions", isOn: $settings.memoryGuardAlertsEnabled)

@@ -146,9 +146,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         actionIdentifier: String,
         action: String?,
         providerRaw: String?,
-        targetRaw: String?
+        targetRaw: String?,
+        budgetModeRaw: String?
     ) async {
         let provider = providerRaw.flatMap(Provider.init(rawValue:))
+
+        if actionIdentifier == NotificationSwitchAction.budgetActionID,
+           action == NotificationSwitchAction.budgetActionValue,
+           let mode = budgetModeRaw.flatMap(BudgetMode.init(rawValue:)) {
+            state?.performNotificationBudgetMode(mode)
+            return
+        }
 
         if actionIdentifier == NotificationSwitchAction.refreshActionID,
            action == NotificationSwitchAction.refreshActionValue,
@@ -211,11 +219,13 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
         let action = userInfo[NotificationSwitchAction.actionKey] as? String
         let providerRaw = userInfo[NotificationSwitchAction.providerKey] as? String
         let targetRaw = userInfo[NotificationSwitchAction.targetKey] as? String
+        let budgetModeRaw = userInfo[NotificationSwitchAction.budgetModeKey] as? String
         await handleNotificationResponse(
             actionIdentifier: actionIdentifier,
             action: action,
             providerRaw: providerRaw,
-            targetRaw: targetRaw
+            targetRaw: targetRaw,
+            budgetModeRaw: budgetModeRaw
         )
     }
 }

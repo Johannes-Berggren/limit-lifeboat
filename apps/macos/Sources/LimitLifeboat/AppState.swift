@@ -51,6 +51,9 @@ final class AppState: ObservableObject {
 
     let settings: SettingsStore
     let updater: AppUpdater
+    private(set) lazy var budgetMode = BudgetModeModel(
+        applicationSupportDirectory: repository.applicationSupportDirectory
+    )
     private(set) lazy var sessionMonitor = SessionMonitor(
         settings: settings,
         stateDirectory: repository.applicationSupportDirectory
@@ -670,6 +673,20 @@ final class AppState: ObservableObject {
     /// Handles the "Refresh Now" action on a usage-paused notification: runs
     /// the same user-initiated retry the row's Retry button does, so the active
     /// login's expired access token is rotated without opening the popover.
+    func performNotificationBudgetMode(_ mode: BudgetMode) {
+        if budgetMode.apply(mode) {
+            usageAlertController.handleNotificationSwitchOutcome(
+                title: "\(mode.displayName) mode is on",
+                body: "New Claude Code sessions use it. Change it any time in Settings > Budget Mode."
+            )
+        } else {
+            usageAlertController.handleNotificationSwitchOutcome(
+                title: "Budget mode was not changed",
+                body: budgetMode.error ?? "Claude Code settings could not be updated."
+            )
+        }
+    }
+
     func performNotificationRefresh(provider: Provider, profileID: UUID?) async {
         guard provider == .claude else {
             usageAlertController.handleNotificationSwitchOutcome(
@@ -2537,6 +2554,19 @@ final class AppState: ObservableObject {
                 provider: profile.provider,
                 advisedTargetID: switchAdvice[profile.provider]?.bestCandidateID
             )
+        }
+        // Pace alerts are already deduped per reset period, so this follows
+        // at most once per period too.
+        if settings.budgetSuggestionsEnabled {
+            budgetMode.reload()
+            if let suggestion = BudgetSuggestionPolicy.suggestion(
+                provider: profile.provider,
+                current: budgetMode.status,
+                hasPaceAlert: !alerts.isEmpty,
+                hasSwitchCandidate: switchAdvice[profile.provider]?.bestCandidateID != nil
+            ) {
+                usageAlertController.handleBudgetSuggestion(suggestion, profileLabel: profile.label)
+            }
         }
     }
 
