@@ -157,20 +157,6 @@ public struct SessionInsightAggregator: Sendable {
     }
 }
 
-public enum ModelNaming {
-    /// "claude-opus-5" → "Opus 5", "claude-haiku-4-5-20251001" → "Haiku 4.5".
-    public static func short(_ model: String) -> String {
-        var components = model.split(separator: "-").map(String.init)
-        if components.first == "claude" {
-            components.removeFirst()
-        }
-        components.removeAll { $0.count >= 8 && $0.allSatisfy(\.isNumber) }
-        guard let family = components.first else { return model }
-        let version = components.dropFirst().joined(separator: ".")
-        return version.isEmpty ? family.capitalized : "\(family.capitalized) \(version)"
-    }
-}
-
 /// Warns once when a session has been idle long enough that its next message
 /// will re-read the whole context uncached.
 public struct ColdCacheAlertPolicy: Sendable {
