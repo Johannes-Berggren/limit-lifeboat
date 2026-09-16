@@ -24,7 +24,10 @@ final class ClaudeHookInstallerTests: XCTestCase {
         try installer.install(scriptPath: "/Users/me/Library/Application Support/LimitLifeboat/hooks/limit-lifeboat-memory-guard.sh")
 
         let settings = try read()
-        XCTAssertTrue(installer.isInstalled())
+        XCTAssertEqual(
+            installer.status(expectedScriptPath: "/Users/me/Library/Application Support/LimitLifeboat/hooks/limit-lifeboat-memory-guard.sh"),
+            .installed
+        )
         XCTAssertEqual(settings["effortLevel"] as? String, "xhigh")
         let hooks = try XCTUnwrap(settings["hooks"] as? [String: Any])
         XCTAssertNotNil(hooks["PreToolUse"])
@@ -41,7 +44,7 @@ final class ClaudeHookInstallerTests: XCTestCase {
 
         try installer.uninstall()
 
-        XCTAssertFalse(installer.isInstalled())
+        XCTAssertEqual(installer.status(expectedScriptPath: "/x/limit-lifeboat-memory-guard.sh"), .notInstalled)
         XCTAssertNil(try read()["hooks"])
     }
 
@@ -51,6 +54,25 @@ final class ClaudeHookInstallerTests: XCTestCase {
 
         XCTAssertThrowsError(try installer.install(scriptPath: "/x/limit-lifeboat-memory-guard.sh"))
         XCTAssertEqual(try String(contentsOf: settingsURL), "{ // comments are not JSON\n}")
+    }
+
+    func testRefusesUnexpectedButValidHookShapesInsteadOfDroppingThem() throws {
+        let original = #"{"hooks":{"UserPromptSubmit":{"hooks":[{"type":"command","command":"mine.sh"}]}}}"#
+        try write(original)
+        let installer = ClaudeHookInstaller(settingsURL: settingsURL)
+
+        XCTAssertThrowsError(try installer.install(scriptPath: "/x/limit-lifeboat-memory-guard.sh"))
+        XCTAssertEqual(try String(contentsOf: settingsURL), original)
+    }
+
+    func testReportsAHookPointingAtAnOldScriptPathAsNeedingRepair() throws {
+        let installer = ClaudeHookInstaller(settingsURL: settingsURL)
+        try installer.install(scriptPath: "/old/place/limit-lifeboat-memory-guard.sh")
+
+        XCTAssertEqual(installer.status(expectedScriptPath: "/new/place/limit-lifeboat-memory-guard.sh"), .needsRepair)
+
+        try installer.install(scriptPath: "/new/place/limit-lifeboat-memory-guard.sh")
+        XCTAssertEqual(installer.status(expectedScriptPath: "/new/place/limit-lifeboat-memory-guard.sh"), .installed)
     }
 
     private func write(_ text: String) throws {
@@ -81,7 +103,7 @@ final class MemoryGuardHookScriptTests: XCTestCase {
         try? FileManager.default.removeItem(at: directory)
     }
 
-    func testHoldsFirstPromptOfNewSessionThenAllowsResubmission() throws {
+    func testHoldsOncePerHourAcrossSessionsSoRetriesAndHeadlessRunsPass() throws {
         try writeState(.critical, updatedAt: Date())
 
         let first = try run(input: payload(session: "abc"))
@@ -89,8 +111,38 @@ final class MemoryGuardHookScriptTests: XCTestCase {
         XCTAssertTrue(first.stderr.contains("memory is critically low"))
         XCTAssertTrue(first.stderr.contains("1 agent session uses"))
 
+        // Resubmitting, the same session's next prompt, and a headless retry
+        // that arrives as a brand-new session all go through.
         XCTAssertEqual(try run(input: payload(session: "abc")).status, 0)
-        XCTAssertEqual(try run(input: payload(session: "abc")).status, 2)
+        XCTAssertEqual(try run(input: payload(session: "abc")).status, 0)
+        XCTAssertEqual(try run(input: payload(session: "brand-new")).status, 0)
+
+        // Once the hour is up, the next fresh session is held again.
+        let marker = directory.appendingPathComponent("held/last-held")
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-3_700)], ofItemAtPath: marker.path)
+        XCTAssertEqual(try run(input: payload(session: "later")).status, 2)
+    }
+
+    func testBypassVariableSkipsTheHold() throws {
+        try writeState(.critical, updatedAt: Date())
+
+        XCTAssertEqual(try run(input: payload(session: "abc"), environment: ["LIMIT_LIFEBOAT_MEMORY_GUARD": "off"]).status, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("held/last-held").path))
+    }
+
+    func testNoAgentsRunningPublishesOkSoNothingIsHeld() throws {
+        let assessment = MemoryGuardAssessment(
+            level: .critical,
+            sessionCount: 0,
+            sessionFootprintBytes: 0,
+            availableBytes: 1 << 20,
+            estimatedAdditionalSessions: nil,
+            heaviestIdleSession: nil,
+            heaviestIdleSince: nil
+        )
+        try MemoryGuardState(assessment: assessment, now: Date()).write(to: stateURL)
+
+        XCTAssertEqual(try run(input: payload(session: "first")).status, 0)
     }
 
     func testNeverHoldsWhenNotCriticalStaleOrAlreadyRunning() throws {
@@ -144,8 +196,9 @@ final class MemoryGuardHookScriptTests: XCTestCase {
         return String(decoding: data, as: UTF8.self)
     }
 
-    private func run(input: String) throws -> (status: Int32, stderr: String) {
+    private func run(input: String, environment: [String: String] = [:]) throws -> (status: Int32, stderr: String) {
         let process = Process()
+        process.environment = ProcessInfo.processInfo.environment.merging(environment) { $1 }
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
         process.arguments = [scriptURL.path]
         let stdin = Pipe()

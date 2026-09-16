@@ -192,7 +192,7 @@ struct SettingsView: View {
                             set: { sessionMonitor.setPromptHookInstalled($0) }
                         ))
                         Label(
-                            "Adds a hook to ~/.claude/settings.json that pauses the first prompt of a new session while memory is critical. Submit again to start anyway. Running and resumed sessions are never held, and the hook does nothing while Limit Lifeboat is not running.",
+                            "Adds a hook to ~/.claude/settings.json that pauses the first prompt of a new session while memory is critical — at most once an hour; after that, prompts go through. Running and resumed sessions are never held, and the hook does nothing while Limit Lifeboat is not running. Set LIMIT_LIFEBOAT_MEMORY_GUARD=off for orchestrators that should never be held.",
                             systemImage: "info.circle"
                         )
                         .font(.caption)

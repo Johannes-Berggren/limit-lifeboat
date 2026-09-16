@@ -12,8 +12,10 @@ and the switch aborts rather than overwriting it. When a safe rollback is not
 possible it keeps a protected recovery directory and says so, instead of
 guessing.
 
-`settings.json`, MCP server definitions, hooks, permissions, and local history
-are never touched.
+Switching never touches `settings.json`, MCP server definitions, hooks,
+permissions, or local history. The only feature that writes to Claude Code's
+settings is the optional Memory Guard hook, which is off until you turn it on
+and changes only its own entry.
 
 The menu-bar app also shows what every saved account has left — session,
 weekly, and model-scoped windows for Claude, the 7-day window for Codex — so
@@ -172,7 +174,9 @@ reports free memory, and exits 3 when memory is critically low — so
 `limit-lifeboat preflight && claude` refuses to start another session that
 could freeze the machine. The app can also install a Claude Code hook that
 holds the first prompt of a new session in the same situation (Settings >
-Sessions & Memory).
+Sessions & Memory) — at most once an hour across the Mac, so a retry or the
+next session goes through. Set `LIMIT_LIFEBOAT_MEMORY_GUARD=off` in the
+environment of an orchestrator whose sessions should never be held.
 
 It never contacts a provider and never writes to the store: a status line
 redraws on every shell prompt, so it has to be cheap and incapable of spending

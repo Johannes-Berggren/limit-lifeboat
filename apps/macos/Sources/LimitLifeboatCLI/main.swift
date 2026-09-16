@@ -105,7 +105,10 @@ if command == "preflight" {
     guard let memory = SystemMemoryReader().read() else {
         fail("could not read system memory statistics.", .unavailable)
     }
-    let assessment = MemoryGuardPolicy().assess(memory: memory, sessions: sessions, lastActivity: [:], now: Date())
+    // Same transcript pairing as the app, so "heaviest idle" names a session
+    // that is actually idle rather than merely old.
+    let lastActivity = ClaudeTranscriptReader().activities(for: sessions).mapValues(\.lastActivityAt)
+    let assessment = MemoryGuardPolicy().assess(memory: memory, sessions: sessions, lastActivity: lastActivity, now: Date())
     let state = MemoryGuardState(assessment: assessment, now: Date())
     if wantsJSON {
         guard let data = try? JSONEncoder.appEncoder.encode(state), let text = String(data: data, encoding: .utf8) else {
@@ -114,7 +117,7 @@ if command == "preflight" {
         print(text)
     } else {
         let headline: String
-        switch assessment.level {
+        switch assessment.isActionable ? assessment.level : .ok {
         case .ok:
             headline = "Memory OK"
         case .caution:
@@ -125,7 +128,7 @@ if command == "preflight" {
         let room = assessment.estimatedAdditionalSessions.map { " Room for about \($0) more." } ?? ""
         print("\(headline): \(state.message)\(room)")
     }
-    exit(assessment.level == .critical ? ExitCode.memoryCritical.rawValue : ExitCode.success.rawValue)
+    exit(assessment.isActionable && assessment.level == .critical ? ExitCode.memoryCritical.rawValue : ExitCode.success.rawValue)
 }
 
 guard ["status", "list", "active", "statusline"].contains(command) else {

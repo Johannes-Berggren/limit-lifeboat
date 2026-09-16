@@ -56,11 +56,18 @@ final class SessionMonitor: ObservableObject {
 
     func start() {
         guard scanTask == nil else { return }
-        isPromptHookInstalled = hookInstaller.isInstalled()
-        if isPromptHookInstalled {
+        switch hookInstaller.status(expectedScriptPath: hookScriptURL.path) {
+        case .notInstalled:
+            break
+        case .installed:
             // Keep an installed script current with this build's version.
             try? writeHookScript()
+        case .needsRepair:
+            // The hook points at a script path that is no longer ours; left
+            // alone it would fail on every prompt. Reinstall at today's path.
+            setPromptHookInstalled(true)
         }
+        refreshPromptHookStatus()
         scanTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.scan()
@@ -153,7 +160,13 @@ final class SessionMonitor: ObservableObject {
         } catch {
             promptHookError = error.localizedDescription
         }
-        isPromptHookInstalled = hookInstaller.isInstalled()
+        refreshPromptHookStatus()
+    }
+
+    /// Only an entry pointing at this build's script counts as installed, so
+    /// Settings never shows a drifted, failing hook as working.
+    private func refreshPromptHookStatus() {
+        isPromptHookInstalled = hookInstaller.status(expectedScriptPath: hookScriptURL.path) == .installed
     }
 
     private func writeHookScript() throws {
