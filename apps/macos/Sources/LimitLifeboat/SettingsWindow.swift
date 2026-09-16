@@ -244,6 +244,7 @@ struct SettingsView: View {
 
                     Section("Sessions & Memory") {
                         Toggle("Warn when memory is too tight for more agent sessions", isOn: $settings.memoryGuardAlertsEnabled)
+                        Toggle("Warn when an idle session is about to lose its prompt cache", isOn: $settings.cacheAlertsEnabled)
                         Label(
                             "Watches running Claude Code and Codex sessions, including the tools and servers they start. Warns when macOS reports memory pressure or free memory drops low, and points to the heaviest idle session. Sessions are never closed automatically.",
                             systemImage: "info.circle"

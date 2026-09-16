@@ -23,8 +23,15 @@ final class SessionMonitor: ObservableObject {
 
     private let settings: SettingsStore
     private let stateDirectory: URL
+    let insightStore: SessionInsightStore
+    private let aggregator = SessionInsightAggregator()
+    private let coldCachePolicy = ColdCacheAlertPolicy()
+    /// Pids already warned about in their current idle spell.
+    private var coldCacheWarnedPIDs: Set<Int32> = []
+    private var lastSampledAt: Date?
     private let hookInstaller = ClaudeHookInstaller()
     private let notify: (MemoryGuardAssessment) -> Void
+    private let notifyColdCache: ([ColdCacheAlertPolicy.Candidate]) -> Void
     private let policy = MemoryGuardPolicy()
     private let planner = MemoryGuardAlertPlanner()
     private var lastNotified: MemoryGuardAlertPlanner.Record?
@@ -38,11 +45,14 @@ final class SessionMonitor: ObservableObject {
     init(
         settings: SettingsStore,
         stateDirectory: URL,
-        notify: @escaping (MemoryGuardAssessment) -> Void
+        notify: @escaping (MemoryGuardAssessment) -> Void,
+        notifyColdCache: @escaping ([ColdCacheAlertPolicy.Candidate]) -> Void
     ) {
         self.settings = settings
         self.stateDirectory = stateDirectory
+        self.insightStore = SessionInsightStore(applicationSupportDirectory: stateDirectory)
         self.notify = notify
+        self.notifyColdCache = notifyColdCache
     }
 
     private var stateFileURL: URL {
@@ -56,6 +66,8 @@ final class SessionMonitor: ObservableObject {
 
     func start() {
         guard scanTask == nil else { return }
+        // Load past samples so the weekly digest sees more than this launch.
+        try? insightStore.load()
         switch hookInstaller.status(expectedScriptPath: hookScriptURL.path) {
         case .notInstalled:
             break
@@ -137,6 +149,8 @@ final class SessionMonitor: ObservableObject {
         self.assessment = assessment
         try? MemoryGuardState(assessment: assessment, now: now).write(to: stateFileURL)
 
+        recordSample(rows: rows, now: now)
+
         if assessment.level == .ok {
             lastNotified = nil
         } else if settings.memoryGuardAlertsEnabled,
@@ -144,6 +158,40 @@ final class SessionMonitor: ObservableObject {
             lastNotified = .init(level: assessment.level, notifiedAt: now)
             notify(assessment)
         }
+    }
+
+    /// Samples every few minutes for the weekly digest, and warns once when a
+    /// session has been idle long enough to lose its prompt cache.
+    private func recordSample(rows: [AgentSessionRow], now: Date) {
+        let entries = rows.map { row in
+            SessionSample.Entry(
+                pid: row.session.pid,
+                provider: row.session.provider,
+                project: row.session.projectName,
+                model: row.activity?.model,
+                contextTokens: row.activity?.contextTokens ?? 0,
+                idleSeconds: row.activity.map { Int(now.timeIntervalSince($0.lastActivityAt)) }
+            )
+        }
+
+        let livePIDs = Set(entries.map(\.pid))
+        // Re-arm a session once it wakes up or disappears.
+        coldCacheWarnedPIDs = coldCacheWarnedPIDs.intersection(
+            Set(entries.filter { ($0.idleSeconds ?? 0) >= coldCachePolicy.idleSeconds }.map(\.pid))
+        ).intersection(livePIDs)
+
+        if settings.cacheAlertsEnabled {
+            let candidates = coldCachePolicy.candidates(entries: entries, alreadyWarned: coldCacheWarnedPIDs)
+            if !candidates.isEmpty {
+                coldCacheWarnedPIDs.formUnion(candidates.map(\.pid))
+                notifyColdCache(candidates)
+            }
+        }
+
+        let due = lastSampledAt.map { now.timeIntervalSince($0) >= Double(aggregator.sampleMinutes * 60) } ?? true
+        guard due, !entries.isEmpty else { return }
+        lastSampledAt = now
+        try? insightStore.append(SessionSample(timestamp: now, entries: entries))
     }
 
     /// Adds or removes the Claude Code hook that holds new sessions while

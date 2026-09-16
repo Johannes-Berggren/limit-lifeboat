@@ -55,6 +55,12 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(budgetSuggestionsEnabled, forKey: Keys.budgetSuggestionsEnabled) }
     }
 
+    /// Warns when a session has been idle long enough to lose its prompt
+    /// cache, so the next message re-reads the whole context at full price.
+    @Published var cacheAlertsEnabled: Bool {
+        didSet { defaults.set(cacheAlertsEnabled, forKey: Keys.cacheAlertsEnabled) }
+    }
+
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -71,6 +77,7 @@ final class SettingsStore: ObservableObject {
         self.showOrganizationNames = defaults.object(forKey: Keys.showOrganizationNames) as? Bool ?? true
         self.memoryGuardAlertsEnabled = defaults.object(forKey: Keys.memoryGuardAlertsEnabled) as? Bool ?? true
         self.budgetSuggestionsEnabled = defaults.object(forKey: Keys.budgetSuggestionsEnabled) as? Bool ?? true
+        self.cacheAlertsEnabled = defaults.object(forKey: Keys.cacheAlertsEnabled) as? Bool ?? true
     }
 
     private enum Keys {
@@ -83,5 +90,6 @@ final class SettingsStore: ObservableObject {
         static let showOrganizationNames = "showOrganizationNames"
         static let memoryGuardAlertsEnabled = "memoryGuardAlertsEnabled"
         static let budgetSuggestionsEnabled = "budgetSuggestionsEnabled"
+        static let cacheAlertsEnabled = "cacheAlertsEnabled"
     }
 }

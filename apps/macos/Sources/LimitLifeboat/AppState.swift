@@ -59,6 +59,8 @@ final class AppState: ObservableObject {
         stateDirectory: repository.applicationSupportDirectory
     ) { [weak self] assessment in
         self?.usageAlertController.handleMemoryGuard(assessment)
+    } notifyColdCache: { [weak self] candidates in
+        self?.usageAlertController.handleColdCacheRisk(candidates)
     }
 
     private let repository: ProfileRepository
@@ -602,11 +604,22 @@ final class AppState: ObservableObject {
             )
         }
 
-        let digest = planner.build(
+        var digest = planner.build(
             accounts: accounts,
             events: eventStore.events(in: period),
             period: period
         )
+        // "Where your quota went": what the sessions themselves were doing.
+        let aggregator = SessionInsightAggregator()
+        if let summary = aggregator.summary(
+            samples: sessionMonitor.insightStore.samples(in: period),
+            in: period
+        ) {
+            let lines = aggregator.digestLines(for: summary)
+            if !lines.isEmpty, digest != nil {
+                digest?.body += " " + lines.joined(separator: " ")
+            }
+        }
         // Marked sent even when there is nothing to say, so an empty week
         // does not re-run this on every refresh cycle.
         usageAlertController.markWeeklyDigestSent(at: now)
