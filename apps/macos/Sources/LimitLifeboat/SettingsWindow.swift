@@ -14,6 +14,7 @@ final class SettingsWindowController {
                 rootView: SettingsView(
                     settings: state.settings,
                     updater: state.updater,
+                    sessionMonitor: state.sessionMonitor,
                     exportUsageHistory: { [weak state] in state?.exportAllUsageHistoryCSV() },
                     applicationSupportDirectory: state.applicationSupportDirectory
                 )
@@ -90,6 +91,7 @@ enum LaunchAtLogin {
 struct SettingsView: View {
     @ObservedObject var settings: SettingsStore
     @ObservedObject var updater: AppUpdater
+    @ObservedObject var sessionMonitor: SessionMonitor
     /// Optional so previews and tests can construct the view without an
     /// AppState behind it.
     var exportUsageHistory: (() -> Void)? = nil
@@ -184,6 +186,24 @@ struct SettingsView: View {
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
+
+                        Toggle("Hold new Claude Code sessions while memory is critical", isOn: Binding(
+                            get: { sessionMonitor.isPromptHookInstalled },
+                            set: { sessionMonitor.setPromptHookInstalled($0) }
+                        ))
+                        Label(
+                            "Adds a hook to ~/.claude/settings.json that pauses the first prompt of a new session while memory is critical. Submit again to start anyway. Running and resumed sessions are never held, and the hook does nothing while Limit Lifeboat is not running.",
+                            systemImage: "info.circle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        if let error = sessionMonitor.promptHookError {
+                            StatusBanner(
+                                text: error,
+                                systemImage: "exclamationmark.triangle.fill",
+                                color: DS.danger
+                            )
+                        }
                     }
 
                     Section("Updates") {

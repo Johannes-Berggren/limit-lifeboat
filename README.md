@@ -166,6 +166,14 @@ Wire it into Claude Code's own status line in `~/.claude/settings.json`:
 It deliberately does not read stdin, so it cannot block a shell prompt that
 hands it a descriptor nobody closes.
 
+`preflight` checks this Mac directly rather than the store: it counts running
+Claude Code and Codex sessions (including the tools and servers they started),
+reports free memory, and exits 3 when memory is critically low — so
+`limit-lifeboat preflight && claude` refuses to start another session that
+could freeze the machine. The app can also install a Claude Code hook that
+holds the first prompt of a new session in the same situation (Settings >
+Sessions & Memory).
+
 It never contacts a provider and never writes to the store: a status line
 redraws on every shell prompt, so it has to be cheap and incapable of spending
 quota to report on quota. It also does not switch accounts. Switching needs

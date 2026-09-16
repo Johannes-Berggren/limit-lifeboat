@@ -15,7 +15,8 @@ import LimitLifeboatCore
 //      app is exactly the failure this project exists to avoid. Switching
 //      stays in the app until there is a real IPC path to it.
 //
-// Exit codes: 0 success, 1 usage error, 2 could not read the store.
+// Exit codes: 0 success, 1 usage error, 2 could not read the store,
+// 3 `preflight` found memory critically low.
 
 let version = "1.0.0"
 
@@ -23,6 +24,7 @@ enum ExitCode: Int32 {
     case success = 0
     case usage = 1
     case unavailable = 2
+    case memoryCritical = 3
 }
 
 func fail(_ message: String, _ code: ExitCode) -> Never {
@@ -41,6 +43,8 @@ COMMANDS
   list       Saved accounts, without usage
   active     Only the account each provider's CLI is currently logged into
   statusline One compact line for a shell prompt, tmux, or Claude Code
+  preflight  Whether memory has room for another agent session (exit 3 when
+             critically low); reads this Mac directly, not the store
   version    Print the version
 
 OPTIONS
@@ -61,6 +65,9 @@ EXAMPLES
   # Claude Code statusLine, in ~/.claude/settings.json:
   #   "statusLine": { "type": "command", "command": "limit-lifeboat statusline" }
   # A trailing ! means warning or depleted, ? means the reading is over 30m old.
+
+  # Refuse to start another agent when memory is critical:
+  #   limit-lifeboat preflight && claude
 """
 
 var arguments = Array(CommandLine.arguments.dropFirst())
@@ -84,6 +91,41 @@ if arguments.count > 1 {
 if command == "version" || command == "--version" {
     print(wantsJSON ? #"{"version":"\#(version)","schema":\#(CLIStatusReport.schemaVersion)}"# : version)
     exit(ExitCode.success.rawValue)
+}
+
+if command == "preflight" {
+    // Local and cheap (one process-table scan), so it is safe in a launcher
+    // script. Its own lineage is skipped only as far as its descendants go.
+    let table = SystemProcessTable()
+    let sessions = AgentSessionCensusBuilder().sessions(
+        from: table.records(),
+        excludingDescendantsOf: ProcessInfo.processInfo.processIdentifier,
+        workingDirectory: table.workingDirectory(pid:)
+    )
+    guard let memory = SystemMemoryReader().read() else {
+        fail("could not read system memory statistics.", .unavailable)
+    }
+    let assessment = MemoryGuardPolicy().assess(memory: memory, sessions: sessions, lastActivity: [:], now: Date())
+    let state = MemoryGuardState(assessment: assessment, now: Date())
+    if wantsJSON {
+        guard let data = try? JSONEncoder.appEncoder.encode(state), let text = String(data: data, encoding: .utf8) else {
+            fail("could not encode the report.", .unavailable)
+        }
+        print(text)
+    } else {
+        let headline: String
+        switch assessment.level {
+        case .ok:
+            headline = "Memory OK"
+        case .caution:
+            headline = "Memory tight"
+        case .critical:
+            headline = "Memory critical"
+        }
+        let room = assessment.estimatedAdditionalSessions.map { " Room for about \($0) more." } ?? ""
+        print("\(headline): \(state.message)\(room)")
+    }
+    exit(assessment.level == .critical ? ExitCode.memoryCritical.rawValue : ExitCode.success.rawValue)
 }
 
 guard ["status", "list", "active", "statusline"].contains(command) else {
