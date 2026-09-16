@@ -9,6 +9,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
     private let statusItem: NSStatusItem
     private let popover: NSPopover
     private var cancellables: Set<AnyCancellable> = []
+    private var memoryLevel: MemoryGuardLevel = .ok
 
     init(state: AppState) {
         self.state = state
@@ -19,7 +20,12 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         popover.delegate = self
         popover.contentSize = NSSize(width: DS.Popover.width, height: DS.Popover.height)
         popover.contentViewController = NSHostingController(
-            rootView: MenuRootView(state: state, settings: state.settings, updater: state.updater)
+            rootView: MenuRootView(
+                state: state,
+                settings: state.settings,
+                updater: state.updater,
+                sessions: state.sessionMonitor
+            )
         )
 
         if let button = statusItem.button {
@@ -33,6 +39,15 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
             .receive(on: RunLoop.main)
             .sink { [weak self] summary in
                 self?.updateStatusItem(summary: summary)
+            }
+            .store(in: &cancellables)
+        state.sessionMonitor.$assessment
+            .map(\.level)
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] level in
+                self?.memoryLevel = level
+                self?.updateStatusItem(summary: state.menuBarSummary)
             }
             .store(in: &cancellables)
     }
@@ -78,14 +93,51 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         )
         image?.isTemplate = false
         button.image = image
-        button.toolTip = "Limit Lifeboat\n\(summary.accessibilityText)"
-        button.setAccessibilityLabel("Limit Lifeboat. \(summary.accessibilityText)")
+        let memoryNote = MenuBarTitleFormatter.memoryNote(for: memoryLevel)
+        let accessibilityText = [summary.accessibilityText, memoryNote].compactMap { $0 }.joined(separator: ". ")
+        button.toolTip = "Limit Lifeboat\n\(accessibilityText)"
+        button.setAccessibilityLabel("Limit Lifeboat. \(accessibilityText)")
         button.contentTintColor = nil
-        button.attributedTitle = MenuBarTitleFormatter.attributedTitle(summary: summary)
+        button.attributedTitle = MenuBarTitleFormatter.attributedTitle(summary: summary, memoryLevel: memoryLevel)
     }
 }
 
 enum MenuBarTitleFormatter {
+    static func memoryNote(for level: MemoryGuardLevel) -> String? {
+        switch level {
+        case .ok:
+            return nil
+        case .caution:
+            return "Memory is tight for more agent sessions"
+        case .critical:
+            return "Memory is critically low"
+        }
+    }
+
+    /// Appends a colored "MEM" marker while Memory Guard is not OK, so the
+    /// warning outlives its notification.
+    static func attributedTitle(summary: MenuBarSummary, memoryLevel: MemoryGuardLevel) -> NSAttributedString {
+        let title = NSMutableAttributedString(attributedString: attributedTitle(summary: summary))
+        guard memoryLevel > .ok else {
+            return title
+        }
+        title.append(NSAttributedString(
+            string: " · ",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 10, weight: .regular),
+                .foregroundColor: NSColor.tertiaryLabelColor
+            ]
+        ))
+        title.append(NSAttributedString(
+            string: "MEM",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 9, weight: .bold),
+                .foregroundColor: memoryLevel == .critical ? NSColor.systemRed : NSColor.systemOrange
+            ]
+        ))
+        return title
+    }
+
     static func attributedTitle(summary: MenuBarSummary) -> NSAttributedString {
         let providerAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 9, weight: .bold),

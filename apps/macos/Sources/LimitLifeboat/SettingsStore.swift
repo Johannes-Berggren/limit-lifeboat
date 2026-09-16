@@ -44,6 +44,11 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(showOrganizationNames, forKey: Keys.showOrganizationNames) }
     }
 
+    /// Warns when memory is too tight to start another agent session safely.
+    @Published var memoryGuardAlertsEnabled: Bool {
+        didSet { defaults.set(memoryGuardAlertsEnabled, forKey: Keys.memoryGuardAlertsEnabled) }
+    }
+
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -58,6 +63,7 @@ final class SettingsStore: ObservableObject {
         self.sessionWindowAlertsEnabled = defaults.object(forKey: Keys.sessionWindowAlertsEnabled) as? Bool ?? false
         self.weeklyDigestEnabled = defaults.object(forKey: Keys.weeklyDigestEnabled) as? Bool ?? true
         self.showOrganizationNames = defaults.object(forKey: Keys.showOrganizationNames) as? Bool ?? true
+        self.memoryGuardAlertsEnabled = defaults.object(forKey: Keys.memoryGuardAlertsEnabled) as? Bool ?? true
     }
 
     private enum Keys {
@@ -68,5 +74,6 @@ final class SettingsStore: ObservableObject {
         static let sessionWindowAlertsEnabled = "sessionWindowAlertsEnabled"
         static let weeklyDigestEnabled = "weeklyDigestEnabled"
         static let showOrganizationNames = "showOrganizationNames"
+        static let memoryGuardAlertsEnabled = "memoryGuardAlertsEnabled"
     }
 }

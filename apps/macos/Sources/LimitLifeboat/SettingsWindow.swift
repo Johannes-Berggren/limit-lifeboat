@@ -176,6 +176,16 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                     }
 
+                    Section("Sessions & Memory") {
+                        Toggle("Warn when memory is too tight for more agent sessions", isOn: $settings.memoryGuardAlertsEnabled)
+                        Label(
+                            "Watches running Claude Code and Codex sessions, including the tools and servers they start. Warns when macOS reports memory pressure or free memory drops low, and points to the heaviest idle session. Sessions are never closed automatically.",
+                            systemImage: "info.circle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+
                     Section("Updates") {
                         LabeledContent("Version", value: AppInfo.version)
                         if updater.isEnabled {
