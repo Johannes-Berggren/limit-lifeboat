@@ -70,19 +70,30 @@ public struct ClaudeTranscriptReader {
     }
 
     /// Pairs Claude sessions with their transcripts. Sessions sharing a
-    /// working directory share a transcript folder, so each takes the newest
-    /// unclaimed transcript touched since it started, newest session first.
+    /// working directory also share a transcript folder, and nothing in either
+    /// identifies the other, so pairing is by age: oldest session to oldest
+    /// transcript. Age order is stable between scans, so a session keeps its
+    /// transcript — the digest reads idle time per pid across samples, and a
+    /// reshuffle would invent cache-expiry resumes.
     public func activities(for sessions: [AgentSession]) -> [Int32: ClaudeSessionActivity] {
-        var claimed: Set<URL> = []
         var result: [Int32: ClaudeSessionActivity] = [:]
-        for session in sessions.sorted(by: { $0.startedAt > $1.startedAt }) {
-            guard session.provider == .claude, let directory = session.workingDirectory else { continue }
-            guard let transcript = recentTranscripts(workingDirectory: directory, since: session.startedAt)
-                .first(where: { !claimed.contains($0) }) else {
-                continue
+        let claudeSessions = sessions.filter { $0.provider == .claude && $0.workingDirectory != nil }
+        let byDirectory = Dictionary(grouping: claudeSessions) { $0.workingDirectory ?? "" }
+
+        for (directory, directorySessions) in byDirectory {
+            let ordered = directorySessions.sorted { ($0.startedAt, $0.pid) < ($1.startedAt, $1.pid) }
+            // One shared candidate list: filtering per session would let a
+            // newer session claim a file an older session is still writing.
+            guard let earliest = ordered.first?.startedAt else { continue }
+            let transcripts = recentTranscripts(workingDirectory: directory, since: earliest)
+                .map { url in
+                    (url, (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast)
+                }
+                .sorted { ($0.1, $0.0.path) < ($1.1, $1.0.path) }
+                .map(\.0)
+            for (index, session) in ordered.enumerated() where index < transcripts.count {
+                result[session.pid] = activity(transcript: transcripts[index])
             }
-            claimed.insert(transcript)
-            result[session.pid] = activity(transcript: transcript)
         }
         return result
     }

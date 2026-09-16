@@ -610,14 +610,23 @@ final class AppState: ObservableObject {
             period: period
         )
         // "Where your quota went": what the sessions themselves were doing.
+        // Worth sending on its own — a week with no window readings (a fresh
+        // install, or usage reads that kept failing) is exactly when the
+        // session view is the only thing left to report.
         let aggregator = SessionInsightAggregator()
-        if let summary = aggregator.summary(
+        let insightLines = aggregator.summary(
             samples: sessionMonitor.insightStore.samples(in: period),
             in: period
-        ) {
-            let lines = aggregator.digestLines(for: summary)
-            if !lines.isEmpty, digest != nil {
-                digest?.body += " " + lines.joined(separator: " ")
+        ).map(aggregator.digestLines(for:)) ?? []
+        if !insightLines.isEmpty {
+            if digest != nil {
+                digest?.body += " " + insightLines.joined(separator: " ")
+            } else {
+                digest = WeeklyDigest(
+                    title: "Your week in agent sessions",
+                    body: insightLines.joined(separator: " "),
+                    periodEnd: period.end
+                )
             }
         }
         // Marked sent even when there is nothing to say, so an empty week

@@ -38,10 +38,13 @@ public struct SessionSample: Codable, Equatable, Sendable {
 
 /// What a week of samples says about where the quota went.
 public struct SessionInsightSummary: Equatable, Sendable {
+    /// Every session counts here, readable or not.
     public var peakParallelSessions: Int
-    /// Project name → minutes of sampled active work, largest first.
+    /// Project name → minutes of sampled active work, largest first. Only
+    /// sessions with a readable transcript (Claude today) can be counted as
+    /// working, so Codex time is missing from this and from `modelShares`.
     public var topProjects: [(project: String, minutes: Int)]
-    /// Model name → share of active samples, largest first.
+    /// Model name → share of the samples that named a model, largest first.
     public var modelShares: [(model: String, share: Double)]
     public var coldResumeCount: Int
     /// Context re-read uncached by those resumes, summed.
@@ -79,13 +82,15 @@ public struct SessionInsightAggregator: Sendable {
         var peak = 0
         var projectMinutes: [String: Int] = [:]
         var modelSamples: [String: Int] = [:]
-        var activeSamples = 0
+        // Only entries that named a model can be a share *of* anything —
+        // counting model-less ones in the denominator understates every share.
+        var modeledSamples = 0
         for sample in samples {
             peak = max(peak, sample.entries.count)
             for entry in sample.entries where entry.isActive {
-                activeSamples += 1
                 projectMinutes[entry.project, default: 0] += sampleMinutes
                 if let model = entry.model {
+                    modeledSamples += 1
                     modelSamples[model, default: 0] += 1
                 }
             }
@@ -116,10 +121,10 @@ public struct SessionInsightAggregator: Sendable {
                 .sorted { ($0.value, $1.key) > ($1.value, $0.key) }
                 .prefix(3)
                 .map { (project: $0.key, minutes: $0.value) },
-            modelShares: activeSamples == 0 ? [] : modelSamples
+            modelShares: modeledSamples == 0 ? [] : modelSamples
                 .sorted { ($0.value, $1.key) > ($1.value, $0.key) }
                 .prefix(3)
-                .map { (model: $0.key, share: Double($0.value) / Double(activeSamples)) },
+                .map { (model: $0.key, share: Double($0.value) / Double(modeledSamples)) },
             coldResumeCount: coldResumes,
             coldResumeTokens: coldTokens
         )
@@ -130,11 +135,13 @@ public struct SessionInsightAggregator: Sendable {
         var lines: [String] = []
         if summary.peakParallelSessions > 0 {
             var line = "Agent sessions: \(summary.peakParallelSessions) running at once at the busiest point"
-            if let top = summary.topProjects.first {
+            if let top = summary.topProjects.first, top.minutes > 0 {
                 let projects = summary.topProjects
                     .map { "\($0.project) (\(MemoryFormatting.duration(TimeInterval($0.minutes * 60))))" }
                     .joined(separator: ", ")
-                line += top.minutes > 0 ? "; most work in \(projects)" : ""
+                // Named as Claude time because Codex sessions have no
+                // transcript to measure working time from yet.
+                line += "; most Claude work in \(projects)"
             }
             lines.append(line + ".")
         }
@@ -270,7 +277,10 @@ public final class SessionInsightStore {
     }
 
     public func samples(in interval: DateInterval) -> [SessionSample] {
-        cache.filter { interval.contains($0.timestamp) }
+        // Lazily load like every other reader: a load that threw at start
+        // would otherwise leave this permanently empty.
+        try? loadIfNeeded()
+        return cache.filter { interval.contains($0.timestamp) }
     }
 
     public func prune(now: Date = Date()) throws {

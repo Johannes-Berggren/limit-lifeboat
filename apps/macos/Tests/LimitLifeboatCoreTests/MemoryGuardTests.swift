@@ -268,7 +268,10 @@ final class ClaudeTranscriptPairingTests: XCTestCase {
 
         let activities = ClaudeTranscriptReader(homeDirectory: home).activities(for: [older, newer])
 
-        XCTAssertEqual(activities[2]?.model, "claude-opus-5")
-        XCTAssertEqual(activities[1]?.model, "claude-sonnet-5")
+        // Same creation time here, so the path breaks the tie: the older
+        // session pairs with a.jsonl, and keeps it on every later scan.
+        XCTAssertEqual(activities[1]?.model, "claude-opus-5")
+        XCTAssertEqual(activities[2]?.model, "claude-sonnet-5")
+        XCTAssertEqual(ClaudeTranscriptReader(homeDirectory: home).activities(for: [newer, older]), activities)
     }
 }

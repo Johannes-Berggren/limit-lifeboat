@@ -29,6 +29,7 @@ final class SessionMonitor: ObservableObject {
     /// Pids already warned about in their current idle spell.
     private var coldCacheWarnedPIDs: Set<Int32> = []
     private var lastSampledAt: Date?
+    private var hasCompletedFirstSample = false
     private let hookInstaller = ClaudeHookInstaller()
     private let notify: (MemoryGuardAssessment) -> Void
     private let notifyColdCache: ([ColdCacheAlertPolicy.Candidate]) -> Void
@@ -174,19 +175,23 @@ final class SessionMonitor: ObservableObject {
             )
         }
 
-        let livePIDs = Set(entries.map(\.pid))
-        // Re-arm a session once it wakes up or disappears.
+        // Re-arm a session once it wakes up or disappears: a pid still idle
+        // past the threshold stays warned, everything else is dropped.
         coldCacheWarnedPIDs = coldCacheWarnedPIDs.intersection(
             Set(entries.filter { ($0.idleSeconds ?? 0) >= coldCachePolicy.idleSeconds }.map(\.pid))
-        ).intersection(livePIDs)
+        )
 
-        if settings.cacheAlertsEnabled {
-            let candidates = coldCachePolicy.candidates(entries: entries, alreadyWarned: coldCacheWarnedPIDs)
-            if !candidates.isEmpty {
-                coldCacheWarnedPIDs.formUnion(candidates.map(\.pid))
+        let candidates = coldCachePolicy.candidates(entries: entries, alreadyWarned: coldCacheWarnedPIDs)
+        if !candidates.isEmpty {
+            coldCacheWarnedPIDs.formUnion(candidates.map(\.pid))
+            // On the first scan of a launch, sessions that were already idle
+            // for hours are recorded silently: their cache is long gone, so
+            // "finish now to avoid it" would be advice about a past event.
+            if settings.cacheAlertsEnabled, hasCompletedFirstSample {
                 notifyColdCache(candidates)
             }
         }
+        hasCompletedFirstSample = true
 
         let due = lastSampledAt.map { now.timeIntervalSince($0) >= Double(aggregator.sampleMinutes * 60) } ?? true
         guard due, !entries.isEmpty else { return }

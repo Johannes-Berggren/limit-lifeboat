@@ -40,6 +40,51 @@ final class SessionInsightAggregatorTests: XCTestCase {
         )
     }
 
+    /// Codex entries have no transcript, so they must not dilute the model
+    /// share of the sessions that do report one.
+    func testModelShareIgnoresSessionsWithoutAModel() throws {
+        let samples = [
+            sample(minute: 0, [
+                entry(1, "app", "claude-opus-5", idle: 10),
+                SessionSample.Entry(pid: 2, provider: .codex, project: "cx", model: nil, contextTokens: 0, idleSeconds: 10)
+            ])
+        ]
+
+        let summary = try XCTUnwrap(aggregator.summary(samples: samples, in: period()))
+
+        XCTAssertEqual(summary.peakParallelSessions, 2)
+        XCTAssertEqual(summary.modelShares.first?.share, 1.0)
+        XCTAssertTrue(
+            aggregator.digestLines(for: summary).contains { $0.contains("Opus 5 did 100% of the work") },
+            "\(aggregator.digestLines(for: summary))"
+        )
+    }
+
+    /// Project time is Claude-only today; the digest must say so rather than
+    /// implying it covers every agent.
+    func testDigestNamesProjectTimeAsClaudeWork() throws {
+        let samples = [sample(minute: 0, [entry(1, "app", "claude-opus-5", idle: 10)])]
+        let summary = try XCTUnwrap(aggregator.summary(samples: samples, in: period()))
+
+        XCTAssertTrue(
+            aggregator.digestLines(for: summary).contains { $0.contains("most Claude work in app") },
+            "\(aggregator.digestLines(for: summary))"
+        )
+    }
+
+    /// The weekly digest reads samples without calling load() first.
+    func testSamplesReadLazilyWithoutAnExplicitLoad() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try SessionInsightStore(applicationSupportDirectory: directory)
+            .append(sample(minute: 0, [entry(1, "app", "claude-opus-5", idle: 10)]))
+
+        let fresh = SessionInsightStore(applicationSupportDirectory: directory)
+
+        XCTAssertEqual(fresh.samples(in: period()).count, 1)
+    }
+
     func testNoSamplesMeansNoSummary() {
         XCTAssertNil(aggregator.summary(samples: [], in: period()))
         XCTAssertNil(aggregator.summary(samples: [sample(minute: -10_000, [entry(1, "app", nil, idle: 0)])], in: period()))
