@@ -13,9 +13,10 @@ possible it keeps a protected recovery directory and says so, instead of
 guessing.
 
 Switching never touches `settings.json`, MCP server definitions, hooks,
-permissions, or local history. The only feature that writes to Claude Code's
-settings is the optional Memory Guard hook, which is off until you turn it on
-and changes only its own entry.
+permissions, or local history. Two optional features write to Claude Code's
+settings, both off until you turn them on: the Memory Guard hook, which
+changes only its own entry, and budget modes, which set a few model and effort
+keys and restore your previous values when you switch back to Quality.
 
 The menu-bar app also shows what every saved account has left — session,
 weekly, and model-scoped windows for Claude, the 7-day window for Codex — so

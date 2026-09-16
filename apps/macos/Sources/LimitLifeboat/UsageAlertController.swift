@@ -55,8 +55,16 @@ final class UsageAlertController {
         )
     }
 
+    private let budgetSuggestionSentKey = "lastBudgetSuggestionSentAt"
+
+    func canSuggestBudgetMode(now: Date) -> Bool {
+        let last = UserDefaults.standard.double(forKey: budgetSuggestionSentKey)
+        return last == 0 || now.timeIntervalSince1970 - last >= 24 * 3600
+    }
+
     /// Pace alert with nowhere to switch: offer the next cheaper budget mode.
     func handleBudgetSuggestion(_ mode: BudgetMode, profileLabel: String) {
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: budgetSuggestionSentKey)
         postNotification(
             identifier: "budget-suggestion-\(mode.rawValue)",
             title: "\(profileLabel): no account left to switch to",

@@ -70,6 +70,39 @@ final class BudgetModeTests: XCTestCase {
         XCTAssertEqual(restored, ["effortLevel": "xhigh", "model": "opus"])
     }
 
+    func testFailedSettingsWriteLeavesNoRecordBehind() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // A settings path whose parent is a file cannot be written.
+        let blocker = directory.appendingPathComponent("not-a-directory")
+        try Data().write(to: blocker)
+        let recordURL = directory.appendingPathComponent(BudgetModeController.recordFileName)
+        let controller = BudgetModeController(
+            file: ClaudeSettingsFile(url: blocker.appendingPathComponent("settings.json")),
+            recordURL: recordURL
+        )
+
+        XCTAssertThrowsError(try controller.apply(.frugal))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: recordURL.path))
+    }
+
+    func testCorruptRecordRefusesToApplyInsteadOfOverwritingTheOriginals() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let settingsURL = directory.appendingPathComponent("settings.json")
+        try Data(#"{"model":"sonnet"}"#.utf8).write(to: settingsURL)
+        let recordURL = directory.appendingPathComponent(BudgetModeController.recordFileName)
+        try Data(#"{"mode":"frugal","future":true}"#.utf8).write(to: recordURL)
+        let controller = BudgetModeController(file: ClaudeSettingsFile(url: settingsURL), recordURL: recordURL)
+
+        XCTAssertThrowsError(try controller.status())
+        XCTAssertThrowsError(try controller.apply(.balanced))
+        XCTAssertEqual(try String(contentsOf: settingsURL), #"{"model":"sonnet"}"#)
+        XCTAssertEqual(try String(contentsOf: recordURL), #"{"mode":"frugal","future":true}"#)
+    }
+
     func testSuggestsNextCheaperModeOnlyWhenSwitchingCannotHelp() {
         XCTAssertEqual(
             BudgetSuggestionPolicy.suggestion(provider: .claude, current: .active(.quality), hasPaceAlert: true, hasSwitchCandidate: false),

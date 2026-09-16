@@ -194,12 +194,22 @@ struct SettingsView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         if case .modified(let mode) = budgetMode.status {
-                            Label(
-                                "Some \(mode.displayName) settings were changed in Claude Code since. Pick a mode again to reapply it; switching to Quality keeps your changes.",
-                                systemImage: "pencil.circle"
-                            )
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            // The picker already shows this mode, so selecting
+                            // it again would never fire; reapplying needs its
+                            // own control.
+                            HStack(alignment: .firstTextBaseline) {
+                                Label(
+                                    "Some \(mode.displayName) settings were changed in Claude Code since. Switching to Quality keeps your changes.",
+                                    systemImage: "pencil.circle"
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                Spacer()
+                                Button("Reapply \(mode.displayName)") {
+                                    budgetMode.apply(mode)
+                                }
+                                .controlSize(.small)
+                            }
                         }
                         Toggle("Suggest a cheaper mode when no account is left to switch to", isOn: $settings.budgetSuggestionsEnabled)
                         Label(

@@ -171,6 +171,17 @@ public struct BudgetModeApplier: Sendable {
 /// Applies budget modes to a Claude Code settings file and remembers what it
 /// replaced in Limit Lifeboat's own store.
 public struct BudgetModeController {
+    public enum ControllerError: LocalizedError, Equatable {
+        case unreadableRecord
+
+        public var errorDescription: String? {
+            switch self {
+            case .unreadableRecord:
+                return "Limit Lifeboat's record of your previous Claude Code settings could not be read, so budget modes were left unchanged rather than risk losing those settings."
+            }
+        }
+    }
+
     public static let recordFileName = "budget-mode.json"
 
     private let file: ClaudeSettingsFile
@@ -183,23 +194,45 @@ public struct BudgetModeController {
     }
 
     public func status() throws -> BudgetModeStatus {
-        applier.status(settings: try file.read(), record: loadRecord())
+        applier.status(settings: try file.read(), record: try loadRecord())
     }
 
+    /// The record of what was replaced is the only way back to the user's own
+    /// values, so it is written *before* the settings, and restored if the
+    /// settings write then fails.
     public func apply(_ mode: BudgetMode) throws {
         var settings = try file.read()
-        let record = applier.apply(mode, to: &settings, replacing: loadRecord())
-        try file.write(settings)
+        let previousRecordData = try? Data(contentsOf: recordURL)
+        let record = applier.apply(mode, to: &settings, replacing: try loadRecord())
+
         if let record {
             try JSONEncoder().encode(record).write(to: recordURL, options: .atomic)
-        } else {
-            try? FileManager.default.removeItem(at: recordURL)
+        } else if previousRecordData != nil {
+            try FileManager.default.removeItem(at: recordURL)
+        }
+
+        do {
+            try file.write(settings)
+        } catch {
+            if let previousRecordData {
+                try? previousRecordData.write(to: recordURL, options: .atomic)
+            } else {
+                try? FileManager.default.removeItem(at: recordURL)
+            }
+            throw error
         }
     }
 
-    private func loadRecord() -> BudgetModeRecord? {
-        guard let data = try? Data(contentsOf: recordURL) else { return nil }
-        return try? JSONDecoder().decode(BudgetModeRecord.self, from: data)
+    /// A missing record means no mode is applied. A record that exists but
+    /// does not decode is an error: treating it as absent would make the next
+    /// apply record the mode's own values as the user's originals.
+    private func loadRecord() throws -> BudgetModeRecord? {
+        guard FileManager.default.fileExists(atPath: recordURL.path) else { return nil }
+        do {
+            return try JSONDecoder().decode(BudgetModeRecord.self, from: Data(contentsOf: recordURL))
+        } catch {
+            throw ControllerError.unreadableRecord
+        }
     }
 }
 

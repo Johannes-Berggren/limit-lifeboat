@@ -34,8 +34,11 @@ final class BudgetModeModel: ObservableObject {
             error = nil
             return true
         } catch {
+            // Refresh what is shown without clearing the failure just set.
+            if let current = try? controller.status() {
+                status = current
+            }
             self.error = error.localizedDescription
-            reload()
             return false
         }
     }

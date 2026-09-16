@@ -2555,11 +2555,14 @@ final class AppState: ObservableObject {
                 advisedTargetID: switchAdvice[profile.provider]?.bestCandidateID
             )
         }
-        // Pace alerts are already deduped per reset period, so this follows
-        // at most once per period too.
-        if settings.budgetSuggestionsEnabled {
+        // Pace alerts dedupe per window, and a session window resets every
+        // ~5h, so the suggestion keeps its own once-a-day limit.
+        if settings.budgetSuggestionsEnabled, !alerts.isEmpty,
+           usageAlertController.canSuggestBudgetMode(now: Date()) {
             budgetMode.reload()
-            if let suggestion = BudgetSuggestionPolicy.suggestion(
+            // An unreadable settings file or undo record: offering a mode that
+            // cannot be applied safely would only fail on tap.
+            if budgetMode.error == nil, let suggestion = BudgetSuggestionPolicy.suggestion(
                 provider: profile.provider,
                 current: budgetMode.status,
                 hasPaceAlert: !alerts.isEmpty,
