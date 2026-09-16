@@ -25,12 +25,12 @@ struct MenuRootView: View {
                     VStack(alignment: .leading, spacing: DS.Spacing.xl) {
                         // Tight memory is urgent enough to lead; otherwise the
                         // session list trails the accounts it is secondary to.
-                        if sessions.assessment.level > .ok {
+                        if sessions.assessment.isActionable {
                             SessionsSectionView(monitor: sessions)
                         }
                         providerSection(.claude)
                         providerSection(.codex)
-                        if sessions.assessment.level == .ok, !sessions.rows.isEmpty {
+                        if !sessions.assessment.isActionable, !sessions.rows.isEmpty {
                             SessionsSectionView(monitor: sessions)
                         }
                     }

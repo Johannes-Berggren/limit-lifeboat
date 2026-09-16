@@ -22,6 +22,12 @@ public struct MemoryGuardAssessment: Equatable, Sendable {
     public let heaviestIdleSession: AgentSession?
     public let heaviestIdleSince: Date?
 
+    /// Tight memory is only Memory Guard's business while agents are running;
+    /// with none, there is nothing to close and nothing to hold back.
+    public var isActionable: Bool {
+        level > .ok && sessionCount > 0
+    }
+
     public static let empty = MemoryGuardAssessment(
         level: .ok,
         sessionCount: 0,
@@ -74,8 +80,9 @@ public struct MemoryGuardPolicy: Sendable {
         self.idleThreshold = idleThreshold
     }
 
-    /// - Parameter lastActivity: last transcript activity per session pid;
-    ///   sessions without it fall back to their start time.
+    /// - Parameter lastActivity: last transcript activity per session pid.
+    ///   A session without it has unknown idleness and is never named idle —
+    ///   process age says nothing about whether it is working.
     public func assess(
         memory: SystemMemoryStatus,
         sessions: [AgentSession],
@@ -102,7 +109,7 @@ public struct MemoryGuardPolicy: Sendable {
         }
 
         let idle = sessions
-            .map { ($0, lastActivity[$0.pid] ?? $0.startedAt) }
+            .compactMap { session in lastActivity[session.pid].map { (session, $0) } }
             .filter { now.timeIntervalSince($0.1) >= idleThreshold }
             .max { $0.0.footprintBytes < $1.0.footprintBytes }
 

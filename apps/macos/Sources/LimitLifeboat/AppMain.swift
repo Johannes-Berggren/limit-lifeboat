@@ -118,6 +118,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
 
+            // Independent of the usage refresh: watching memory must not wait
+            // for a network read (or a Keychain prompt) to come back.
+            state.sessionMonitor.start()
+
             Task {
                 await state.refreshAll()
                 state.startBackgroundRefresh()

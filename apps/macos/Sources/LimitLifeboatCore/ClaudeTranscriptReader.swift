@@ -69,6 +69,24 @@ public struct ClaudeTranscriptReader {
             .map(\.0)
     }
 
+    /// Pairs Claude sessions with their transcripts. Sessions sharing a
+    /// working directory share a transcript folder, so each takes the newest
+    /// unclaimed transcript touched since it started, newest session first.
+    public func activities(for sessions: [AgentSession]) -> [Int32: ClaudeSessionActivity] {
+        var claimed: Set<URL> = []
+        var result: [Int32: ClaudeSessionActivity] = [:]
+        for session in sessions.sorted(by: { $0.startedAt > $1.startedAt }) {
+            guard session.provider == .claude, let directory = session.workingDirectory else { continue }
+            guard let transcript = recentTranscripts(workingDirectory: directory, since: session.startedAt)
+                .first(where: { !claimed.contains($0) }) else {
+                continue
+            }
+            claimed.insert(transcript)
+            result[session.pid] = activity(transcript: transcript)
+        }
+        return result
+    }
+
     public func activity(transcript url: URL) -> ClaudeSessionActivity? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }

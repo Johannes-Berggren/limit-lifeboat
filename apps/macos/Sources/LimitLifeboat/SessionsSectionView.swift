@@ -25,10 +25,13 @@ struct SessionsSectionView: View {
 
                 Spacer()
 
-                Badge(text: levelText(assessment.level), color: levelColor(assessment.level))
+                // Without agents running, tight memory is not this section's
+                // concern; say nothing rather than urge closing a session.
+                let shownLevel: MemoryGuardLevel = assessment.isActionable ? assessment.level : .ok
+                Badge(text: levelText(shownLevel), color: levelColor(shownLevel))
             }
 
-            if assessment.level > .ok {
+            if assessment.isActionable {
                 StatusBanner(
                     text: bannerText(assessment),
                     systemImage: "exclamationmark.triangle.fill",
@@ -113,7 +116,7 @@ struct SessionsSectionView: View {
         var parts: [String] = []
         if let activity = row.activity {
             if let model = activity.model {
-                parts.append(shortModelName(model))
+                parts.append(ModelNaming.short(model))
             }
             if activity.contextTokens > 0 {
                 parts.append("\(MemoryFormatting.tokens(activity.contextTokens)) context")
@@ -125,18 +128,6 @@ struct SessionsSectionView: View {
             parts.append("running \(MemoryFormatting.duration(now.timeIntervalSince(row.session.startedAt)))")
         }
         return parts.joined(separator: " · ")
-    }
-
-    /// "claude-opus-5" → "Opus 5", "claude-haiku-4-5-20251001" → "Haiku 4.5".
-    private func shortModelName(_ model: String) -> String {
-        var components = model.split(separator: "-").map(String.init)
-        if components.first == "claude" {
-            components.removeFirst()
-        }
-        components.removeAll { $0.count >= 8 && $0.allSatisfy(\.isNumber) }
-        guard let family = components.first else { return model }
-        let version = components.dropFirst().joined(separator: ".")
-        return version.isEmpty ? family.capitalized : "\(family.capitalized) \(version)"
     }
 
     private func summary(_ assessment: MemoryGuardAssessment) -> String {

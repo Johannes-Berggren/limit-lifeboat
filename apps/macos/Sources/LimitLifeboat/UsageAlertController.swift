@@ -54,10 +54,10 @@ final class UsageAlertController {
     func handleMemoryGuard(_ assessment: MemoryGuardAssessment) {
         let planner = MemoryGuardAlertPlanner()
         let now = Date()
-        // One identifier per level, so a newer warning replaces the older one
-        // in Notification Center instead of stacking.
+        // One identifier for every level, so an escalation to critical
+        // replaces the earlier warning in Notification Center.
         postNotification(
-            identifier: "memory-guard-\(assessment.level.rawValue)",
+            identifier: "memory-guard",
             title: planner.title(for: assessment),
             body: planner.body(for: assessment, now: now)
         )

@@ -337,6 +337,8 @@ final class AppState: ObservableObject {
 
     func startBackgroundRefresh() {
         backgroundRefreshStarted = true
+        // Idempotent: AppMain starts this at launch; this covers any other
+        // entry point into the background loop.
         sessionMonitor.start()
         scheduleNextBackgroundRefresh()
     }

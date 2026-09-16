@@ -42,7 +42,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
             }
             .store(in: &cancellables)
         state.sessionMonitor.$assessment
-            .map(\.level)
+            .map { $0.isActionable ? $0.level : .ok }
             .removeDuplicates()
             .receive(on: RunLoop.main)
             .sink { [weak self] level in

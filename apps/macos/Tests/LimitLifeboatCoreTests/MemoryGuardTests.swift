@@ -154,6 +154,32 @@ final class MemoryGuardPolicyTests: XCTestCase {
         XCTAssertEqual(assessment.heaviestIdleSince, now.addingTimeInterval(-7_200))
     }
 
+    func testSessionWithoutTranscriptActivityIsNeverNamedIdle() {
+        // A long-running Codex session has no transcript to read; its age says
+        // nothing about whether it is working right now.
+        let oldCodex = AgentSession(
+            pid: 7,
+            provider: .codex,
+            workingDirectory: "/work/codex",
+            startedAt: now.addingTimeInterval(-10 * 3_600),
+            footprintBytes: 8 * gb,
+            processCount: 3
+        )
+
+        let assessment = policy.assess(memory: memory(total: 36, used: 20), sessions: [oldCodex], lastActivity: [:], now: now)
+
+        XCTAssertNil(assessment.heaviestIdleSession)
+    }
+
+    func testTightMemoryIsOnlyActionableWhileAgentsRun() {
+        let noAgents = policy.assess(memory: memory(total: 36, used: 10, pressure: .critical), sessions: [], lastActivity: [:], now: now)
+        let withAgent = policy.assess(memory: memory(total: 36, used: 10, pressure: .critical), sessions: [session(1, gb: 1)], lastActivity: [:], now: now)
+
+        XCTAssertEqual(noAgents.level, .critical)
+        XCTAssertFalse(noAgents.isActionable)
+        XCTAssertTrue(withAgent.isActionable)
+    }
+
     func testAlertPlannerNotifiesOnEscalationAndAfterCooldownOnly() {
         let planner = MemoryGuardAlertPlanner(cooldown: 1_800)
         let caution = assessment(.caution)
@@ -211,5 +237,38 @@ final class MemoryGuardPolicyTests: XCTestCase {
             heaviestIdleSession: nil,
             heaviestIdleSince: nil
         )
+    }
+}
+
+final class ModelNamingTests: XCTestCase {
+    func testShortensCurrentAndLegacyClaudeModelIDs() {
+        XCTAssertEqual(ModelNaming.short("claude-opus-5"), "Opus 5")
+        XCTAssertEqual(ModelNaming.short("claude-haiku-4-5-20251001"), "Haiku 4.5")
+        XCTAssertEqual(ModelNaming.short("claude-3-5-haiku-20241022"), "Haiku 3.5")
+        XCTAssertEqual(ModelNaming.short("claude-3-opus-20240229"), "Opus 3")
+        XCTAssertEqual(ModelNaming.short("gpt-6-astra"), "gpt-6-astra")
+    }
+}
+
+final class ClaudeTranscriptPairingTests: XCTestCase {
+    func testSessionsSharingADirectoryEachGetTheirOwnTranscript() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let directory = home.appendingPathComponent(".claude/projects/-work-app")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let now = Date()
+        for (name, model, age) in [("a.jsonl", "claude-opus-5", 10.0), ("b.jsonl", "claude-sonnet-5", 20.0)] {
+            let url = directory.appendingPathComponent(name)
+            let line = #"{"type":"assistant","message":{"model":"\#(model)","usage":{"input_tokens":1}}}"#
+            try Data(line.utf8).write(to: url)
+            try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-age)], ofItemAtPath: url.path)
+        }
+        let older = AgentSession(pid: 1, provider: .claude, workingDirectory: "/work/app", startedAt: now.addingTimeInterval(-600), footprintBytes: 0, processCount: 1)
+        let newer = AgentSession(pid: 2, provider: .claude, workingDirectory: "/work/app", startedAt: now.addingTimeInterval(-300), footprintBytes: 0, processCount: 1)
+
+        let activities = ClaudeTranscriptReader(homeDirectory: home).activities(for: [older, newer])
+
+        XCTAssertEqual(activities[2]?.model, "claude-opus-5")
+        XCTAssertEqual(activities[1]?.model, "claude-sonnet-5")
     }
 }

@@ -179,6 +179,38 @@ public struct AgentSessionCensusBuilder {
 public struct SystemProcessTable: Sendable {
     public init() {}
 
+    /// One process, or nil once it has exited.
+    public func record(pid: Int32) -> ProcessRecord? {
+        var info = proc_bsdinfo()
+        let infoSize = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard pid > 0, proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, infoSize) == infoSize else {
+            return nil
+        }
+        let path = executablePath(pid: pid)
+        return ProcessRecord(
+            pid: pid,
+            parentPID: Int32(info.pbi_ppid),
+            executablePath: path,
+            arguments: AgentProcessClassifier.needsArguments(executablePath: path) ? arguments(pid: pid) : [],
+            startedAt: Date(
+                timeIntervalSince1970: TimeInterval(info.pbi_start_tvsec)
+                    + TimeInterval(info.pbi_start_tvusec) / 1_000_000
+            ),
+            footprintBytes: footprint(pid: pid)
+        )
+    }
+
+    /// Whether `session` is still the same running process. A pid can be
+    /// reused after exit, so the start time and agent kind must match too.
+    public func isStillRunning(_ session: AgentSession) -> Bool {
+        guard let record = record(pid: session.pid) else { return false }
+        return abs(record.startedAt.timeIntervalSince(session.startedAt)) < 1
+            && AgentProcessClassifier.provider(
+                executablePath: record.executablePath,
+                arguments: record.arguments
+            ) == session.provider
+    }
+
     public func records() -> [ProcessRecord] {
         let estimated = proc_listallpids(nil, 0)
         guard estimated > 0 else { return [] }

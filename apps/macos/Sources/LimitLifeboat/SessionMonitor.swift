@@ -27,6 +27,9 @@ final class SessionMonitor: ObservableObject {
     private var scanTask: Task<Void, Never>?
     private var pressureSource: DispatchSourceMemoryPressure?
     private var isScanning = false
+    /// A scan requested while one is running — above all a memory-pressure
+    /// event — runs as soon as it finishes instead of being dropped.
+    private var rescanRequested = false
 
     init(settings: SettingsStore, notify: @escaping (MemoryGuardAssessment) -> Void) {
         self.settings = settings
@@ -63,19 +66,31 @@ final class SessionMonitor: ObservableObject {
     }
 
     func scan() async {
-        guard !isScanning else { return }
+        guard !isScanning else {
+            rescanRequested = true
+            return
+        }
         isScanning = true
         defer { isScanning = false }
 
+        repeat {
+            rescanRequested = false
+            await performScan()
+        } while rescanRequested
+    }
+
+    private func performScan() async {
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let (rows, memory) = await Task.detached(priority: .utility) {
             Self.readCensus(excluding: ownPID)
         }.value
 
         let now = Date()
+        // Publish rows and assessment together: fresh rows beside a stale or
+        // empty assessment would read as "11 sessions · 0 MB · Memory OK".
+        guard let memory else { return }
         self.rows = rows
         self.memory = memory
-        guard let memory else { return }
 
         var lastActivity: [Int32: Date] = [:]
         for row in rows {
@@ -115,6 +130,12 @@ final class SessionMonitor: ObservableObject {
         alert.addButton(withTitle: "Quit Session")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModalActivating() == .alertFirstButtonReturn else { return }
+        // The row can be a scan old and the dialog sat open; never signal a
+        // pid that has since exited and been reused by something else.
+        guard SystemProcessTable().isStillRunning(row.session) else {
+            Task { await scan() }
+            return
+        }
         kill(row.session.pid, SIGTERM)
         Task {
             try? await Task.sleep(nanoseconds: 1_500_000_000)
@@ -129,26 +150,8 @@ final class SessionMonitor: ObservableObject {
             excludingDescendantsOf: ownPID,
             workingDirectory: table.workingDirectory(pid:)
         )
-        return (attachActivity(to: sessions), SystemMemoryReader().read())
-    }
-
-    /// Sessions sharing a working directory also share a transcript folder;
-    /// pair each with the newest unclaimed transcript touched since it started,
-    /// newest session first.
-    nonisolated private static func attachActivity(to sessions: [AgentSession]) -> [AgentSessionRow] {
-        let reader = ClaudeTranscriptReader()
-        var claimed: Set<URL> = []
-        var activity: [Int32: ClaudeSessionActivity] = [:]
-        for session in sessions.sorted(by: { $0.startedAt > $1.startedAt }) {
-            guard session.provider == .claude, let directory = session.workingDirectory else { continue }
-            let transcript = reader
-                .recentTranscripts(workingDirectory: directory, since: session.startedAt)
-                .first { !claimed.contains($0) }
-            if let transcript {
-                claimed.insert(transcript)
-                activity[session.pid] = reader.activity(transcript: transcript)
-            }
-        }
-        return sessions.map { AgentSessionRow(session: $0, activity: activity[$0.pid]) }
+        let activities = ClaudeTranscriptReader().activities(for: sessions)
+        let rows = sessions.map { AgentSessionRow(session: $0, activity: activities[$0.pid]) }
+        return (rows, SystemMemoryReader().read())
     }
 }

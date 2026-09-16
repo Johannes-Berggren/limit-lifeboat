@@ -36,9 +36,13 @@ public struct SystemMemoryReader: Sendable {
         var count = mach_msg_type_number_t(
             MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size
         )
+        // mach_host_self() returns a new send right on every call; an
+        // always-running app polling this must give it back.
+        let host = mach_host_self()
+        defer { mach_port_deallocate(mach_task_self_, host) }
         let result = withUnsafeMutablePointer(to: &stats) { pointer in
             pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+                host_statistics64(host, HOST_VM_INFO64, $0, &count)
             }
         }
         guard result == KERN_SUCCESS else { return nil }
