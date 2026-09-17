@@ -674,6 +674,16 @@ final class AppState: ObservableObject {
     /// the same user-initiated retry the row's Retry button does, so the active
     /// login's expired access token is rotated without opening the popover.
     func performNotificationBudgetMode(_ mode: BudgetMode) {
+        // The notification may be hours old and a cheaper mode already on;
+        // tapping it must never move the user back up.
+        budgetMode.reload()
+        guard mode > budgetMode.status.mode else {
+            usageAlertController.handleNotificationSwitchOutcome(
+                title: "Already on \(budgetMode.status.mode.displayName) mode",
+                body: "That is the same or cheaper than \(mode.displayName), so nothing changed."
+            )
+            return
+        }
         if budgetMode.apply(mode) {
             usageAlertController.handleNotificationSwitchOutcome(
                 title: "\(mode.displayName) mode is on",

@@ -224,6 +224,20 @@ struct SettingsView: View {
                                 systemImage: "exclamationmark.triangle.fill",
                                 color: DS.danger
                             )
+                            if budgetMode.canForgetRecord {
+                                HStack {
+                                    Text(budgetMode.recordPath)
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                        .truncationMode(.middle)
+                                        .lineLimit(1)
+                                    Spacer()
+                                    Button("Forget Saved Record") {
+                                        budgetMode.forgetRecord()
+                                    }
+                                    .controlSize(.small)
+                                }
+                            }
                         }
                     }
                     .onAppear { budgetMode.reload() }

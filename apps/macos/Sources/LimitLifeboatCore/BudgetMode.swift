@@ -3,7 +3,7 @@ import Foundation
 /// Opinionated presets for Claude Code's token use, written to its user
 /// settings. Every value here is a documented settings key; see
 /// code.claude.com/docs/en/settings-reference and /advisor.
-public enum BudgetMode: String, Codable, CaseIterable, Identifiable, Sendable {
+public enum BudgetMode: String, Codable, CaseIterable, Identifiable, Comparable, Sendable {
     /// Leaves Claude Code's own settings alone.
     case quality
     /// Keeps the chosen main model but caps effort and runs subagents on Sonnet.
@@ -13,6 +13,22 @@ public enum BudgetMode: String, Codable, CaseIterable, Identifiable, Sendable {
     case frugal
 
     public var id: String { rawValue }
+
+    /// Cheapest last, so "is this actually a step down?" is a comparison.
+    private var order: Int {
+        switch self {
+        case .quality:
+            return 0
+        case .balanced:
+            return 1
+        case .frugal:
+            return 2
+        }
+    }
+
+    public static func < (lhs: BudgetMode, rhs: BudgetMode) -> Bool {
+        lhs.order < rhs.order
+    }
 
     public var displayName: String {
         switch self {
@@ -177,7 +193,7 @@ public struct BudgetModeController {
         public var errorDescription: String? {
             switch self {
             case .unreadableRecord:
-                return "Limit Lifeboat's record of your previous Claude Code settings could not be read, so budget modes were left unchanged rather than risk losing those settings."
+                return "Limit Lifeboat's record of your previous Claude Code settings could not be read, so budget modes were left unchanged rather than risk losing those settings. Forget the record to use budget modes again; the values now in settings.json stay as they are."
             }
         }
     }
@@ -191,6 +207,17 @@ public struct BudgetModeController {
     public init(file: ClaudeSettingsFile = ClaudeSettingsFile(), recordURL: URL) {
         self.file = file
         self.recordURL = recordURL
+    }
+
+    /// Where the undo record lives, so a failure can name it.
+    public var recordPath: String { recordURL.path }
+
+    /// Drops an unreadable record so budget modes work again. The settings
+    /// file is left exactly as it is: without a readable record, what the
+    /// user's own values were is no longer known.
+    public func forgetRecord() throws {
+        guard FileManager.default.fileExists(atPath: recordURL.path) else { return }
+        try FileManager.default.removeItem(at: recordURL)
     }
 
     public func status() throws -> BudgetModeStatus {

@@ -7,6 +7,9 @@ import LimitLifeboatCore
 final class BudgetModeModel: ObservableObject {
     @Published private(set) var status: BudgetModeStatus = .active(.quality)
     @Published private(set) var error: String?
+    /// Set when the stored record is unreadable — the one failure the user
+    /// can clear themselves.
+    @Published private(set) var canForgetRecord = false
 
     private let controller: BudgetModeController
 
@@ -17,10 +20,24 @@ final class BudgetModeModel: ObservableObject {
         reload()
     }
 
+    var recordPath: String { controller.recordPath }
+
     func reload() {
         do {
             status = try controller.status()
             error = nil
+            canForgetRecord = false
+        } catch {
+            self.error = error.localizedDescription
+            canForgetRecord = error is BudgetModeController.ControllerError
+        }
+    }
+
+    func forgetRecord() {
+        do {
+            try controller.forgetRecord()
+            canForgetRecord = false
+            reload()
         } catch {
             self.error = error.localizedDescription
         }
@@ -39,6 +56,7 @@ final class BudgetModeModel: ObservableObject {
                 status = current
             }
             self.error = error.localizedDescription
+            canForgetRecord = error is BudgetModeController.ControllerError
             return false
         }
     }

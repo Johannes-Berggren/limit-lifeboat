@@ -103,6 +103,32 @@ final class BudgetModeTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: recordURL), #"{"mode":"frugal","future":true}"#)
     }
 
+    func testForgettingACorruptRecordMakesBudgetModesUsableAgain() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let settingsURL = directory.appendingPathComponent("settings.json")
+        try Data(#"{"model":"sonnet","maxEffortLevel":"medium"}"#.utf8).write(to: settingsURL)
+        let recordURL = directory.appendingPathComponent(BudgetModeController.recordFileName)
+        try Data("not json".utf8).write(to: recordURL)
+        let controller = BudgetModeController(file: ClaudeSettingsFile(url: settingsURL), recordURL: recordURL)
+        XCTAssertThrowsError(try controller.apply(.balanced))
+
+        try controller.forgetRecord()
+
+        XCTAssertEqual(try controller.status(), .active(.quality))
+        XCTAssertNoThrow(try controller.apply(.balanced))
+        // The settings the record could no longer explain are left alone.
+        let settings = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: settingsURL)) as? [String: Any])
+        XCTAssertEqual(settings["model"] as? String, "sonnet")
+        XCTAssertEqual(settings["maxEffortLevel"] as? String, "high")
+    }
+
+    func testModesAreOrderedCheapestLast() {
+        XCTAssertTrue(BudgetMode.frugal > BudgetMode.balanced)
+        XCTAssertTrue(BudgetMode.balanced > BudgetMode.quality)
+    }
+
     func testSuggestsNextCheaperModeOnlyWhenSwitchingCannotHelp() {
         XCTAssertEqual(
             BudgetSuggestionPolicy.suggestion(provider: .claude, current: .active(.quality), hasPaceAlert: true, hasSwitchCandidate: false),
