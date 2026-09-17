@@ -13,6 +13,10 @@ enum NotificationSwitchAction {
     static let categoryBest = "limit-switch"
     static let categoryThisAccount = "limit-switch-here"
     static let categoryRefresh = "limit-refresh"
+    static let categoryBudget = "limit-budget-mode"
+    static let budgetActionID = "use-budget-mode"
+    static let budgetActionValue = "budget"
+    static let budgetModeKey = "budgetMode"
     static let actionID = "switch-now"
     static let refreshActionID = "refresh-now"
     static let actionKey = "action"
@@ -48,6 +52,28 @@ final class UsageAlertController {
             identifier: "weekly-digest-\(Int(digest.periodEnd.timeIntervalSince1970))",
             title: digest.title,
             body: digest.body
+        )
+    }
+
+    private let budgetSuggestionSentKey = "lastBudgetSuggestionSentAt"
+
+    func canSuggestBudgetMode(now: Date) -> Bool {
+        let last = UserDefaults.standard.double(forKey: budgetSuggestionSentKey)
+        return last == 0 || now.timeIntervalSince1970 - last >= 24 * 3600
+    }
+
+    /// Pace alert with nowhere to switch: offer the next cheaper budget mode.
+    func handleBudgetSuggestion(_ mode: BudgetMode, profileLabel: String) {
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: budgetSuggestionSentKey)
+        postNotification(
+            identifier: "budget-suggestion-\(mode.rawValue)",
+            title: "\(profileLabel): no account left to switch to",
+            body: "You're on pace to run out before the reset and no saved account has room. \(mode.displayName) mode stretches what's left: \(mode.summary) It applies to new sessions.",
+            categoryIdentifier: NotificationSwitchAction.categoryBudget,
+            userInfo: [
+                NotificationSwitchAction.actionKey: NotificationSwitchAction.budgetActionValue,
+                NotificationSwitchAction.budgetModeKey: mode.rawValue
+            ]
         )
     }
 
@@ -286,7 +312,14 @@ final class UsageAlertController {
             ],
             intentIdentifiers: []
         )
-        center.setNotificationCategories([switchToBest, switchToThisAccount, refreshNow])
+        let useCheaperMode = UNNotificationCategory(
+            identifier: NotificationSwitchAction.categoryBudget,
+            actions: [
+                UNNotificationAction(identifier: NotificationSwitchAction.budgetActionID, title: "Use Cheaper Mode")
+            ],
+            intentIdentifiers: []
+        )
+        center.setNotificationCategories([switchToBest, switchToThisAccount, refreshNow, useCheaperMode])
     }
 
     /// Per-window near-limit alerts. Session (5h) windows only notify when the

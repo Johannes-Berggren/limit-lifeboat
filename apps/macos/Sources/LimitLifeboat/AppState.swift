@@ -51,6 +51,9 @@ final class AppState: ObservableObject {
 
     let settings: SettingsStore
     let updater: AppUpdater
+    private(set) lazy var budgetMode = BudgetModeModel(
+        applicationSupportDirectory: repository.applicationSupportDirectory
+    )
     private(set) lazy var sessionMonitor = SessionMonitor(
         settings: settings,
         stateDirectory: repository.applicationSupportDirectory
@@ -670,6 +673,30 @@ final class AppState: ObservableObject {
     /// Handles the "Refresh Now" action on a usage-paused notification: runs
     /// the same user-initiated retry the row's Retry button does, so the active
     /// login's expired access token is rotated without opening the popover.
+    func performNotificationBudgetMode(_ mode: BudgetMode) {
+        // The notification may be hours old and a cheaper mode already on;
+        // tapping it must never move the user back up.
+        budgetMode.reload()
+        guard mode > budgetMode.status.mode else {
+            usageAlertController.handleNotificationSwitchOutcome(
+                title: "Already on \(budgetMode.status.mode.displayName) mode",
+                body: "That is the same or cheaper than \(mode.displayName), so nothing changed."
+            )
+            return
+        }
+        if budgetMode.apply(mode) {
+            usageAlertController.handleNotificationSwitchOutcome(
+                title: "\(mode.displayName) mode is on",
+                body: "New Claude Code sessions use it. Change it any time in Settings > Budget Mode."
+            )
+        } else {
+            usageAlertController.handleNotificationSwitchOutcome(
+                title: "Budget mode was not changed",
+                body: budgetMode.error ?? "Claude Code settings could not be updated."
+            )
+        }
+    }
+
     func performNotificationRefresh(provider: Provider, profileID: UUID?) async {
         guard provider == .claude else {
             usageAlertController.handleNotificationSwitchOutcome(
@@ -2537,6 +2564,22 @@ final class AppState: ObservableObject {
                 provider: profile.provider,
                 advisedTargetID: switchAdvice[profile.provider]?.bestCandidateID
             )
+        }
+        // Pace alerts dedupe per window, and a session window resets every
+        // ~5h, so the suggestion keeps its own once-a-day limit.
+        if settings.budgetSuggestionsEnabled, !alerts.isEmpty,
+           usageAlertController.canSuggestBudgetMode(now: Date()) {
+            budgetMode.reload()
+            // An unreadable settings file or undo record: offering a mode that
+            // cannot be applied safely would only fail on tap.
+            if budgetMode.error == nil, let suggestion = BudgetSuggestionPolicy.suggestion(
+                provider: profile.provider,
+                current: budgetMode.status,
+                hasPaceAlert: !alerts.isEmpty,
+                hasSwitchCandidate: switchAdvice[profile.provider]?.bestCandidateID != nil
+            ) {
+                usageAlertController.handleBudgetSuggestion(suggestion, profileLabel: profile.label)
+            }
         }
     }
 

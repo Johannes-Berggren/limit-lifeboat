@@ -49,6 +49,12 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(memoryGuardAlertsEnabled, forKey: Keys.memoryGuardAlertsEnabled) }
     }
 
+    /// Suggests a cheaper Claude Code budget mode when the active account is
+    /// on pace to run out and no saved account has room to switch to.
+    @Published var budgetSuggestionsEnabled: Bool {
+        didSet { defaults.set(budgetSuggestionsEnabled, forKey: Keys.budgetSuggestionsEnabled) }
+    }
+
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -64,6 +70,7 @@ final class SettingsStore: ObservableObject {
         self.weeklyDigestEnabled = defaults.object(forKey: Keys.weeklyDigestEnabled) as? Bool ?? true
         self.showOrganizationNames = defaults.object(forKey: Keys.showOrganizationNames) as? Bool ?? true
         self.memoryGuardAlertsEnabled = defaults.object(forKey: Keys.memoryGuardAlertsEnabled) as? Bool ?? true
+        self.budgetSuggestionsEnabled = defaults.object(forKey: Keys.budgetSuggestionsEnabled) as? Bool ?? true
     }
 
     private enum Keys {
@@ -75,5 +82,6 @@ final class SettingsStore: ObservableObject {
         static let weeklyDigestEnabled = "weeklyDigestEnabled"
         static let showOrganizationNames = "showOrganizationNames"
         static let memoryGuardAlertsEnabled = "memoryGuardAlertsEnabled"
+        static let budgetSuggestionsEnabled = "budgetSuggestionsEnabled"
     }
 }
