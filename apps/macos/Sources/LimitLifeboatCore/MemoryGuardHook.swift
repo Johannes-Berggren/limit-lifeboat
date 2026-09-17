@@ -84,11 +84,29 @@ public enum MemoryGuardHookScript {
           exit 0
         fi
 
+        # Check-and-claim must be atomic: an orchestrator starting several
+        # sessions at once would otherwise see every one of them held. mkdir
+        # either creates the lock or fails, so exactly one run can hold.
+        # Anything that cannot be read or written lets the prompt through.
+        age() { m=$(/usr/bin/stat -f %m "$1" 2>/dev/null) && echo $((now - m)); }
+        /bin/mkdir -p "$HELD_DIR" 2>/dev/null || exit 0
+        lock="$HELD_DIR/claiming"
+        lock_age=$(age "$lock")
+        if [ -n "$lock_age" ] && [ "$lock_age" -gt 60 ]; then
+          /bin/rmdir "$lock" 2>/dev/null
+        fi
+        /bin/mkdir "$lock" 2>/dev/null || exit 0
         marker="$HELD_DIR/last-held"
-        if [ -f "$marker" ] && [ $((now - $(/usr/bin/stat -f %m "$marker"))) -le \(holdIntervalSeconds) ]; then
+        held_age=$(age "$marker")
+        if [ -n "$held_age" ] && [ "$held_age" -le \(holdIntervalSeconds) ]; then
+          /bin/rmdir "$lock"
           exit 0
         fi
-        /bin/mkdir -p "$HELD_DIR" && : > "$marker"
+        if ! : > "$marker" 2>/dev/null; then
+          /bin/rmdir "$lock"
+          exit 0
+        fi
+        /bin/rmdir "$lock"
 
         message=$(/usr/bin/plutil -extract message raw -o - "$STATE" 2>/dev/null)
         echo "Limit Lifeboat held this new session because memory is critically low. $message Close an idle session first, or submit again to start anyway — nothing else is held for the next hour." >&2

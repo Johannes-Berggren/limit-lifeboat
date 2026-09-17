@@ -90,6 +90,9 @@ final class MemoryGuardHookScriptTests: XCTestCase {
     private var scriptURL: URL { directory.appendingPathComponent(MemoryGuardHookScript.fileName) }
 
     override func setUpWithError() throws {
+        // A hook that exits before reading stdin (the bypass) closes the pipe;
+        // writing the payload afterwards must not kill the test runner.
+        signal(SIGPIPE, SIG_IGN)
         directory = FileManager.default.temporaryDirectory.appendingPathComponent("it's \(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let script = MemoryGuardHookScript.contents(
@@ -121,6 +124,31 @@ final class MemoryGuardHookScriptTests: XCTestCase {
         let marker = directory.appendingPathComponent("held/last-held")
         try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-3_700)], ofItemAtPath: marker.path)
         XCTAssertEqual(try run(input: payload(session: "later")).status, 2)
+    }
+
+    func testConcurrentFreshSessionsHoldOnlyOne() throws {
+        try writeState(.critical, updatedAt: Date())
+
+        let statuses = try (0..<8).map { index in
+            try start(input: payload(session: "parallel-\(index)"))
+        }.map { process -> Int32 in
+            process.waitUntilExit()
+            return process.terminationStatus
+        }
+
+        XCTAssertEqual(statuses.filter { $0 == 2 }.count, 1, "\(statuses)")
+        XCTAssertEqual(statuses.filter { $0 == 0 }.count, 7, "\(statuses)")
+    }
+
+    func testUnwritableHeldDirectoryNeverHolds() throws {
+        try writeState(.critical, updatedAt: Date())
+        let held = directory.appendingPathComponent("held")
+        try FileManager.default.createDirectory(at: held, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: held.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: held.path) }
+
+        XCTAssertEqual(try run(input: payload(session: "a")).status, 0)
+        XCTAssertEqual(try run(input: payload(session: "b")).status, 0)
     }
 
     func testBypassVariableSkipsTheHold() throws {
@@ -196,6 +224,22 @@ final class MemoryGuardHookScriptTests: XCTestCase {
         return String(decoding: data, as: UTF8.self)
     }
 
+    /// Starts the hook without waiting, so several can race.
+    private func start(input: String) throws -> Process {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = [scriptURL.path]
+        let stdin = Pipe()
+        process.standardInput = stdin
+        process.standardError = Pipe()
+        process.standardOutput = Pipe()
+        try process.run()
+        // The bypass exits before reading, so the payload may never be read.
+        try? stdin.fileHandleForWriting.write(contentsOf: Data(input.utf8))
+        try? stdin.fileHandleForWriting.close()
+        return process
+    }
+
     private func run(input: String, environment: [String: String] = [:]) throws -> (status: Int32, stderr: String) {
         let process = Process()
         process.environment = ProcessInfo.processInfo.environment.merging(environment) { $1 }
@@ -207,8 +251,9 @@ final class MemoryGuardHookScriptTests: XCTestCase {
         process.standardError = stderr
         process.standardOutput = Pipe()
         try process.run()
-        stdin.fileHandleForWriting.write(Data(input.utf8))
-        try stdin.fileHandleForWriting.close()
+        // The bypass exits before reading, so the payload may never be read.
+        try? stdin.fileHandleForWriting.write(contentsOf: Data(input.utf8))
+        try? stdin.fileHandleForWriting.close()
         process.waitUntilExit()
         let errorText = String(decoding: stderr.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         return (process.terminationStatus, errorText)
