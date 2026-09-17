@@ -4,6 +4,26 @@ import LimitLifeboatCore
 import XCTest
 
 final class MenuBarTitleFormatterTests: XCTestCase {
+    func testCompactMenuBarHidesUsageTitle() {
+        let title = MenuBarTitleFormatter.attributedTitle(
+            summary: makeSummary(
+                groups: [
+                    MenuBarProviderLimits(
+                        provider: .claude,
+                        limits: [
+                            MenuBarLimitValue(label: "S", usedPercent: 25, riskLevel: .healthy),
+                            MenuBarLimitValue(label: "W", usedPercent: 85, riskLevel: .warning)
+                        ]
+                    )
+                ]
+            ),
+            compactMenuBarEnabled: true
+        )
+
+        XCTAssertEqual(title.string, "")
+        XCTAssertEqual(title.length, 0)
+    }
+
     func testFormatsClaudeOnlyTitle() {
         let title = MenuBarTitleFormatter.attributedTitle(
             summary: makeSummary(

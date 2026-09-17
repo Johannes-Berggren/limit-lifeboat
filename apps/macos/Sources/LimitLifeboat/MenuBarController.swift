@@ -28,11 +28,20 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
             button.action = #selector(togglePopover(_:))
         }
 
-        updateStatusItem(summary: state.menuBarSummary)
-        state.$menuBarSummary
+        updateStatusItem(
+            summary: state.menuBarSummary,
+            compactMenuBarEnabled: state.settings.compactMenuBarEnabled
+        )
+        Publishers.CombineLatest(
+            state.$menuBarSummary,
+            state.settings.$compactMenuBarEnabled
+        )
             .receive(on: RunLoop.main)
-            .sink { [weak self] summary in
-                self?.updateStatusItem(summary: summary)
+            .sink { [weak self] summary, compactMenuBarEnabled in
+                self?.updateStatusItem(
+                    summary: summary,
+                    compactMenuBarEnabled: compactMenuBarEnabled
+                )
             }
             .store(in: &cancellables)
     }
@@ -61,7 +70,10 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         state.setAuthObservationInteractive(false)
     }
 
-    private func updateStatusItem(summary: MenuBarSummary) {
+    private func updateStatusItem(
+        summary: MenuBarSummary,
+        compactMenuBarEnabled: Bool
+    ) {
         guard let button = statusItem.button else {
             return
         }
@@ -81,12 +93,23 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         button.toolTip = "Limit Lifeboat\n\(summary.accessibilityText)"
         button.setAccessibilityLabel("Limit Lifeboat. \(summary.accessibilityText)")
         button.contentTintColor = nil
-        button.attributedTitle = MenuBarTitleFormatter.attributedTitle(summary: summary)
+        button.imagePosition = compactMenuBarEnabled ? .imageOnly : .imageLeading
+        button.attributedTitle = MenuBarTitleFormatter.attributedTitle(
+            summary: summary,
+            compactMenuBarEnabled: compactMenuBarEnabled
+        )
     }
 }
 
 enum MenuBarTitleFormatter {
-    static func attributedTitle(summary: MenuBarSummary) -> NSAttributedString {
+    static func attributedTitle(
+        summary: MenuBarSummary,
+        compactMenuBarEnabled: Bool = false
+    ) -> NSAttributedString {
+        guard !compactMenuBarEnabled else {
+            return NSAttributedString()
+        }
+
         let providerAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 9, weight: .bold),
             .foregroundColor: NSColor.secondaryLabelColor

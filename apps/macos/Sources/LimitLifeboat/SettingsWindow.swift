@@ -151,6 +151,16 @@ struct SettingsView: View {
 
                     Section("Appearance") {
                         Toggle("Show organization names", isOn: $settings.showOrganizationNames)
+                        Toggle(
+                            "Show only the lifeboat icon in the menu bar",
+                            isOn: $settings.compactMenuBarEnabled
+                        )
+                        Label(
+                            "Usage details remain available when you click or point to the icon.",
+                            systemImage: "info.circle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     }
 
                     Section("Notifications") {

@@ -44,6 +44,12 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(showOrganizationNames, forKey: Keys.showOrganizationNames) }
     }
 
+    /// Keeps the menu-bar footprint to the product mark. Detailed usage stays
+    /// available in the popover, tooltip, and accessibility label.
+    @Published var compactMenuBarEnabled: Bool {
+        didSet { defaults.set(compactMenuBarEnabled, forKey: Keys.compactMenuBarEnabled) }
+    }
+
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -58,6 +64,7 @@ final class SettingsStore: ObservableObject {
         self.sessionWindowAlertsEnabled = defaults.object(forKey: Keys.sessionWindowAlertsEnabled) as? Bool ?? false
         self.weeklyDigestEnabled = defaults.object(forKey: Keys.weeklyDigestEnabled) as? Bool ?? true
         self.showOrganizationNames = defaults.object(forKey: Keys.showOrganizationNames) as? Bool ?? true
+        self.compactMenuBarEnabled = defaults.object(forKey: Keys.compactMenuBarEnabled) as? Bool ?? false
     }
 
     private enum Keys {
@@ -68,5 +75,6 @@ final class SettingsStore: ObservableObject {
         static let sessionWindowAlertsEnabled = "sessionWindowAlertsEnabled"
         static let weeklyDigestEnabled = "weeklyDigestEnabled"
         static let showOrganizationNames = "showOrganizationNames"
+        static let compactMenuBarEnabled = "compactMenuBarEnabled"
     }
 }
