@@ -5,6 +5,7 @@ struct MenuRootView: View {
     @ObservedObject var state: AppState
     @ObservedObject var settings: SettingsStore
     @ObservedObject var updater: AppUpdater
+    @ObservedObject var sessions: SessionMonitor
     @State private var expandedAccounts: [Provider: UUID] = [:]
     @State private var sessionPolicyNow = Date()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -22,8 +23,16 @@ struct MenuRootView: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: DS.Spacing.xl) {
+                        // Tight memory is urgent enough to lead; otherwise the
+                        // session list trails the accounts it is secondary to.
+                        if sessions.assessment.isActionable {
+                            SessionsSectionView(monitor: sessions)
+                        }
                         providerSection(.claude)
                         providerSection(.codex)
+                        if !sessions.assessment.isActionable, !sessions.rows.isEmpty {
+                            SessionsSectionView(monitor: sessions)
+                        }
                     }
                     .padding(.horizontal, DS.Spacing.xl)
                     .padding(.vertical, DS.Spacing.md)

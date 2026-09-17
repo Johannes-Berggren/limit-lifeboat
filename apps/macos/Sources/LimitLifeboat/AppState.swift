@@ -51,6 +51,9 @@ final class AppState: ObservableObject {
 
     let settings: SettingsStore
     let updater: AppUpdater
+    private(set) lazy var sessionMonitor = SessionMonitor(settings: settings) { [weak self] assessment in
+        self?.usageAlertController.handleMemoryGuard(assessment)
+    }
 
     private let repository: ProfileRepository
     /// Where the durable stores live, exposed so diagnostics can read the
@@ -308,6 +311,7 @@ final class AppState: ObservableObject {
         deferredClaudeLoginResume = false
         pendingClaudeLoginCompletion = nil
         authStateMonitor = nil
+        sessionMonitor.stop()
         statusMessage = "The running app bundle was replaced or deleted. Relaunch Limit Lifeboat to continue."
     }
 
@@ -333,6 +337,9 @@ final class AppState: ObservableObject {
 
     func startBackgroundRefresh() {
         backgroundRefreshStarted = true
+        // Idempotent: AppMain starts this at launch; this covers any other
+        // entry point into the background loop.
+        sessionMonitor.start()
         scheduleNextBackgroundRefresh()
     }
 

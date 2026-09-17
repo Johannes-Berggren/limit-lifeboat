@@ -656,8 +656,9 @@ final class CodexAccountUsageServiceTests: XCTestCase {
         IFS= read -r initialized
         IFS= read -r account_read
         printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt","email":"other@example.com"},"requiresOpenaiAuth":true}}'
-        IFS= read -r consume
-        printf '%s' "$consume" > "$CODEX_HOME/unexpected-consume.json"
+        # Only record a consume that actually arrived: at EOF the read fails,
+        # and an unconditional redirect would create the file anyway.
+        IFS= read -r consume && printf '%s' "$consume" > "$CODEX_HOME/unexpected-consume.json"
         """)
         defer { fixture.cleanup() }
 

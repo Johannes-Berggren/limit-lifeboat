@@ -51,6 +51,18 @@ final class UsageAlertController {
         )
     }
 
+    func handleMemoryGuard(_ assessment: MemoryGuardAssessment) {
+        let planner = MemoryGuardAlertPlanner()
+        let now = Date()
+        // One identifier for every level, so an escalation to critical
+        // replaces the earlier warning in Notification Center.
+        postNotification(
+            identifier: "memory-guard",
+            title: planner.title(for: assessment),
+            body: planner.body(for: assessment, now: now)
+        )
+    }
+
     /// Reset alerts survive relaunches (persisted, keyed by account+window and
     /// reset date) so a restart does not re-announce quotas that were already
     /// reported back. The UserDefaults key is `"<profileID>|<windowID>"`.
