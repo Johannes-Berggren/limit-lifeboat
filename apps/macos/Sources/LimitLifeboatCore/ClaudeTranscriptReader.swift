@@ -69,33 +69,122 @@ public struct ClaudeTranscriptReader {
             .map(\.0)
     }
 
-    /// Pairs Claude sessions with their transcripts. Sessions sharing a
-    /// working directory also share a transcript folder, and nothing in either
-    /// identifies the other, so pairing is by age: oldest session to oldest
-    /// transcript. Age order is stable between scans, so a session keeps its
-    /// transcript — the digest reads idle time per pid across samples, and a
-    /// reshuffle would invent cache-expiry resumes.
-    public func activities(for sessions: [AgentSession]) -> [Int32: ClaudeSessionActivity] {
-        var result: [Int32: ClaudeSessionActivity] = [:]
-        let claudeSessions = sessions.filter { $0.provider == .claude && $0.workingDirectory != nil }
-        let byDirectory = Dictionary(grouping: claudeSessions) { $0.workingDirectory ?? "" }
+    /// Which transcript each session is reading from. Held across scans: the
+    /// digest tracks idle time per pid over time, and a session that changed
+    /// transcripts between scans would look like a cache-expiry resume that
+    /// never happened.
+    public struct Bindings: Equatable, Sendable {
+        fileprivate struct Entry: Equatable, Sendable {
+            var startedAt: Date
+            var url: URL
+            /// The bound file's modification time at the last scan, so a
+            /// transcript that has gone quiet can be told from a live one.
+            var modified: Date
+        }
 
-        for (directory, directorySessions) in byDirectory {
-            let ordered = directorySessions.sorted { ($0.startedAt, $0.pid) < ($1.startedAt, $1.pid) }
-            // One shared candidate list: filtering per session would let a
-            // newer session claim a file an older session is still writing.
-            guard let earliest = ordered.first?.startedAt else { continue }
-            let transcripts = recentTranscripts(workingDirectory: directory, since: earliest)
-                .map { url in
-                    (url, (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast)
+        fileprivate var byPID: [Int32: Entry] = [:]
+
+        public init() {}
+
+        public func url(forPID pid: Int32) -> URL? { byPID[pid]?.url }
+    }
+
+    /// Pairs Claude sessions with their transcripts, keeping each pairing for
+    /// as long as the session lives. A session sharing a directory with others
+    /// takes a transcript created after it started; one that resumed an older
+    /// conversation falls back to the most recently written unclaimed file.
+    public func activities(
+        for sessions: [AgentSession],
+        bindings: inout Bindings
+    ) -> [Int32: ClaudeSessionActivity] {
+        let claudeSessions = sessions.filter { $0.provider == .claude && $0.workingDirectory != nil }
+        let live = Dictionary(claudeSessions.map { ($0.pid, $0) }, uniquingKeysWith: { first, _ in first })
+        // A pid that exited (or was reused) takes its binding with it.
+        bindings.byPID = bindings.byPID.filter { pid, entry in
+            guard let session = live[pid] else { return false }
+            return abs(session.startedAt.timeIntervalSince(entry.startedAt)) < 1
+        }
+
+        for (directory, directorySessions) in Dictionary(grouping: claudeSessions, by: { $0.workingDirectory ?? "" }) {
+            var claimed = Set(bindings.byPID.values.map(\.url))
+            var available = transcriptFiles(in: directory).filter { !claimed.contains($0.url) }
+
+            // Oldest session first: it had the first chance to create a file.
+            for session in directorySessions.filter({ bindings.byPID[$0.pid] == nil })
+                .sorted(by: { ($0.startedAt, $0.pid) < ($1.startedAt, $1.pid) }) {
+                let ownFile = available
+                    .filter { $0.created >= session.startedAt.addingTimeInterval(-5) }
+                    .min { $0.created < $1.created }
+                let resumedFile = available
+                    .filter { $0.modified >= session.startedAt }
+                    .max { $0.modified < $1.modified }
+                guard let file = ownFile ?? resumedFile else { continue }
+                bindings.byPID[session.pid] = Bindings.Entry(
+                    startedAt: session.startedAt,
+                    url: file.url,
+                    modified: file.modified
+                )
+                claimed.insert(file.url)
+                available.removeAll { $0.url == file.url }
+            }
+
+            // /clear closes the current transcript and opens a new one. A bound
+            // file that stopped changing, beside exactly one new unclaimed file
+            // and no other session in the directory that could own it, is that.
+            let candidates = available.filter { file in
+                bindings.byPID.values.contains { $0.url != file.url && file.created > $0.modified }
+            }
+            if candidates.count == 1, let replacement = candidates.first {
+                let quiet = directorySessions
+                    .compactMap { session in bindings.byPID[session.pid].map { (session, $0) } }
+                    .filter { replacement.created > $0.1.modified }
+                if quiet.count == 1, let (session, entry) = quiet.first {
+                    bindings.byPID[session.pid] = Bindings.Entry(
+                        startedAt: entry.startedAt,
+                        url: replacement.url,
+                        modified: replacement.modified
+                    )
                 }
-                .sorted { ($0.1, $0.0.path) < ($1.1, $1.0.path) }
-                .map(\.0)
-            for (index, session) in ordered.enumerated() where index < transcripts.count {
-                result[session.pid] = activity(transcript: transcripts[index])
             }
         }
+
+        var result: [Int32: ClaudeSessionActivity] = [:]
+        for (pid, entry) in bindings.byPID {
+            guard let activity = activity(transcript: entry.url) else { continue }
+            result[pid] = activity
+            bindings.byPID[pid]?.modified = activity.lastActivityAt
+        }
         return result
+    }
+
+    /// Convenience for one-shot callers with no state to keep.
+    public func activities(for sessions: [AgentSession]) -> [Int32: ClaudeSessionActivity] {
+        var bindings = Bindings()
+        return activities(for: sessions, bindings: &bindings)
+    }
+
+    private func transcriptFiles(in workingDirectory: String) -> [(url: URL, created: Date, modified: Date)] {
+        let directory = homeDirectory
+            .appendingPathComponent(".claude/projects", isDirectory: true)
+            .appendingPathComponent(Self.projectDirectoryName(for: workingDirectory), isDirectory: true)
+        let keys: [URLResourceKey] = [.contentModificationDateKey, .creationDateKey]
+        guard let files = try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+        return files
+            .filter { $0.pathExtension == "jsonl" }
+            .compactMap { url in
+                guard let values = try? url.resourceValues(forKeys: Set(keys)),
+                      let modified = values.contentModificationDate else {
+                    return nil
+                }
+                return (url, values.creationDate ?? modified, modified)
+            }
+            .sorted { ($0.created, $0.url.path) < ($1.created, $1.url.path) }
     }
 
     public func activity(transcript url: URL) -> ClaudeSessionActivity? {

@@ -29,6 +29,8 @@ final class SessionMonitor: ObservableObject {
     /// Pids already warned about in their current idle spell.
     private var coldCacheWarnedPIDs: Set<Int32> = []
     private var lastSampledAt: Date?
+    /// Which transcript each running session is reading, kept across scans.
+    private var transcriptBindings = ClaudeTranscriptReader.Bindings()
     private var hasCompletedFirstSample = false
     private let hookInstaller = ClaudeHookInstaller()
     private let notify: (MemoryGuardAssessment) -> Void
@@ -124,9 +126,11 @@ final class SessionMonitor: ObservableObject {
 
     private func performScan() async {
         let ownPID = ProcessInfo.processInfo.processIdentifier
-        let (rows, memory) = await Task.detached(priority: .utility) {
-            Self.readCensus(excluding: ownPID)
+        let bindings = transcriptBindings
+        let (rows, memory, updatedBindings) = await Task.detached(priority: .utility) {
+            Self.readCensus(excluding: ownPID, bindings: bindings)
         }.value
+        transcriptBindings = updatedBindings
 
         let now = Date()
         // Publish rows and assessment together: fresh rows beside a stale or
@@ -264,15 +268,19 @@ final class SessionMonitor: ObservableObject {
         }
     }
 
-    nonisolated private static func readCensus(excluding ownPID: Int32) -> ([AgentSessionRow], SystemMemoryStatus?) {
+    nonisolated private static func readCensus(
+        excluding ownPID: Int32,
+        bindings: ClaudeTranscriptReader.Bindings
+    ) -> ([AgentSessionRow], SystemMemoryStatus?, ClaudeTranscriptReader.Bindings) {
         let table = SystemProcessTable()
         let sessions = AgentSessionCensusBuilder().sessions(
             from: table.records(),
             excludingDescendantsOf: ownPID,
             workingDirectory: table.workingDirectory(pid:)
         )
-        let activities = ClaudeTranscriptReader().activities(for: sessions)
+        var bindings = bindings
+        let activities = ClaudeTranscriptReader().activities(for: sessions, bindings: &bindings)
         let rows = sessions.map { AgentSessionRow(session: $0, activity: activities[$0.pid]) }
-        return (rows, SystemMemoryReader().read())
+        return (rows, SystemMemoryReader().read(), bindings)
     }
 }

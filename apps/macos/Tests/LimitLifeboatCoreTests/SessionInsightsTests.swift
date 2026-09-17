@@ -146,3 +146,94 @@ final class ColdCacheAlertPolicyTests: XCTestCase {
         SessionSample.Entry(pid: pid, provider: .claude, project: project, model: nil, contextTokens: context, idleSeconds: idle)
     }
 }
+
+final class ClaudeTranscriptBindingTests: XCTestCase {
+    private var home: URL!
+    private var directory: URL!
+    private var reader: ClaudeTranscriptReader!
+    private let workingDirectory = "/work/app"
+
+    override func setUpWithError() throws {
+        home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        reader = ClaudeTranscriptReader(homeDirectory: home)
+        directory = home.appendingPathComponent(".claude/projects/-work-app")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: home)
+    }
+
+    func testASessionKeepsItsTranscriptWhenAnotherIsResumedAndBecomesNewest() throws {
+        let now = Date()
+        // An old conversation file, and a file each running session created.
+        try transcript("yesterday.jsonl", model: "claude-haiku-4-5", created: -86_400, modified: -86_000)
+        try transcript("first.jsonl", model: "claude-opus-5", created: -600, modified: -60)
+        try transcript("second.jsonl", model: "claude-sonnet-5", created: -300, modified: -30)
+        let first = session(pid: 1, startedAt: now.addingTimeInterval(-620))
+        let second = session(pid: 2, startedAt: now.addingTimeInterval(-320))
+        var bindings = ClaudeTranscriptReader.Bindings()
+
+        let firstScan = reader.activities(for: [first, second], bindings: &bindings)
+        XCTAssertEqual(firstScan[1]?.model, "claude-opus-5")
+        XCTAssertEqual(firstScan[2]?.model, "claude-sonnet-5")
+
+        // A third session resumes yesterday's conversation, making that file
+        // the most recently written in the directory.
+        try touch("yesterday.jsonl", modified: -1)
+        let resumed = session(pid: 3, startedAt: now.addingTimeInterval(-10))
+
+        let secondScan = reader.activities(for: [first, second, resumed], bindings: &bindings)
+
+        XCTAssertEqual(secondScan[1]?.model, "claude-opus-5")
+        XCTAssertEqual(secondScan[2]?.model, "claude-sonnet-5")
+        XCTAssertEqual(secondScan[3]?.model, "claude-haiku-4-5")
+    }
+
+    func testAFinishedSessionsTranscriptIsNotClaimedByANewOne() throws {
+        let now = Date()
+        // Left behind by a session that has already exited.
+        try transcript("finished.jsonl", model: "claude-opus-5", created: -7_200, modified: -3_600)
+        try transcript("mine.jsonl", model: "claude-sonnet-5", created: -60, modified: -10)
+        var bindings = ClaudeTranscriptReader.Bindings()
+
+        let activities = reader.activities(for: [session(pid: 9, startedAt: now.addingTimeInterval(-90))], bindings: &bindings)
+
+        XCTAssertEqual(activities[9]?.model, "claude-sonnet-5")
+    }
+
+    func testClearMovesTheSessionToItsNewTranscript() throws {
+        let now = Date()
+        try transcript("before-clear.jsonl", model: "claude-opus-5", created: -1_800, modified: -600)
+        let only = session(pid: 5, startedAt: now.addingTimeInterval(-1_900))
+        var bindings = ClaudeTranscriptReader.Bindings()
+        XCTAssertEqual(reader.activities(for: [only], bindings: &bindings)[5]?.model, "claude-opus-5")
+
+        // /clear starts a fresh transcript; the old one stops changing.
+        try transcript("after-clear.jsonl", model: "claude-sonnet-5", created: -60, modified: -5)
+
+        XCTAssertEqual(reader.activities(for: [only], bindings: &bindings)[5]?.model, "claude-sonnet-5")
+        XCTAssertEqual(bindings.url(forPID: 5)?.lastPathComponent, "after-clear.jsonl")
+    }
+
+    private func session(pid: Int32, startedAt: Date) -> AgentSession {
+        AgentSession(pid: pid, provider: .claude, workingDirectory: workingDirectory, startedAt: startedAt, footprintBytes: 0, processCount: 1)
+    }
+
+    private func transcript(_ name: String, model: String, created: TimeInterval, modified: TimeInterval) throws {
+        let url = directory.appendingPathComponent(name)
+        let line = #"{"type":"assistant","message":{"model":"\#(model)","usage":{"input_tokens":1}}}"#
+        try Data(line.utf8).write(to: url)
+        try FileManager.default.setAttributes(
+            [.creationDate: Date().addingTimeInterval(created), .modificationDate: Date().addingTimeInterval(modified)],
+            ofItemAtPath: url.path
+        )
+    }
+
+    private func touch(_ name: String, modified: TimeInterval) throws {
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(modified)],
+            ofItemAtPath: directory.appendingPathComponent(name).path
+        )
+    }
+}
