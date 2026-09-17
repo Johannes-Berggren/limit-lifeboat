@@ -98,6 +98,18 @@ public struct ClaudeOAuthCredentials: Equatable, Sendable {
         guard let oauthValue = object["claudeAiOauth"] else {
             return nil
         }
+        // Claude Code 2.1.270 clears a rejected refresh-token chain by
+        // retaining the OAuth metadata but writing both tokens as empty
+        // strings and expiresAt as zero. This is a logged-out item, not
+        // corruption; rejecting it here would block the recovery /login.
+        if let oauth = oauthValue as? [String: Any],
+           oauth["accessToken"] as? String == "",
+           oauth["refreshToken"] as? String == "",
+           let expiry = oauth["expiresAt"] as? NSNumber,
+           CFGetTypeID(expiry) != CFBooleanGetTypeID(),
+           expiry.doubleValue == 0 {
+            return nil
+        }
         guard let oauth = oauthValue as? [String: Any],
               let json = try? JSONSerialization.data(
                 withJSONObject: oauth,

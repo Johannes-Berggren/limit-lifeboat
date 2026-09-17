@@ -669,6 +669,50 @@ final class CLISwitcherTests: XCTestCase {
         )
     }
 
+    func testClearedClaudeTokenChainAllowsLoginBaselineAndSubsequentLogin() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let source = FakeClaudeCLICredentialSource()
+        source.exactLocation = testClaudeKeychainLocation(reference: "cleared-chain")
+        let clearedItem = Data(
+            #"{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0,"subscriptionType":"max"},"mcpOAuth":{"server":{"accessToken":"mcp"}}}"#.utf8
+        )
+        source.itemJSON = clearedItem
+        // Claude keeps account metadata after invalidating the token chain.
+        try Data(#"{"oauthAccount":{"emailAddress":"old@example.com","accountUuid":"old-account"}}"#.utf8)
+            .write(to: fixture.home.appendingPathComponent(".claude.json"))
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: MemoryCredentialStore(),
+            claudeCLICredentialSource: source
+        )
+
+        let baseline = try switcher.stableLiveObservation(
+            provider: .claude,
+            accessMode: .nonInteractive
+        )
+        XCTAssertFalse(baseline.isLoggedIn)
+        XCTAssertNil(baseline.snapshot)
+        XCTAssertNil(try switcher.liveClaudeOAuthCredentialRecord(accessMode: .nonInteractive))
+        XCTAssertNil(try switcher.liveClaudeOAuthCredentialRecord(
+            at: XCTUnwrap(source.exactLocation),
+            accessMode: .nonInteractive
+        ))
+        XCTAssertEqual(source.itemJSON, clearedItem)
+
+        source.itemJSON = Data(
+            #"{"claudeAiOauth":{"accessToken":"new-login","refreshToken":"new-chain","expiresAt":1800000000000},"mcpOAuth":{"server":{"accessToken":"mcp"}}}"#.utf8
+        )
+        let completed = try switcher.stableLiveObservation(
+            provider: .claude,
+            accessMode: .nonInteractive
+        )
+        XCTAssertTrue(completed.isLoggedIn)
+        XCTAssertNotNil(completed.snapshot)
+        XCTAssertNotEqual(completed.credentialFingerprint, baseline.credentialFingerprint)
+    }
+
     func testMalformedLiveOAuthItemFailsClosed() throws {
         let fixture = try TemporaryFixture()
         defer { fixture.cleanup() }
@@ -2362,6 +2406,55 @@ final class CLISwitcherTests: XCTestCase {
         let mcp = try XCTUnwrap(object["mcpOAuth"] as? [String: Any])
         XCTAssertEqual(oauth["accessToken"] as? String, "account-a")
         XCTAssertNotNil(mcp["serverX"], "mcpOAuth must survive an account switch")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.backups.path), [])
+    }
+
+    func testClaudeSwitchFromClearedTokenChainRestoresSavedAccountAndPreservesMCP() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let source = FakeClaudeCLICredentialSource()
+        source.exactLocation = testClaudeKeychainLocation(reference: "switch-cleared-chain")
+        source.itemJSON = Data(
+            #"{"claudeAiOauth":{"accessToken":"saved-access","refreshToken":"saved-refresh","expiresAt":1800000000000}}"#.utf8
+        )
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: MemoryCredentialStore(),
+            claudeCLICredentialSource: source
+        )
+        let accountFile = fixture.home.appendingPathComponent(".claude.json")
+        try Data(#"{"oauthAccount":{"emailAddress":"saved@example.com","accountUuid":"saved-account"}}"#.utf8)
+            .write(to: accountFile)
+        let target = AccountProfile(provider: .claude, label: "Saved")
+        _ = try switcher.captureAndStoreSnapshot(for: target)
+
+        // A different live account has had its refresh-token chain rejected.
+        source.itemJSON = Data(
+            #"{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0},"mcpOAuth":{"server":{"accessToken":"keep-mcp"}},"customSibling":"keep"}"#.utf8
+        )
+        try Data(#"{"oauthAccount":{"emailAddress":"outgoing@example.com","accountUuid":"outgoing-account"}}"#.utf8)
+            .write(to: accountFile)
+        let outgoing = try switcher.stableLiveObservation(provider: .claude, accessMode: .nonInteractive)
+        XCTAssertFalse(outgoing.isLoggedIn)
+
+        let result = try switcher.restoreSnapshot(
+            for: target,
+            expectedLiveFingerprint: outgoing.credentialFingerprint,
+            enforceExpectedLiveState: true,
+            accessMode: .nonInteractive
+        )
+
+        XCTAssertTrue(result.verifiedObservation.isLoggedIn)
+        XCTAssertEqual(result.verifiedObservation.identity?.accountID, "saved-account")
+        let live = try XCTUnwrap(source.itemJSON)
+        let credentials = try XCTUnwrap(ClaudeOAuthCredentials.extract(fromKeychainItemJSON: live))
+        XCTAssertEqual(credentials.accessToken, "saved-access")
+        XCTAssertEqual(credentials.refreshToken, "saved-refresh")
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: live) as? [String: Any])
+        let mcp = try XCTUnwrap(object["mcpOAuth"] as? [String: [String: String]])
+        XCTAssertEqual(mcp["server"]?["accessToken"], "keep-mcp")
+        XCTAssertEqual(object["customSibling"] as? String, "keep")
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.backups.path), [])
     }
 

@@ -5,7 +5,6 @@ import LimitLifeboatAppWorkflows
 import LimitLifeboatCore
 import os
 import Security
-import WebKit
 
 @MainActor
 final class AppState: ObservableObject {
@@ -2597,6 +2596,14 @@ final class AppState: ObservableObject {
         return snapshot
     }
 
+    /// Deletes the isolated web data stores of profiles that no longer exist.
+    /// Removal cannot do this itself; see
+    /// `WebDataStoreFactory.removeOrphanedDataStores(keeping:)`. Run once at
+    /// launch, before any dashboard window has been opened.
+    func removeOrphanedWebDataStores() async {
+        await WebDataStoreFactory.removeOrphanedDataStores(keeping: { self.profiles })
+    }
+
     func openDashboard(for profile: AccountProfile) {
         dashboardWindowManager.open(profile: profile) { [weak self] text in
             self?.ingestDashboardText(text, for: profile, source: profile.provider.dashboardURL.absoluteString)
@@ -2947,9 +2954,12 @@ final class AppState: ObservableObject {
             counts: counter.snapshot
         )
         guard deleted else { return }
-        if profile.webDataStoreKind == .isolated {
-            WKWebsiteDataStore.remove(forIdentifier: profile.webDataStoreID) { _ in }
-        }
+        // Ends the account's dashboard session and starts the web view's
+        // teardown. The store this view holds cannot be deleted until that
+        // teardown has finished, which is unprovable here, so deletion waits
+        // for the next launch; removing it inline instead ended the process a
+        // moment after the profile disappeared (issue #81).
+        dashboardWindowManager.close(profileID: profileID)
         guard let index = profiles.firstIndex(where: { $0.id == profileID }) else {
             return
         }
@@ -2984,6 +2994,14 @@ final class AppState: ObservableObject {
         saveSnapshots()
         updateMenuBarSummary()
         statusMessage = "Removed \(profile.label)."
+        // The signed-in dashboard session has to go now rather than at the next
+        // launch with the store itself: this app runs for weeks between
+        // launches, and "Remove" promises the account is gone. Deliberately not
+        // awaited here -- this scope still holds the provider's credential
+        // mutation until its `defer` runs, and erasing cold-starts WebKit's
+        // networking process, which would gate refresh and switching for that
+        // whole time.
+        Task { await WebDataStoreFactory.eraseDataStoreContents(for: profile) }
     }
 
     // MARK: - CLI switching
