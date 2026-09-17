@@ -51,7 +51,10 @@ final class AppState: ObservableObject {
 
     let settings: SettingsStore
     let updater: AppUpdater
-    private(set) lazy var sessionMonitor = SessionMonitor(settings: settings) { [weak self] assessment in
+    private(set) lazy var sessionMonitor = SessionMonitor(
+        settings: settings,
+        stateDirectory: repository.applicationSupportDirectory
+    ) { [weak self] assessment in
         self?.usageAlertController.handleMemoryGuard(assessment)
     }
 

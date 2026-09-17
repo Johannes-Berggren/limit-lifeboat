@@ -18,8 +18,12 @@ final class SessionMonitor: ObservableObject {
     @Published private(set) var rows: [AgentSessionRow] = []
     @Published private(set) var memory: SystemMemoryStatus?
     @Published private(set) var assessment: MemoryGuardAssessment = .empty
+    @Published private(set) var isPromptHookInstalled = false
+    @Published private(set) var promptHookError: String?
 
     private let settings: SettingsStore
+    private let stateDirectory: URL
+    private let hookInstaller = ClaudeHookInstaller()
     private let notify: (MemoryGuardAssessment) -> Void
     private let policy = MemoryGuardPolicy()
     private let planner = MemoryGuardAlertPlanner()
@@ -31,13 +35,39 @@ final class SessionMonitor: ObservableObject {
     /// event — runs as soon as it finishes instead of being dropped.
     private var rescanRequested = false
 
-    init(settings: SettingsStore, notify: @escaping (MemoryGuardAssessment) -> Void) {
+    init(
+        settings: SettingsStore,
+        stateDirectory: URL,
+        notify: @escaping (MemoryGuardAssessment) -> Void
+    ) {
         self.settings = settings
+        self.stateDirectory = stateDirectory
         self.notify = notify
+    }
+
+    private var stateFileURL: URL {
+        stateDirectory.appendingPathComponent(MemoryGuardState.fileName)
+    }
+
+    private var hookScriptURL: URL {
+        stateDirectory.appendingPathComponent("hooks", isDirectory: true)
+            .appendingPathComponent(MemoryGuardHookScript.fileName)
     }
 
     func start() {
         guard scanTask == nil else { return }
+        switch hookInstaller.status(expectedScriptPath: hookScriptURL.path) {
+        case .notInstalled:
+            break
+        case .installed:
+            // Keep an installed script current with this build's version.
+            try? writeHookScript()
+        case .needsRepair:
+            // The hook points at a script path that is no longer ours; left
+            // alone it would fail on every prompt. Reinstall at today's path.
+            setPromptHookInstalled(true)
+        }
+        refreshPromptHookStatus()
         scanTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.scan()
@@ -105,6 +135,7 @@ final class SessionMonitor: ObservableObject {
             now: now
         )
         self.assessment = assessment
+        try? MemoryGuardState(assessment: assessment, now: now).write(to: stateFileURL)
 
         if assessment.level == .ok {
             lastNotified = nil
@@ -113,6 +144,43 @@ final class SessionMonitor: ObservableObject {
             lastNotified = .init(level: assessment.level, notifiedAt: now)
             notify(assessment)
         }
+    }
+
+    /// Adds or removes the Claude Code hook that holds new sessions while
+    /// memory is critical. Touches only Limit Lifeboat's own hook entry.
+    func setPromptHookInstalled(_ installed: Bool) {
+        promptHookError = nil
+        do {
+            if installed {
+                try writeHookScript()
+                try hookInstaller.install(scriptPath: hookScriptURL.path)
+            } else {
+                try hookInstaller.uninstall()
+            }
+        } catch {
+            promptHookError = error.localizedDescription
+        }
+        refreshPromptHookStatus()
+    }
+
+    /// Only an entry pointing at this build's script counts as installed, so
+    /// Settings never shows a drifted, failing hook as working.
+    private func refreshPromptHookStatus() {
+        isPromptHookInstalled = hookInstaller.status(expectedScriptPath: hookScriptURL.path) == .installed
+    }
+
+    private func writeHookScript() throws {
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(
+            at: hookScriptURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let script = MemoryGuardHookScript.contents(
+            stateFile: stateFileURL,
+            heldDirectory: stateDirectory.appendingPathComponent("hooks/held", isDirectory: true)
+        )
+        try Data(script.utf8).write(to: hookScriptURL, options: .atomic)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hookScriptURL.path)
     }
 
     func revealInFinder(_ row: AgentSessionRow) {
