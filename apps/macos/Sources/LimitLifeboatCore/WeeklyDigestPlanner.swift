@@ -6,6 +6,12 @@ public struct WeeklyDigest: Equatable, Sendable {
     public var title: String
     public var body: String
     public var periodEnd: Date
+
+    public init(title: String, body: String, periodEnd: Date) {
+        self.title = title
+        self.body = body
+        self.periodEnd = periodEnd
+    }
 }
 
 /// Decides when a weekly usage digest is due and what it says. Pure logic:

@@ -257,18 +257,28 @@ final class ClaudeTranscriptPairingTests: XCTestCase {
         let directory = home.appendingPathComponent(".claude/projects/-work-app")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let now = Date()
-        for (name, model, age) in [("a.jsonl", "claude-opus-5", 10.0), ("b.jsonl", "claude-sonnet-5", 20.0)] {
+        // a.jsonl was created first but written to most recently.
+        for (name, model, created, modified) in [
+            ("a.jsonl", "claude-opus-5", 500.0, 10.0),
+            ("b.jsonl", "claude-sonnet-5", 200.0, 20.0)
+        ] {
             let url = directory.appendingPathComponent(name)
             let line = #"{"type":"assistant","message":{"model":"\#(model)","usage":{"input_tokens":1}}}"#
             try Data(line.utf8).write(to: url)
-            try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-age)], ofItemAtPath: url.path)
+            try FileManager.default.setAttributes(
+                [.creationDate: now.addingTimeInterval(-created), .modificationDate: now.addingTimeInterval(-modified)],
+                ofItemAtPath: url.path
+            )
         }
         let older = AgentSession(pid: 1, provider: .claude, workingDirectory: "/work/app", startedAt: now.addingTimeInterval(-600), footprintBytes: 0, processCount: 1)
         let newer = AgentSession(pid: 2, provider: .claude, workingDirectory: "/work/app", startedAt: now.addingTimeInterval(-300), footprintBytes: 0, processCount: 1)
 
         let activities = ClaudeTranscriptReader(homeDirectory: home).activities(for: [older, newer])
 
-        XCTAssertEqual(activities[2]?.model, "claude-opus-5")
-        XCTAssertEqual(activities[1]?.model, "claude-sonnet-5")
+        // Paired by age, not by recent writes: the older session gets the
+        // older transcript, and input order does not change the pairing.
+        XCTAssertEqual(activities[1]?.model, "claude-opus-5")
+        XCTAssertEqual(activities[2]?.model, "claude-sonnet-5")
+        XCTAssertEqual(ClaudeTranscriptReader(homeDirectory: home).activities(for: [newer, older]), activities)
     }
 }

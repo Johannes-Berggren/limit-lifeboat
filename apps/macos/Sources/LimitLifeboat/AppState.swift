@@ -59,6 +59,8 @@ final class AppState: ObservableObject {
         stateDirectory: repository.applicationSupportDirectory
     ) { [weak self] assessment in
         self?.usageAlertController.handleMemoryGuard(assessment)
+    } notifyColdCache: { [weak self] candidates in
+        self?.usageAlertController.handleColdCacheRisk(candidates)
     }
 
     private let repository: ProfileRepository
@@ -602,11 +604,31 @@ final class AppState: ObservableObject {
             )
         }
 
-        let digest = planner.build(
+        var digest = planner.build(
             accounts: accounts,
             events: eventStore.events(in: period),
             period: period
         )
+        // "Where your quota went": what the sessions themselves were doing.
+        // Worth sending on its own — a week with no window readings (a fresh
+        // install, or usage reads that kept failing) is exactly when the
+        // session view is the only thing left to report.
+        let aggregator = SessionInsightAggregator()
+        let insightLines = aggregator.summary(
+            samples: sessionMonitor.insightStore.samples(in: period),
+            in: period
+        ).map(aggregator.digestLines(for:)) ?? []
+        if !insightLines.isEmpty {
+            if digest != nil {
+                digest?.body += " " + insightLines.joined(separator: " ")
+            } else {
+                digest = WeeklyDigest(
+                    title: "Your week in agent sessions",
+                    body: insightLines.joined(separator: " "),
+                    periodEnd: period.end
+                )
+            }
+        }
         // Marked sent even when there is nothing to say, so an empty week
         // does not re-run this on every refresh cycle.
         usageAlertController.markWeeklyDigestSent(at: now)

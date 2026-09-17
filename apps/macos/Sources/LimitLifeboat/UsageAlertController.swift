@@ -77,6 +77,15 @@ final class UsageAlertController {
         )
     }
 
+    func handleColdCacheRisk(_ candidates: [ColdCacheAlertPolicy.Candidate]) {
+        let policy = ColdCacheAlertPolicy()
+        postNotification(
+            identifier: "cold-cache-\(candidates.map { String($0.pid) }.joined(separator: "-"))",
+            title: candidates.count == 1 ? "Idle session is about to cost extra" : "Idle sessions are about to cost extra",
+            body: policy.notificationBody(for: candidates)
+        )
+    }
+
     func handleMemoryGuard(_ assessment: MemoryGuardAssessment) {
         let planner = MemoryGuardAlertPlanner()
         let now = Date()

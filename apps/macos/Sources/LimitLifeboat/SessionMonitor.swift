@@ -23,8 +23,18 @@ final class SessionMonitor: ObservableObject {
 
     private let settings: SettingsStore
     private let stateDirectory: URL
+    let insightStore: SessionInsightStore
+    private let aggregator = SessionInsightAggregator()
+    private let coldCachePolicy = ColdCacheAlertPolicy()
+    /// Pids already warned about in their current idle spell.
+    private var coldCacheWarnedPIDs: Set<Int32> = []
+    private var lastSampledAt: Date?
+    /// Which transcript each running session is reading, kept across scans.
+    private var transcriptBindings = ClaudeTranscriptReader.Bindings()
+    private var hasCompletedFirstSample = false
     private let hookInstaller = ClaudeHookInstaller()
     private let notify: (MemoryGuardAssessment) -> Void
+    private let notifyColdCache: ([ColdCacheAlertPolicy.Candidate]) -> Void
     private let policy = MemoryGuardPolicy()
     private let planner = MemoryGuardAlertPlanner()
     private var lastNotified: MemoryGuardAlertPlanner.Record?
@@ -38,11 +48,14 @@ final class SessionMonitor: ObservableObject {
     init(
         settings: SettingsStore,
         stateDirectory: URL,
-        notify: @escaping (MemoryGuardAssessment) -> Void
+        notify: @escaping (MemoryGuardAssessment) -> Void,
+        notifyColdCache: @escaping ([ColdCacheAlertPolicy.Candidate]) -> Void
     ) {
         self.settings = settings
         self.stateDirectory = stateDirectory
+        self.insightStore = SessionInsightStore(applicationSupportDirectory: stateDirectory)
         self.notify = notify
+        self.notifyColdCache = notifyColdCache
     }
 
     private var stateFileURL: URL {
@@ -56,6 +69,8 @@ final class SessionMonitor: ObservableObject {
 
     func start() {
         guard scanTask == nil else { return }
+        // Load past samples so the weekly digest sees more than this launch.
+        try? insightStore.load()
         switch hookInstaller.status(expectedScriptPath: hookScriptURL.path) {
         case .notInstalled:
             break
@@ -111,9 +126,11 @@ final class SessionMonitor: ObservableObject {
 
     private func performScan() async {
         let ownPID = ProcessInfo.processInfo.processIdentifier
-        let (rows, memory) = await Task.detached(priority: .utility) {
-            Self.readCensus(excluding: ownPID)
+        let bindings = transcriptBindings
+        let (rows, memory, updatedBindings) = await Task.detached(priority: .utility) {
+            Self.readCensus(excluding: ownPID, bindings: bindings)
         }.value
+        transcriptBindings = updatedBindings
 
         let now = Date()
         // Publish rows and assessment together: fresh rows beside a stale or
@@ -137,6 +154,8 @@ final class SessionMonitor: ObservableObject {
         self.assessment = assessment
         try? MemoryGuardState(assessment: assessment, now: now).write(to: stateFileURL)
 
+        recordSample(rows: rows, now: now)
+
         if assessment.level == .ok {
             lastNotified = nil
         } else if settings.memoryGuardAlertsEnabled,
@@ -144,6 +163,44 @@ final class SessionMonitor: ObservableObject {
             lastNotified = .init(level: assessment.level, notifiedAt: now)
             notify(assessment)
         }
+    }
+
+    /// Samples every few minutes for the weekly digest, and warns once when a
+    /// session has been idle long enough to lose its prompt cache.
+    private func recordSample(rows: [AgentSessionRow], now: Date) {
+        let entries = rows.map { row in
+            SessionSample.Entry(
+                pid: row.session.pid,
+                provider: row.session.provider,
+                project: row.session.projectName,
+                model: row.activity?.model,
+                contextTokens: row.activity?.contextTokens ?? 0,
+                idleSeconds: row.activity.map { Int(now.timeIntervalSince($0.lastActivityAt)) }
+            )
+        }
+
+        // Re-arm a session once it wakes up or disappears: a pid still idle
+        // past the threshold stays warned, everything else is dropped.
+        coldCacheWarnedPIDs = coldCacheWarnedPIDs.intersection(
+            Set(entries.filter { ($0.idleSeconds ?? 0) >= coldCachePolicy.idleSeconds }.map(\.pid))
+        )
+
+        let candidates = coldCachePolicy.candidates(entries: entries, alreadyWarned: coldCacheWarnedPIDs)
+        if !candidates.isEmpty {
+            coldCacheWarnedPIDs.formUnion(candidates.map(\.pid))
+            // On the first scan of a launch, sessions that were already idle
+            // for hours are recorded silently: their cache is long gone, so
+            // "finish now to avoid it" would be advice about a past event.
+            if settings.cacheAlertsEnabled, hasCompletedFirstSample {
+                notifyColdCache(candidates)
+            }
+        }
+        hasCompletedFirstSample = true
+
+        let due = lastSampledAt.map { now.timeIntervalSince($0) >= Double(aggregator.sampleMinutes * 60) } ?? true
+        guard due, !entries.isEmpty else { return }
+        lastSampledAt = now
+        try? insightStore.append(SessionSample(timestamp: now, entries: entries))
     }
 
     /// Adds or removes the Claude Code hook that holds new sessions while
@@ -211,15 +268,19 @@ final class SessionMonitor: ObservableObject {
         }
     }
 
-    nonisolated private static func readCensus(excluding ownPID: Int32) -> ([AgentSessionRow], SystemMemoryStatus?) {
+    nonisolated private static func readCensus(
+        excluding ownPID: Int32,
+        bindings: ClaudeTranscriptReader.Bindings
+    ) -> ([AgentSessionRow], SystemMemoryStatus?, ClaudeTranscriptReader.Bindings) {
         let table = SystemProcessTable()
         let sessions = AgentSessionCensusBuilder().sessions(
             from: table.records(),
             excludingDescendantsOf: ownPID,
             workingDirectory: table.workingDirectory(pid:)
         )
-        let activities = ClaudeTranscriptReader().activities(for: sessions)
+        var bindings = bindings
+        let activities = ClaudeTranscriptReader().activities(for: sessions, bindings: &bindings)
         let rows = sessions.map { AgentSessionRow(session: $0, activity: activities[$0.pid]) }
-        return (rows, SystemMemoryReader().read())
+        return (rows, SystemMemoryReader().read(), bindings)
     }
 }
