@@ -18,6 +18,12 @@ public struct SystemMemoryStatus: Equatable, Sendable {
         totalBytes > usedBytes ? totalBytes - usedBytes : 0
     }
 
+    /// Share of physical memory in use, 0...1.
+    public var usedFraction: Double {
+        guard totalBytes > 0 else { return 0 }
+        return min(1, Double(usedBytes) / Double(totalBytes))
+    }
+
     public init(totalBytes: UInt64, usedBytes: UInt64, swapUsedBytes: UInt64, pressure: MemoryPressureLevel) {
         self.totalBytes = totalBytes
         self.usedBytes = usedBytes

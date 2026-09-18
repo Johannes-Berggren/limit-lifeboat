@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import LimitLifeboatCore
 
@@ -18,6 +19,9 @@ final class SessionMonitor: ObservableObject {
     @Published private(set) var rows: [AgentSessionRow] = []
     @Published private(set) var memory: SystemMemoryStatus?
     @Published private(set) var assessment: MemoryGuardAssessment = .empty
+    /// Recent memory-used readings for the optional memory graph; empty while
+    /// the graph is off.
+    @Published private(set) var trend = MemoryTrend()
     @Published private(set) var isPromptHookInstalled = false
     @Published private(set) var promptHookError: String?
 
@@ -39,6 +43,8 @@ final class SessionMonitor: ObservableObject {
     private let planner = MemoryGuardAlertPlanner()
     private var lastNotified: MemoryGuardAlertPlanner.Record?
     private var scanTask: Task<Void, Never>?
+    private var trendTask: Task<Void, Never>?
+    private var graphSetting: AnyCancellable?
     private var pressureSource: DispatchSourceMemoryPressure?
     private var isScanning = false
     /// A scan requested while one is running — above all a memory-pressure
@@ -101,13 +107,40 @@ final class SessionMonitor: ObservableObject {
         }
         source.resume()
         pressureSource = source
+
+        graphSetting = settings.$memoryGraphEnabled
+            .removeDuplicates()
+            .sink { [weak self] enabled in
+                self?.setTrendSampling(enabled)
+            }
     }
 
     func stop() {
         scanTask?.cancel()
         scanTask = nil
+        graphSetting = nil
+        setTrendSampling(false)
         pressureSource?.cancel()
         pressureSource = nil
+    }
+
+    /// The graph needs a finer cadence than the census, but only a single
+    /// cheap kernel read — so it gets its own loop, and only while it is on.
+    private func setTrendSampling(_ enabled: Bool) {
+        trendTask?.cancel()
+        trendTask = nil
+        guard enabled else {
+            trend = MemoryTrend()
+            return
+        }
+        trendTask = Task { [weak self] in
+            while !Task.isCancelled {
+                if let status = SystemMemoryReader().read() {
+                    self?.trend.append(status, at: Date())
+                }
+                try? await Task.sleep(nanoseconds: 10 * 1_000_000_000)
+            }
+        }
     }
 
     func scan() async {
@@ -138,6 +171,10 @@ final class SessionMonitor: ObservableObject {
         guard let memory else { return }
         self.rows = rows
         self.memory = memory
+        // A pressure-triggered scan should show on the graph right away.
+        if settings.memoryGraphEnabled {
+            trend.append(memory, at: now)
+        }
 
         var lastActivity: [Int32: Date] = [:]
         for row in rows {

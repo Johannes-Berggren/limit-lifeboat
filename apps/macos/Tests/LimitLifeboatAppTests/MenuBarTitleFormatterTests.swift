@@ -123,6 +123,20 @@ final class MenuBarTitleFormatterTests: XCTestCase {
         XCTAssertFalse(containsAttachment)
     }
 
+    func testMemoryTagYieldsToTheMemoryGraph() {
+        let summary = makeSummary(groups: [])
+
+        let tagged = MenuBarTitleFormatter.attributedTitle(summary: summary, memoryLevel: .critical)
+        let graphed = MenuBarTitleFormatter.attributedTitle(
+            summary: summary,
+            memoryLevel: .critical,
+            showsMemoryTag: false
+        )
+
+        XCTAssertTrue(tagged.string.hasSuffix(" · MEM"))
+        XCTAssertFalse(graphed.string.contains("MEM"))
+    }
+
     private func makeSummary(
         groups: [MenuBarProviderLimits],
         compactValue: String = "–",

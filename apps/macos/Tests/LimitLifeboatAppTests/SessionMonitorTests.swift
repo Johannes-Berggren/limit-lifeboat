@@ -37,5 +37,25 @@ final class SessionMonitorTests: XCTestCase {
         // This test itself runs under a process table, so a census that finds
         // nothing at all would mean the scan silently failed.
         XCTAssertGreaterThanOrEqual(monitor.assessment.sessionCount, 0)
+        // The memory graph is opt-in: no trend is kept until it is enabled.
+        XCTAssertTrue(monitor.trend.samples.isEmpty)
+    }
+
+    func testScanFeedsTheMemoryGraphOnlyWhenEnabled() async throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "SessionMonitorTests-\(UUID().uuidString)"))
+        let settings = SettingsStore(defaults: defaults)
+        XCTAssertFalse(settings.memoryGraphEnabled)
+        settings.memoryGraphEnabled = true
+        let monitor = SessionMonitor(
+            settings: settings,
+            stateDirectory: directory,
+            notify: { _ in },
+            notifyColdCache: { _ in }
+        )
+
+        await monitor.scan()
+
+        XCTAssertEqual(monitor.trend.samples.count, 1)
+        XCTAssertEqual(monitor.trend.latestStatus, monitor.memory)
     }
 }
