@@ -105,7 +105,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         let showsGraph = state.settings.memoryGraphEnabled
         let trend = state.sessionMonitor.trend
         button.image = showsGraph
-            ? MenuBarSparkline.image(icon: image, samples: trend.samples, level: memoryLevel)
+            ? MenuBarSparkline.image(icon: image, trend: trend, level: memoryLevel)
             : image
         let memoryNote = MenuBarTitleFormatter.memoryNote(for: memoryLevel)
         let usageNote = showsGraph ? MenuBarTitleFormatter.memoryUsageNote(for: trend.latest) : nil

@@ -10,10 +10,27 @@ final class MenuBarSparklineTests: XCTestCase {
         MemoryTrendSample(date: end.addingTimeInterval(-minutesAgo * 60), usedFraction: used)
     }
 
+    /// A trend holding exactly these readings, oldest first.
+    private func trend(_ samples: [MemoryTrendSample]) -> MemoryTrend {
+        var trend = MemoryTrend()
+        for sample in samples {
+            trend.append(
+                SystemMemoryStatus(
+                    totalBytes: 100,
+                    usedBytes: UInt64((sample.usedFraction * 100).rounded()),
+                    swapUsedBytes: 0,
+                    pressure: .normal
+                ),
+                at: sample.date
+            )
+        }
+        return trend
+    }
+
     func testGraphSitsBesideTheIcon() {
         let icon = NSImage(size: NSSize(width: 16, height: 16))
 
-        let image = MenuBarSparkline.image(icon: icon, samples: [], level: .ok)
+        let image = MenuBarSparkline.image(icon: icon, trend: MemoryTrend(), level: .ok)
 
         XCTAssertEqual(
             image.size.width,
@@ -25,7 +42,7 @@ final class MenuBarSparklineTests: XCTestCase {
 
     func testRendersWithNoneOneAndManySamples() {
         for samples in [[], [sample(minutesAgo: 0, used: 0.5)], (0..<180).map { sample(minutesAgo: Double($0) / 6, used: 0.6) }.reversed()] {
-            let image = MenuBarSparkline.image(icon: nil, samples: Array(samples), level: .critical)
+            let image = MenuBarSparkline.image(icon: nil, trend: trend(Array(samples)), level: .critical)
             XCTAssertNotNil(image.tiffRepresentation)
         }
     }
@@ -39,6 +56,7 @@ final class MenuBarSparklineTests: XCTestCase {
                 sample(minutesAgo: 15, used: 0),
                 sample(minutesAgo: 0, used: 1)
             ],
+            span: MemoryTrend.defaultWindow,
             in: rect
         )
 
@@ -48,6 +66,33 @@ final class MenuBarSparklineTests: XCTestCase {
         XCTAssertEqual(points[0].y, 0.75, accuracy: 0.01)
         XCTAssertEqual(points[1].x, rect.maxX - 0.75, accuracy: 0.01)
         XCTAssertEqual(points[1].y, rect.maxY - 0.75, accuracy: 0.01)
+    }
+
+    /// Freshly enabled, the graph plots what it has across the full width
+    /// rather than crowding a few readings against the right edge.
+    func testYoungTrendStillFillsTheWidth() {
+        let young = trend((0...12).map { sample(minutesAgo: Double(12 - $0) / 6, used: 0.5) })
+        XCTAssertEqual(young.displaySpan, 120, accuracy: 0.01)
+
+        let rect = NSRect(x: 0, y: 0, width: 26, height: 12)
+        let points = MenuBarSparkline.points(for: young.samples, span: young.displaySpan, in: rect)
+
+        XCTAssertEqual(points.count, 13)
+        XCTAssertEqual(points.first?.x ?? 0, rect.minX + 0.75, accuracy: 0.01)
+        XCTAssertEqual(points.last?.x ?? 0, rect.maxX - 0.75, accuracy: 0.01)
+    }
+
+    /// The very first readings are not stretched across the whole width.
+    func testFirstReadingsHoldAMinimumSpan() {
+        let fresh = trend((0...2).map { sample(minutesAgo: Double(2 - $0) / 6, used: 0.5) })
+
+        XCTAssertEqual(fresh.displaySpan, MemoryTrend.minimumDisplaySpan, accuracy: 0.01)
+    }
+
+    /// Once past the window the span stops growing, so the graph scrolls.
+    func testMatureTrendPinsToTheFullWindow() {
+        let mature = trend(stride(from: 45.0, through: 0, by: -0.5).map { sample(minutesAgo: $0, used: 0.5) })
+        XCTAssertEqual(mature.displaySpan, MemoryTrend.defaultWindow, accuracy: 0.01)
     }
 
     func testTintFollowsMemoryGuard() {

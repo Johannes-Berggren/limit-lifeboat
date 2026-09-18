@@ -33,7 +33,7 @@ struct MemoryTrendStripView: View {
                 .foregroundStyle(color)
             }
             .chartYScale(domain: 0...100)
-            .chartXScale(domain: timeDomain(samples))
+            .chartXScale(domain: timeDomain(samples, span: monitor.trend.displaySpan))
             .chartXAxis(.hidden)
             .chartYAxis(.hidden)
             .chartLegend(.hidden)
@@ -48,7 +48,7 @@ struct MemoryTrendStripView: View {
         .padding(.vertical, DS.Spacing.sm)
         .cardSurface()
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Memory used, last 30 minutes")
+        .accessibilityLabel("Memory used, last \(spanText)")
         .accessibilityValue(valueText)
     }
 
@@ -58,11 +58,16 @@ struct MemoryTrendStripView: View {
         return "\(MemoryFormatting.bytes(memory.usedBytes)) / \(MemoryFormatting.bytes(memory.totalBytes)) · \(percent)%"
     }
 
-    /// A fixed 30-minute span ending now-ish, so readings scroll in from the
-    /// right instead of stretching a minute of data across the whole strip.
-    private func timeDomain(_ samples: [MemoryTrendSample]) -> ClosedRange<Date> {
+    /// The span the trend can actually show, so a freshly enabled graph fills
+    /// the strip instead of crowding into its right edge.
+    private func timeDomain(_ samples: [MemoryTrendSample], span: TimeInterval) -> ClosedRange<Date> {
         let end = samples.last?.date ?? Date()
-        return end.addingTimeInterval(-MenuBarSparkline.window)...end
+        return end.addingTimeInterval(-span)...end
+    }
+
+    private var spanText: String {
+        let minutes = max(1, Int((monitor.trend.displaySpan / 60).rounded()))
+        return minutes == 1 ? "minute" : "\(minutes) minutes"
     }
 
     private func levelColor(_ level: MemoryGuardLevel) -> Color {

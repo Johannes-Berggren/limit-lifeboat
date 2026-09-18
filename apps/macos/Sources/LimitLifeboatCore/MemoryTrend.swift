@@ -38,6 +38,18 @@ public struct MemoryTrend: Equatable, Sendable {
         samples.last
     }
 
+    /// Never stretch the first readings across the whole width; below this a
+    /// graph is still visibly filling up.
+    public static let minimumDisplaySpan: TimeInterval = 60
+
+    /// How much time the graph should plot: the full window once that much
+    /// history exists, and whatever is there before then. A fresh graph fills
+    /// its width instead of showing a bare tick against an empty 30 minutes.
+    public var displaySpan: TimeInterval {
+        guard let first = samples.first, let last = samples.last else { return window }
+        return min(window, max(Self.minimumDisplaySpan, last.date.timeIntervalSince(first.date)))
+    }
+
     public mutating func append(_ status: SystemMemoryStatus, at date: Date) {
         latestStatus = status
         samples.append(MemoryTrendSample(date: date, usedFraction: status.usedFraction))
