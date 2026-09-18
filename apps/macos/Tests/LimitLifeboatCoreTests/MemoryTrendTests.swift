@@ -19,6 +19,20 @@ final class MemoryTrendTests: XCTestCase {
         XCTAssertEqual(trend.latestStatus, status(used: 40))
     }
 
+    /// The census scan feeds the graph too, so a count cap alone would cut
+    /// the history short of the 30 minutes the axis promises.
+    func testKeepsTheWholeWindowHoweverOftenItIsFed() {
+        var trend = MemoryTrend()
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+
+        for second in stride(from: 0, through: 3600, by: 5) {
+            trend.append(status(used: 50), at: start.addingTimeInterval(Double(second)))
+        }
+
+        XCTAssertEqual(trend.samples.first?.date, start.addingTimeInterval(1800))
+        XCTAssertEqual(trend.samples.last?.date, start.addingTimeInterval(3600))
+    }
+
     func testUsedFractionStaysWithinZeroToOne() {
         XCTAssertEqual(status(used: 150).usedFraction, 1)
         XCTAssertEqual(status(used: 10, total: 0).usedFraction, 0)

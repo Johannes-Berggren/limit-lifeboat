@@ -7,7 +7,7 @@ enum MenuBarSparkline {
     static let graphSize = NSSize(width: 26, height: 12)
     static let gap: CGFloat = 4
     /// The span the graph covers; readings scroll in from the right.
-    static let window: TimeInterval = 30 * 60
+    static let window = MemoryTrend.defaultWindow
 
     static func image(
         icon: NSImage?,
