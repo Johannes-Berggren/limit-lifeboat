@@ -50,6 +50,16 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
                 self?.updateStatusItem(summary: state.menuBarSummary)
             }
             .store(in: &cancellables)
+        // Emits on willSet, so redraw on the next main-loop turn, once the
+        // new trend or setting is readable.
+        state.sessionMonitor.$trend
+            .map { _ in () }
+            .merge(with: state.settings.$memoryGraphEnabled.removeDuplicates().map { _ in () })
+            .receive(on: RunLoop.main)
+            .sink { [weak self] in
+                self?.updateStatusItem(summary: state.menuBarSummary)
+            }
+            .store(in: &cancellables)
     }
 
     @objc private func togglePopover(_ sender: AnyObject?) {
@@ -92,13 +102,25 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
             NSImage.SymbolConfiguration(paletteColors: [.systemBlue])
         )
         image?.isTemplate = false
-        button.image = image
+        let showsGraph = state.settings.memoryGraphEnabled
+        let trend = state.sessionMonitor.trend
+        button.image = showsGraph
+            ? MenuBarSparkline.image(icon: image, samples: trend.samples, level: memoryLevel)
+            : image
         let memoryNote = MenuBarTitleFormatter.memoryNote(for: memoryLevel)
-        let accessibilityText = [summary.accessibilityText, memoryNote].compactMap { $0 }.joined(separator: ". ")
+        let usageNote = showsGraph ? MenuBarTitleFormatter.memoryUsageNote(for: trend.latest) : nil
+        let accessibilityText = [summary.accessibilityText, usageNote, memoryNote]
+            .compactMap { $0 }
+            .joined(separator: ". ")
         button.toolTip = "Limit Lifeboat\n\(accessibilityText)"
         button.setAccessibilityLabel("Limit Lifeboat. \(accessibilityText)")
         button.contentTintColor = nil
-        button.attributedTitle = MenuBarTitleFormatter.attributedTitle(summary: summary, memoryLevel: memoryLevel)
+        // The tinted graph already carries the Memory Guard state.
+        button.attributedTitle = MenuBarTitleFormatter.attributedTitle(
+            summary: summary,
+            memoryLevel: memoryLevel,
+            showsMemoryTag: !showsGraph
+        )
     }
 }
 
@@ -114,11 +136,19 @@ enum MenuBarTitleFormatter {
         }
     }
 
+    static func memoryUsageNote(for sample: MemoryTrendSample?) -> String? {
+        sample.map { "Memory \(Int(($0.usedFraction * 100).rounded()))% used" }
+    }
+
     /// Appends a colored "MEM" marker while Memory Guard is not OK, so the
     /// warning outlives its notification.
-    static func attributedTitle(summary: MenuBarSummary, memoryLevel: MemoryGuardLevel) -> NSAttributedString {
+    static func attributedTitle(
+        summary: MenuBarSummary,
+        memoryLevel: MemoryGuardLevel,
+        showsMemoryTag: Bool = true
+    ) -> NSAttributedString {
         let title = NSMutableAttributedString(attributedString: attributedTitle(summary: summary))
-        guard memoryLevel > .ok else {
+        guard showsMemoryTag, memoryLevel > .ok else {
             return title
         }
         title.append(NSAttributedString(

@@ -26,12 +26,17 @@ struct MenuRootView: View {
                         // Tight memory is urgent enough to lead; otherwise the
                         // session list trails the accounts it is secondary to.
                         if sessions.assessment.isActionable {
+                            memoryTrendStrip
                             SessionsSectionView(monitor: sessions)
                         }
                         providerSection(.claude)
                         providerSection(.codex)
-                        if !sessions.assessment.isActionable, !sessions.rows.isEmpty {
-                            SessionsSectionView(monitor: sessions)
+                        if !sessions.assessment.isActionable {
+                            // The graph stays even with no sessions to list.
+                            memoryTrendStrip
+                            if !sessions.rows.isEmpty {
+                                SessionsSectionView(monitor: sessions)
+                            }
                         }
                     }
                     .padding(.horizontal, DS.Spacing.xl)
@@ -45,6 +50,13 @@ struct MenuRootView: View {
         .tint(DS.accent)
         .onAppear { sessionPolicyNow = Date() }
         .onReceive(sessionTicker) { sessionPolicyNow = $0 }
+    }
+
+    @ViewBuilder
+    private var memoryTrendStrip: some View {
+        if settings.memoryGraphEnabled {
+            MemoryTrendStripView(monitor: sessions)
+        }
     }
 
     private var header: some View {

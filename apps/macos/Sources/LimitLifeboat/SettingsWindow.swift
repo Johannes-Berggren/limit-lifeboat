@@ -262,6 +262,13 @@ struct SettingsView: View {
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        Toggle("Show a memory graph in the menu bar and popover", isOn: $settings.memoryGraphEnabled)
+                        Label(
+                            "Memory used over the last 30 minutes. Turns orange or red with Memory Guard.",
+                            systemImage: "info.circle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                         if let error = sessionMonitor.promptHookError {
                             StatusBanner(
                                 text: error,

@@ -61,6 +61,12 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(cacheAlertsEnabled, forKey: Keys.cacheAlertsEnabled) }
     }
 
+    /// Opt-in: a small memory-used graph in the menu bar and popover. Off by
+    /// default — memory is only sampled this closely while it is on.
+    @Published var memoryGraphEnabled: Bool {
+        didSet { defaults.set(memoryGraphEnabled, forKey: Keys.memoryGraphEnabled) }
+    }
+
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -78,6 +84,7 @@ final class SettingsStore: ObservableObject {
         self.memoryGuardAlertsEnabled = defaults.object(forKey: Keys.memoryGuardAlertsEnabled) as? Bool ?? true
         self.budgetSuggestionsEnabled = defaults.object(forKey: Keys.budgetSuggestionsEnabled) as? Bool ?? true
         self.cacheAlertsEnabled = defaults.object(forKey: Keys.cacheAlertsEnabled) as? Bool ?? true
+        self.memoryGraphEnabled = defaults.object(forKey: Keys.memoryGraphEnabled) as? Bool ?? false
     }
 
     private enum Keys {
@@ -91,5 +98,6 @@ final class SettingsStore: ObservableObject {
         static let memoryGuardAlertsEnabled = "memoryGuardAlertsEnabled"
         static let budgetSuggestionsEnabled = "budgetSuggestionsEnabled"
         static let cacheAlertsEnabled = "cacheAlertsEnabled"
+        static let memoryGraphEnabled = "memoryGraphEnabled"
     }
 }
