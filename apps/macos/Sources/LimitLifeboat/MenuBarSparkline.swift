@@ -6,12 +6,10 @@ import LimitLifeboatCore
 enum MenuBarSparkline {
     static let graphSize = NSSize(width: 26, height: 12)
     static let gap: CGFloat = 4
-    /// The span the graph covers; readings scroll in from the right.
-    static let window = MemoryTrend.defaultWindow
 
     static func image(
         icon: NSImage?,
-        samples: [MemoryTrendSample],
+        trend: MemoryTrend,
         level: MemoryGuardLevel
     ) -> NSImage {
         let iconSize = icon?.size ?? .zero
@@ -29,7 +27,8 @@ enum MenuBarSparkline {
                 height: iconSize.height
             ))
             drawGraph(
-                samples: samples,
+                samples: trend.samples,
+                span: trend.displaySpan,
                 color: color(for: level),
                 in: NSRect(
                     x: graphX,
@@ -55,28 +54,33 @@ enum MenuBarSparkline {
         }
     }
 
-    /// Graph-space points for the samples: x by age within `window`, y by the
+    /// Graph-space points for the samples: x by age within `span`, y by the
     /// fixed 0...1 used fraction, so the line reads as level and trend at once.
-    static func points(for samples: [MemoryTrendSample], in rect: NSRect) -> [NSPoint] {
+    static func points(for samples: [MemoryTrendSample], span: TimeInterval, in rect: NSRect) -> [NSPoint] {
         guard let end = samples.last?.date else { return [] }
         // Inset so the stroke's half-width is not clipped at the edges.
         let plot = rect.insetBy(dx: 0.75, dy: 0.75)
         return samples.compactMap { sample in
             let age = end.timeIntervalSince(sample.date)
-            guard age <= window else { return nil }
+            guard age <= span else { return nil }
             return NSPoint(
-                x: plot.maxX - CGFloat(age / window) * plot.width,
+                x: plot.maxX - CGFloat(age / span) * plot.width,
                 y: plot.minY + CGFloat(sample.usedFraction) * plot.height
             )
         }
     }
 
-    private static func drawGraph(samples: [MemoryTrendSample], color: NSColor, in rect: NSRect) {
+    private static func drawGraph(
+        samples: [MemoryTrendSample],
+        span: TimeInterval,
+        color: NSColor,
+        in rect: NSRect
+    ) {
         // A hairline floor keeps the graph's footprint visible before it fills.
         color.withAlphaComponent(0.25).setFill()
         NSRect(x: rect.minX, y: rect.minY, width: rect.width, height: 0.5).fill()
 
-        var points = points(for: samples, in: rect)
+        var points = points(for: samples, span: span, in: rect)
         guard let last = points.last else { return }
         if points.count == 1 {
             points.insert(NSPoint(x: max(rect.minX, last.x - 1), y: last.y), at: 0)
