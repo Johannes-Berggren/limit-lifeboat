@@ -15,6 +15,15 @@ export interface Release {
 
 export const releases: readonly Release[] = [
   {
+    version: "1.1.14",
+    date: "2026-09-20",
+    highlights: [
+      "Added Memory Guard with live Claude Code session census, memory-pressure warnings, and optional holds on new sessions when memory is critical.",
+      "Added Claude Code budget modes, cheaper-mode suggestions, cold-cache warnings, and a weekly digest showing where quota was spent.",
+      "Added optional memory graphs in the menu bar and popover, including complete trends from the first reading.",
+    ],
+  },
+  {
     version: "1.1.13",
     date: "2026-09-15",
     highlights: [
