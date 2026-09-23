@@ -34,11 +34,20 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
             button.action = #selector(togglePopover(_:))
         }
 
-        updateStatusItem(summary: state.menuBarSummary)
-        state.$menuBarSummary
+        updateStatusItem(
+            summary: state.menuBarSummary,
+            compactMenuBarEnabled: state.settings.compactMenuBarEnabled
+        )
+        Publishers.CombineLatest(
+            state.$menuBarSummary,
+            state.settings.$compactMenuBarEnabled
+        )
             .receive(on: RunLoop.main)
-            .sink { [weak self] summary in
-                self?.updateStatusItem(summary: summary)
+            .sink { [weak self] summary, compactMenuBarEnabled in
+                self?.updateStatusItem(
+                    summary: summary,
+                    compactMenuBarEnabled: compactMenuBarEnabled
+                )
             }
             .store(in: &cancellables)
         state.sessionMonitor.$assessment
@@ -47,7 +56,10 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
             .receive(on: RunLoop.main)
             .sink { [weak self] level in
                 self?.memoryLevel = level
-                self?.updateStatusItem(summary: state.menuBarSummary)
+                self?.updateStatusItem(
+                    summary: state.menuBarSummary,
+                    compactMenuBarEnabled: state.settings.compactMenuBarEnabled
+                )
             }
             .store(in: &cancellables)
         // Emits on willSet, so redraw on the next main-loop turn, once the
@@ -57,7 +69,10 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
             .merge(with: state.settings.$memoryGraphEnabled.removeDuplicates().map { _ in () })
             .receive(on: RunLoop.main)
             .sink { [weak self] in
-                self?.updateStatusItem(summary: state.menuBarSummary)
+                self?.updateStatusItem(
+                    summary: state.menuBarSummary,
+                    compactMenuBarEnabled: state.settings.compactMenuBarEnabled
+                )
             }
             .store(in: &cancellables)
     }
@@ -86,7 +101,10 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         state.setAuthObservationInteractive(false)
     }
 
-    private func updateStatusItem(summary: MenuBarSummary) {
+    private func updateStatusItem(
+        summary: MenuBarSummary,
+        compactMenuBarEnabled: Bool
+    ) {
         guard let button = statusItem.button else {
             return
         }
@@ -102,7 +120,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
             NSImage.SymbolConfiguration(paletteColors: [.systemBlue])
         )
         image?.isTemplate = false
-        let showsGraph = state.settings.memoryGraphEnabled
+        let showsGraph = state.settings.memoryGraphEnabled && !compactMenuBarEnabled
         let trend = state.sessionMonitor.trend
         button.image = showsGraph
             ? MenuBarSparkline.image(icon: image, trend: trend, level: memoryLevel)
@@ -115,11 +133,13 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         button.toolTip = "Limit Lifeboat\n\(accessibilityText)"
         button.setAccessibilityLabel("Limit Lifeboat. \(accessibilityText)")
         button.contentTintColor = nil
+        button.imagePosition = compactMenuBarEnabled ? .imageOnly : .imageLeading
         // The tinted graph already carries the Memory Guard state.
         button.attributedTitle = MenuBarTitleFormatter.attributedTitle(
             summary: summary,
             memoryLevel: memoryLevel,
-            showsMemoryTag: !showsGraph
+            showsMemoryTag: !showsGraph,
+            compactMenuBarEnabled: compactMenuBarEnabled
         )
     }
 }
@@ -145,8 +165,13 @@ enum MenuBarTitleFormatter {
     static func attributedTitle(
         summary: MenuBarSummary,
         memoryLevel: MemoryGuardLevel,
-        showsMemoryTag: Bool = true
+        showsMemoryTag: Bool = true,
+        compactMenuBarEnabled: Bool = false
     ) -> NSAttributedString {
+        guard !compactMenuBarEnabled else {
+            return NSAttributedString()
+        }
+
         let title = NSMutableAttributedString(attributedString: attributedTitle(summary: summary))
         guard showsMemoryTag, memoryLevel > .ok else {
             return title
@@ -168,7 +193,14 @@ enum MenuBarTitleFormatter {
         return title
     }
 
-    static func attributedTitle(summary: MenuBarSummary) -> NSAttributedString {
+    static func attributedTitle(
+        summary: MenuBarSummary,
+        compactMenuBarEnabled: Bool = false
+    ) -> NSAttributedString {
+        guard !compactMenuBarEnabled else {
+            return NSAttributedString()
+        }
+
         let providerAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 9, weight: .bold),
             .foregroundColor: NSColor.secondaryLabelColor
