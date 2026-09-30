@@ -3838,6 +3838,12 @@ final class AppState: ObservableObject {
             )
 
             statusMessage = "Switched \(profile.provider.displayName) CLI to \(profile.label)."
+            if profile.provider == .codex, cliSwitcher.isCodexDaemonRunning() {
+                statusMessage += " Codex's background server is running and may still use the previous account; restart it with `codex app-server daemon restart`."
+            }
+            if profile.provider == .claude, cliSwitcher.hasClaudePlaintextCredentialsFile() {
+                statusMessage += " A leftover ~/.claude/.credentials.json may override the switched login; if Claude Code shows the wrong account, move that file aside."
+            }
             AppLog.switching.notice("Switched \(profile.provider.displayName, privacy: .public) CLI to account \(profile.id, privacy: .public) (interactive: \(interactive, privacy: .public))")
             // The single funnel every switch passes through (manual, auto,
             // notification click) — the weekly digest counts these events.

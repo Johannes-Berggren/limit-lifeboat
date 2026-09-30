@@ -10,7 +10,14 @@ protocol ProviderCredentialAdapter {
 }
 
 struct CodexCredentialAdapter: ProviderCredentialAdapter {
-    static let ownedKeys = ["auth_mode", "tokens", "OPENAI_API_KEY", "last_refresh"]
+    /// Every credential-bearing key Codex writes. The later ones (agent identity,
+    /// personal access token, Bedrock) arrived in Codex 0.14x–0.15x; owning them
+    /// means a switch clears the previous account's value instead of leaving it
+    /// next to the restored account's `tokens`.
+    static let ownedKeys = [
+        "auth_mode", "tokens", "OPENAI_API_KEY", "last_refresh",
+        "agent_identity", "personal_access_token", "bedrock_api_key", "bedrock_access_keys",
+    ]
     let provider = Provider.codex
     let homeDirectory: URL
     let fileManager: FileManager
