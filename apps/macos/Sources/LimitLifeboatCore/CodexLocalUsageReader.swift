@@ -175,7 +175,7 @@ public struct CodexLocalUsageReader {
 
     private func creditStatus(from event: RateLimitEvent) -> String? {
         if let reachedType = event.reachedType, !reachedType.isEmpty {
-            return "Rate limit reached: \(reachedType)."
+            return CodexRateLimitReachedType.statusText(reachedType)
         }
         return event.creditsAvailable ? "Credits are available." : nil
     }

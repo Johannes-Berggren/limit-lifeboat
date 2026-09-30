@@ -1090,7 +1090,7 @@ struct BillingStatusView: View {
             parts.append("Extra credits may apply after the included limit.")
         case .overLimitPayAsYouGo:
             parts.append("Included usage appears depleted or unavailable.")
-            parts.append("Extra usage may be billed through credits/pay-as-you-go.")
+            parts.append("Usage beyond the plan may be billed as usage credits (pay-as-you-go).")
         case .payAsYouGoVisible:
             parts.append("Credit/pay-as-you-go data was found, but included usage is unclear.")
         case .needsLogin:

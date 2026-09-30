@@ -207,13 +207,13 @@ public struct PayAsYouGoSpend: Codable, Equatable, Sendable {
         if let usedCredits {
             let used = format(usedCredits, locale: locale)
             if let monthlyLimit {
-                return "\(used) of \(format(monthlyLimit, locale: locale)) extra usage this month"
+                return "\(used) of \(format(monthlyLimit, locale: locale)) usage credits this month"
             }
-            return "\(used) extra usage this month"
+            return "\(used) usage credits this month"
         }
         if let utilization {
             let percent = utilization <= 1 ? utilization * 100 : utilization
-            return "Extra usage at \(UsagePercent.text(percent)) of this month's cap"
+            return "Usage credits at \(UsagePercent.text(percent)) of this month's cap"
         }
         return nil
     }

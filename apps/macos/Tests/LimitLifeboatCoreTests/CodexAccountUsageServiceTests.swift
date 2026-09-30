@@ -51,7 +51,7 @@ final class CodexAccountUsageServiceTests: XCTestCase {
         )
 
         XCTAssertEqual(result.updatedAuthJSON, updated)
-        XCTAssertEqual(result.accountInfo.planLabel, "Pro")
+        XCTAssertEqual(result.accountInfo.planLabel, "Pro (More)")
         XCTAssertEqual(result.snapshot.source, "Codex app server")
         XCTAssertEqual(result.snapshot.windows.map(\.id), ["codex-300", "codex-10080"])
         XCTAssertEqual(result.snapshot.windows.map(\.kind), [.session, .weekly])
@@ -165,7 +165,7 @@ final class CodexAccountUsageServiceTests: XCTestCase {
         XCTAssertEqual(snapshot.windows.first?.usedPercent, 42)
         XCTAssertEqual(snapshot.windows.first?.riskLevel, .depleted)
         XCTAssertEqual(snapshot.riskLevel, .depleted)
-        XCTAssertEqual(snapshot.creditStatus, "Rate limit reached: rate_limit_reached.")
+        XCTAssertEqual(snapshot.creditStatus, "Rate limit reached.")
         XCTAssertEqual(snapshot.codexRateLimitReachedType, "rate_limit_reached")
     }
 

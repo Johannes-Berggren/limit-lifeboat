@@ -395,7 +395,7 @@ final class ClaudeUsageAPIClientTests: XCTestCase {
         XCTAssertEqual(spend.decimalPlaces, 2)
         XCTAssertEqual(
             spend.summaryText(locale: Locale(identifier: "en_US")),
-            "R$141.57 of R$200 extra usage this month"
+            "R$141.57 of R$200 usage credits this month"
         )
     }
 
