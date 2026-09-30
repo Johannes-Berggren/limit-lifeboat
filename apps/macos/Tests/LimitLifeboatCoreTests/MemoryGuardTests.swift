@@ -79,6 +79,25 @@ final class ClaudeTranscriptReaderTests: XCTestCase {
         XCTAssertEqual(activity.lastActivityAt, ISO8601DateFormatter().date(from: "2026-09-16T11:00:00Z"))
     }
 
+    func testReadsCacheTTLFromTheNewestTurnThatWroteCache() throws {
+        let tail = """
+        {"type":"assistant","timestamp":"2026-09-16T10:00:00Z","message":{"model":"claude-opus-5-5","usage":{"input_tokens":5,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_5m_input_tokens":200,"ephemeral_1h_input_tokens":0}}}}
+        {"type":"assistant","timestamp":"2026-09-16T10:01:00Z","message":{"model":"claude-opus-5-5","usage":{"input_tokens":5,"cache_read_input_tokens":1200,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}}}
+        """
+        let fallback = Date(timeIntervalSince1970: 0)
+
+        let activity = try XCTUnwrap(ClaudeTranscriptReader.latestActivity(inTail: Data(tail.utf8), fallbackDate: fallback))
+
+        XCTAssertEqual(activity.cacheTTLSeconds, 300)
+        XCTAssertEqual(activity.contextTokens, 1_205, "context still comes from the newest turn")
+        XCTAssertEqual(activity.lastActivityAt, ISO8601DateFormatter().date(from: "2026-09-16T10:01:00Z"))
+
+        let oneHour = """
+        {"type":"assistant","timestamp":"2026-09-16T10:00:00Z","message":{"usage":{"input_tokens":5,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":200}}}}
+        """
+        XCTAssertEqual(ClaudeTranscriptReader.latestActivity(inTail: Data(oneHour.utf8), fallbackDate: fallback)?.cacheTTLSeconds, 3_600)
+    }
+
     func testFindsTranscriptsTouchedSinceSessionStart() throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: home) }

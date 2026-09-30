@@ -12,14 +12,26 @@ public struct SessionSample: Codable, Equatable, Sendable {
         /// Seconds since this session's last transcript activity; nil when
         /// there is no transcript to read (Codex today).
         public var idleSeconds: Int?
+        /// Prompt-cache lifetime seen in the transcript; nil when unknown
+        /// (older samples, Codex, or no cache write yet).
+        public var cacheTTLSeconds: Int?
 
-        public init(pid: Int32, provider: Provider, project: String, model: String?, contextTokens: Int, idleSeconds: Int?) {
+        public init(
+            pid: Int32,
+            provider: Provider,
+            project: String,
+            model: String?,
+            contextTokens: Int,
+            idleSeconds: Int?,
+            cacheTTLSeconds: Int? = nil
+        ) {
             self.pid = pid
             self.provider = provider
             self.project = project
             self.model = model
             self.contextTokens = contextTokens
             self.idleSeconds = idleSeconds
+            self.cacheTTLSeconds = cacheTTLSeconds
         }
 
         public var isActive: Bool {
@@ -64,8 +76,10 @@ public struct SessionInsightAggregator: Sendable {
     /// How long one sample stands for. Samples are taken on this cadence, so
     /// each active entry counts as this much work.
     public let sampleMinutes: Int
-    /// Idle time after which the main conversation's 1h prompt cache has
-    /// expired, so the next message re-reads the whole context uncached.
+    /// Idle time after which the main conversation's prompt cache has
+    /// expired, so the next message re-reads the whole context uncached. Used
+    /// when a sample doesn't record its own TTL; subscription sessions within
+    /// the plan get 1h.
     public let coldCacheSeconds: Int
 
     public init(sampleMinutes: Int = 5, coldCacheSeconds: Int = 3_600) {
@@ -98,16 +112,16 @@ public struct SessionInsightAggregator: Sendable {
 
         var coldResumes = 0
         var coldTokens = 0
-        var previousIdle: [Int32: Int] = [:]
+        var previousIdle: [Int32: (idle: Int, ttl: Int)] = [:]
         for sample in samples {
-            var currentIdle: [Int32: Int] = [:]
+            var currentIdle: [Int32: (idle: Int, ttl: Int)] = [:]
             for entry in sample.entries {
                 guard let idle = entry.idleSeconds else { continue }
-                currentIdle[entry.pid] = idle
+                currentIdle[entry.pid] = (idle, entry.cacheTTLSeconds ?? coldCacheSeconds)
                 // Idle time collapsing back to nothing means the session woke
                 // up; if it had been idle past the cache TTL, that turn paid
                 // for the whole context again.
-                if let previous = previousIdle[entry.pid], previous >= coldCacheSeconds, idle < previous {
+                if let previous = previousIdle[entry.pid], previous.idle >= previous.ttl, idle < previous.idle {
                     coldResumes += 1
                     coldTokens += entry.contextTokens
                 }
@@ -193,6 +207,10 @@ public struct ColdCacheAlertPolicy: Sendable {
                 return idle >= idleSeconds
                     && entry.contextTokens >= minimumContextTokens
                     && !alreadyWarned.contains(entry.pid)
+                    // A 5-minute cache (usage credits, API key, or a TTL
+                    // override) expires during any short break; warning
+                    // about it would be noise, not advice.
+                    && (entry.cacheTTLSeconds ?? 3_600) >= 3_600
             }
             .sorted { $0.contextTokens > $1.contextTokens }
             .map { Candidate(pid: $0.pid, project: $0.project, contextTokens: $0.contextTokens) }
