@@ -20,7 +20,7 @@ const faqs = [
   {
     question: "What exactly changes on disk when I switch?",
     answer:
-      "Only the selected provider's authentication fields. settings.json, MCP server definitions, hooks, permissions, instructions, and local history are left byte-for-byte alone. The app captures the current login first, stages rollback material, then verifies the restored identity before it cleans up.",
+      "Only the selected provider's authentication fields. A switch leaves settings.json, MCP server definitions, hooks, permissions, instructions, and local history byte-for-byte alone. (The opt-in Budget Mode and Memory Guard features edit ~/.claude/settings.json only when you turn them on, and back it up first.) The app captures the current login first, stages rollback material, then verifies the restored identity before it cleans up.",
   },
   {
     question: "What happens if a switch fails halfway?",
@@ -90,7 +90,7 @@ const structuredData = [
     maintainer: { "@id": `${product.siteUrl}/#organization` },
     featureList: [
       "Switch Claude Code and Codex CLI logins between saved accounts",
-      "Write only provider authentication fields, never settings.json or MCP definitions",
+      "Switch by writing only provider authentication fields, never settings.json or MCP definitions",
       "Verify the restored account identity after every switch",
       "Roll back a failed switch, or keep protected recovery material when rollback is unsafe",
       "Show session, weekly, and model-scoped usage windows for every saved account",
@@ -141,8 +141,8 @@ const structuredData = [
         <p class="hero-lead">
           Most switchers move the credential and leave you to discover what else they changed.
           This one restores only the auth fields, verifies which account you actually landed on,
-          and rolls back if it cannot finish. Your <code>settings.json</code>, MCP servers, and
-          hooks are never touched.
+          and rolls back if it cannot finish. Switching never touches your <code>settings.json</code>,
+          MCP servers, or hooks.
         </p>
         <div class="hero-actions">
           <a class="button button--primary button--large" href={product.links.download}>
@@ -199,7 +199,7 @@ const structuredData = [
       </div>
     </div>
     <div class="container proof-strip" aria-label="Product highlights">
-      <div><strong>Auth fields only</strong><span>settings.json untouched</span></div>
+      <div><strong>Auth fields only</strong><span>settings.json untouched on switch</span></div>
       <div><strong>Identity verified</strong><span>After every switch</span></div>
       <div><strong>Rolls back</strong><span>Or keeps recovery material</span></div>
       <div><strong>Zero telemetry</strong><span>Open source on GitHub</span></div>

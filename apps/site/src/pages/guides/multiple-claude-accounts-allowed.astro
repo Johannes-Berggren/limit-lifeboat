@@ -154,7 +154,10 @@ const faqs = [
       and personal stay distinct.
     </p>
     <p>
-      What neither vendor has shipped is switching for their command-line tools. The gap is why
+      What neither vendor has shipped is switching for their command-line tools. The closest
+      official answer is Anthropic's documented method of giving each Claude Code account its own
+      <code>CLAUDE_CONFIG_DIR</code>, which keeps logins apart but means maintaining one
+      configuration directory per account. The gap is why
       people write scripts that swap whole configuration directories, and why those scripts quietly
       destroy MCP server definitions and settings. The demand is real and mundane; the tooling
       around it is where the risk has been.
@@ -217,7 +220,8 @@ const faqs = [
     </ol>
     <p>
       If you need more capacity on one account rather than more accounts, both vendors document
-      supported routes: Anthropic offers extra usage and higher plan tiers, and OpenAI sells
+      supported routes: Anthropic offers usage credits (formerly called extra usage) and higher
+      plan tiers, and OpenAI sells
       additional credits. Those are the sanctioned answers to a limit, and they are worth using
       before reaching for anything else. <a href="/guides/claude-code-limit-reached"
         >What to do when Claude Code hits its limit</a

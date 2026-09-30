@@ -93,8 +93,9 @@ const faqs = [
       <li>
         <strong>Cost trackers such as ccusage</strong> — read local session logs and compute what the
         recorded activity would have cost at published API rates. This is a genuinely useful number
-        and it is not a quota percentage. On a subscription there is no dollar budget for it to be a
-        percentage of.
+        and it is not a quota percentage. Within a subscription plan there is no dollar budget for it
+        to be a percentage of. The exception is usage credits (formerly extra usage), which Anthropic
+        bills at API rates once you draw on them.
       </li>
       <li>
         <strong>Menu-bar monitors</strong> — poll the provider on a schedule and cache the result, so
@@ -116,9 +117,10 @@ const faqs = [
     <p>
       Claude Code reports several windows at once: a rolling session window of about five hours, a
       weekly all-models window, and weekly windows scoped to individual model families. A tool that
-      displays only one of them will look wrong to anyone watching a different one. Codex windows are
-      labelled from the durations OpenAI reports rather than a fixed pair, and some plans expose only
-      a weekly window.
+      displays only one of them will look wrong to anyone watching a different one. On Max, Team
+      Premium and Enterprise Premium, Fable also appears as its own weekly row, even though its usage
+      counts against the same weekly limit. Codex windows are labelled from the durations OpenAI
+      reports rather than a fixed pair, and Pro plans currently expose only a weekly window.
     </p>
     <h3>3. The session window rolls</h3>
     <p>
@@ -189,7 +191,8 @@ const faqs = [
     </p>
     <p>
       In Claude Code, run <code>/usage</code> to view plan limits and rate-limit status. In Codex CLI,
-      <code>/usage</code> reports account token activity and available rate-limit resets. OpenAI also
+      <code>/usage</code> reports account usage and available rate-limit resets, and since 0.156 it is
+      a dashboard that also covers token totals, credits, and plan usage history. OpenAI also
       directs users approaching a Codex limit to the Codex usage page or the in-product limit banner;
       see <a href="https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan"
         >Using Codex with your ChatGPT plan</a

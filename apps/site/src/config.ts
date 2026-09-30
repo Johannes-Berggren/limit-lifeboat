@@ -13,7 +13,7 @@ export const product = {
   headline: "Switch Claude Code and Codex accounts without breaking your setup.",
   /** Long-form value proposition. Used as on-page copy, not as a meta description. */
   shortDescription:
-    "Switch Claude Code and Codex CLI logins between your accounts on macOS. Only the auth fields change, the account is verified afterwards, and settings.json is never touched. Free and open source.",
+    "Switch Claude Code and Codex CLI logins between your accounts on macOS. Only the auth fields change, the account is verified afterwards, and switching never touches settings.json. Free and open source.",
   /** Meta description for the homepage. Kept inside the ~160 character display budget. */
   metaDescription:
     "Switch Claude Code and Codex CLI logins between your own accounts on macOS. Only the auth fields change, and the account is verified afterwards.",

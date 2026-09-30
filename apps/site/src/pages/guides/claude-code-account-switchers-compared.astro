@@ -9,6 +9,8 @@ const meta = getGuide("/guides/claude-code-account-switchers-compared");
 // on the verification date below. Re-check before changing this page; these projects
 // move, and a stale comparison is worse than none.
 const verifiedOn = "6 August 2026";
+// Star counts, licences, and archived status were re-checked on this later date.
+const starsCheckedOn = "30 September 2026";
 
 const tools = [
   {
@@ -27,7 +29,7 @@ const tools = [
     providers: "Claude Code only",
     licence: "MIT",
     signed: "Not applicable (CLI)",
-    note: "The largest dedicated switcher, at roughly 1,575 stars, and actively developed.",
+    note: "The largest dedicated switcher, at roughly 2,950 stars, and actively developed.",
   },
   {
     name: "CCSwitcher",
@@ -36,7 +38,7 @@ const tools = [
     providers: "Claude Code only",
     licence: "No licence file",
     signed: "Sparkle auto-update",
-    note: "Roughly 166 stars. Swaps the Keychain item and the oauthAccount block together.",
+    note: "Roughly 190 stars. Swaps the Keychain item and the oauthAccount block together.",
   },
   {
     name: "clauth",
@@ -80,7 +82,7 @@ const faqs = [
   {
     question: "Which Claude Code account switcher has the most users?",
     answer:
-      "claude-swap, among the dedicated switchers. As of 6 August 2026 it has roughly 1,575 GitHub stars, against 448 for the archived cc-account-switcher, 166 for CCSwitcher, 47 for Claude/Codex Account Switcher, 42 for clauth and 31 for claude-switch. Star counts measure attention rather than quality, and the usage monitors are far larger: CodexBar has over 19,000 and ccusage over 17,000.",
+      "claude-swap, among the dedicated switchers. As of 30 September 2026 it has roughly 2,950 GitHub stars, against 451 for the archived cc-account-switcher, 246 for clauth, 186 for CCSwitcher, 65 for Claude/Codex Account Switcher and 31 for claude-switch. Star counts measure attention rather than quality, and the usage monitors are far larger: CodexBar has over 22,000 and ccusage over 18,000.",
   },
   {
     question: "Is cc-switch the same thing as an account switcher?",
@@ -129,11 +131,11 @@ const faqs = [
 
   <AnswerBlock
     facts={[
-      "claude-swap is the largest dedicated switcher at roughly 1,575 GitHub stars; clauth is the only one covering Linux and Windows.",
+      "claude-swap is the largest dedicated switcher at roughly 2,950 GitHub stars; clauth is the only one covering Linux and Windows.",
       "Only Limit Lifeboat and Claude/Codex Account Switcher cover Codex CLI as well as Claude Code.",
       "cc-switch is a provider switcher, not an account switcher, despite dominating the search results.",
       "cc-account-switcher is archived; Claude/Codex Account Switcher last shipped in May 2026.",
-      "All figures verified 6 August 2026 against each project's own repository.",
+      "Star counts and archive status checked 30 September 2026 against each project's own repository; the rest of the comparison was verified 6 August 2026.",
     ]}
   >
     <p>
@@ -181,7 +183,7 @@ const faqs = [
         </tbody>
       </table>
     </div>
-    <p class="table-caption">Verified {verifiedOn}. These projects change; check the repository before relying on a row.</p>
+    <p class="table-caption">Verified {verifiedOn}; star counts, licences and archive status re-checked {starsCheckedOn}. These projects change; check the repository before relying on a row.</p>
     <ul>
       {tools.map((tool) => (
         <li><strong>{tool.name}:</strong> {tool.note}</li>
@@ -343,8 +345,8 @@ const faqs = [
     <h2>Usage monitors are a different category</h2>
     <p>
       A large group of tools show Claude Code and Codex usage without switching anything. CodexBar is
-      the biggest, with more than 19,000 GitHub stars, and ccusage — which focuses on cost accounting
-      from local session logs — has more than 17,000. Because they only read, they carry none of the
+      the biggest, with more than 22,000 GitHub stars, and ccusage — which focuses on cost accounting
+      from local session logs — has more than 18,000. Because they only read, they carry none of the
       credential-writing risk discussed above.
     </p>
     <p>

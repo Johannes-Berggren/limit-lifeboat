@@ -37,8 +37,10 @@ ${product.architecture} Mac running ${product.minimumMacOS} or newer. MIT licens
 
 ## What it does and does not do
 
-- It writes only provider authentication fields. \`settings.json\`, MCP server definitions,
-  hooks, permissions, instructions, and local history are never modified.
+- A switch writes only provider authentication fields. \`settings.json\`, MCP server
+  definitions, hooks, permissions, instructions, and local history are not modified by it.
+  The opt-in Budget Mode and Memory Guard features edit \`~/.claude/settings.json\` (model
+  and effort settings, one \`UserPromptSubmit\` hook) only when turned on, after a backup.
 - It verifies which account the CLI landed on after every switch, and rolls back a switch
   that fails verification. When a safe rollback is not possible it keeps a protected
   recovery directory and says so.

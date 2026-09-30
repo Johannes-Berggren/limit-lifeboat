@@ -14,17 +14,17 @@ const faqs = [
   {
     question: "Does Codex CLI have a 5-hour limit like Claude Code?",
     answer:
-      "Codex reports its windows with explicit durations rather than fixed names, and a short rolling window is commonly one of them. Because OpenAI can change what it reports, and recent plans may expose only a weekly window, read the durations your own account returns rather than assuming a fixed pair.",
+      "Sometimes. Codex reports its windows with explicit durations rather than fixed names. Pro plans currently have no 5-hour window, only a weekly one, and Plus lost its 5-hour window on 13 July 2026 before OpenAI reinstated it on 25 August. Because OpenAI changes this, read the durations your own account returns rather than assuming a fixed pair.",
   },
   {
     question: "How do I check Codex usage from the terminal?",
     answer:
-      "Run /usage inside the interactive Codex CLI. OpenAI documents it as the command for account token activity and available rate-limit resets. The Codex usage page and the in-product limit banner show the same information.",
+      "Run /usage inside the interactive Codex CLI. Since Codex CLI 0.156 it opens a dashboard covering account usage, token totals, credits, and plan usage history, alongside any available rate-limit resets. The Codex usage page and the in-product limit banner show the same information.",
   },
   {
     question: "Do Codex limits differ between ChatGPT Plus and Pro?",
     answer:
-      "Yes. Codex inherits the limits of whichever plan the account is on, and the tiers differ substantially. An API-key login is billed and limited differently again, on metered API pricing rather than a subscription allowance.",
+      "Yes. Codex inherits the limits of whichever plan the account is on (Free, Go, Plus, Pro, Business, or Enterprise/Edu), and the tiers differ substantially; Pro currently has only a weekly window, where Plus also has a 5-hour one. An API-key login is billed and limited differently again, on metered API pricing rather than a subscription allowance.",
   },
   {
     question: "Does checking Codex usage consume part of the limit?",
@@ -52,16 +52,16 @@ const faqs = [
   <AnswerBlock
     facts={[
       "Codex reports rate limit windows with explicit durations; a short rolling window and a multi-day one are the common pair.",
-      "Recent plans may expose only a weekly primary window rather than a primary and secondary pair.",
+      "Pro plans currently expose only a weekly window; Plus's 5-hour window was removed on 13 July 2026 and reinstated on 25 August.",
       "Earned rate-limit resets are issued and enforced by OpenAI. No third-party tool can create one.",
       "Codex CLI authentication is separate from ChatGPT on the web, and is shared with the Codex IDE extension.",
-      "/usage inside Codex CLI reports token activity and available resets.",
+      "/usage inside Codex CLI (0.156 and later) is a dashboard of account usage, token totals, credits, plan history, and available resets.",
     ]}
   >
     <p>
       Codex CLI limits are tied to the ChatGPT plan the account is on, and OpenAI reports them as
       windows with explicit durations rather than fixed names — commonly a short rolling window plus
-      a multi-day one. Some accounts see only a weekly window. Run <code>/usage</code> inside Codex
+      a multi-day one. Pro accounts currently see only a weekly window. Run <code>/usage</code> inside Codex
       CLI to see what your own account actually reports, including any earned rate-limit resets
       OpenAI has granted it.
     </p>
@@ -76,8 +76,9 @@ const faqs = [
     </p>
     <p>
       This is worth knowing because it means any article stating “Codex has a 5-hour and a 7-day
-      limit” is describing one common configuration rather than a rule. OpenAI has shipped plans
-      that expose only a weekly primary window with no short companion. Limit Lifeboat labels each
+      limit” is describing one common configuration rather than a rule. Pro plans currently expose
+      only a weekly window with no short companion, and Plus went without its 5-hour window from 13
+      July to 25 August 2026 before OpenAI reinstated it. Limit Lifeboat labels each
       window from the duration OpenAI actually returned for your account, which is why the labels
       you see may not match a screenshot from somewhere else.
     </p>
@@ -134,8 +135,10 @@ const faqs = [
     </p>
     <ul>
       <li>
-        <strong>ChatGPT subscription login.</strong> Uses your plan's allowance. Pro tiers carry
-        substantially higher ceilings than Plus.
+        <strong>ChatGPT subscription login.</strong> Uses your plan's allowance. Codex is available
+        on Free, Go, Plus, Pro, Business, and Enterprise/Edu. Pro comes in $100, $200 and $500 tiers,
+        which Codex labels Pro, Pro (More) and Pro (Max), and carries substantially higher ceilings
+        than Plus.
       </li>
       <li>
         <strong>API key login.</strong> Uses metered API billing instead of a subscription
@@ -148,7 +151,7 @@ const faqs = [
       <a href="https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan"
         >Using Codex with your ChatGPT plan</a
       >, and the credential stores in
-      <a href="https://developers.openai.com/codex/auth/">Codex authentication</a>. Limit Lifeboat
+      <a href="https://learn.chatgpt.com/docs/auth">Codex authentication</a>. Limit Lifeboat
       reports subscription usage windows; it does not estimate API spend or translate subscription
       activity into API prices.
     </p>
@@ -161,6 +164,11 @@ const faqs = [
       also directs users approaching a limit to the Codex usage page or the in-product banner. How
       much a task consumes varies with its size, complexity, the model, and where it runs, so a
       remaining percentage is a budget rather than a task count.
+    </p>
+    <p>
+      Since Codex CLI 0.152 the limit banner also offers options to check usage, manage credits,
+      reset limits, or change plan, and 0.156 turned <code>/usage</code> into a fuller dashboard with
+      token totals, credits, and plan usage history.
     </p>
     <p>
       Two accuracy notes if you are reading Codex usage from a menu-bar tool. First, the reading has
