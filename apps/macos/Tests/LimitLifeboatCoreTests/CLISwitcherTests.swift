@@ -940,6 +940,34 @@ final class CLISwitcherTests: XCTestCase {
         XCTAssertNil(object["agent_identity"])
     }
 
+    func testCodexFingerprintIgnoresNewerOwnedKeys() throws {
+        func snapshot(_ json: String) -> CredentialSnapshot {
+            CredentialSnapshot(
+                provider: .codex,
+                items: [
+                    CredentialSnapshotItem(
+                        relativePath: ".codex/auth.json",
+                        kind: .jsonFields,
+                        contents: Data(json.utf8),
+                        posixPermissions: nil,
+                        ownedJSONKeys: CodexCredentialAdapter.ownedKeys
+                    )
+                ]
+            )
+        }
+        // An account saved before the newer keys existed must keep matching
+        // its live file after Codex adds one, or the guarded live refresh
+        // stops writing rotated tokens back.
+        XCTAssertEqual(
+            CredentialFingerprint.make(for: snapshot(#"{"tokens":{"access_token":"a"}}"#)),
+            CredentialFingerprint.make(for: snapshot(#"{"tokens":{"access_token":"a"},"agent_identity":{"id":"x"}}"#))
+        )
+        XCTAssertNotEqual(
+            CredentialFingerprint.make(for: snapshot(#"{"tokens":{"access_token":"a"}}"#)),
+            CredentialFingerprint.make(for: snapshot(#"{"tokens":{"access_token":"b"}}"#))
+        )
+    }
+
     func testCodexRestoreRefusesKeyringCredentialStoreWithoutWriting() throws {
         let fixture = try TemporaryFixture()
         defer { fixture.cleanup() }

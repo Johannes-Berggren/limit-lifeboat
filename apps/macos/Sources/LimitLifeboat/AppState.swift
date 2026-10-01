@@ -3204,6 +3204,18 @@ final class AppState: ObservableObject {
         allowUnverifiedTarget: Bool = false,
         preLeaseLiveGeneration: ClaudeLiveGenerationBaseline? = nil
     ) async -> Bool {
+        // Refuse before any preflight work (which may refresh tokens) when
+        // Codex keeps its login outside auth.json. restoreSnapshot enforces
+        // the same rule at the write boundary.
+        if profile.provider == .codex {
+            let storeMode = CodexCredentialStoreMode.current(
+                homeDirectory: FileManager.default.homeDirectoryForCurrentUser
+            )
+            if !storeMode.supportsFileSwitching {
+                statusMessage = CLISwitcherError.unsupportedCodexCredentialStore(storeMode).localizedDescription
+                return false
+            }
+        }
         if storedCredentialWorkflow == nil {
             guard let mutationOwner = beginCredentialMutation(for: profile.provider) else {
                 if automatic {
