@@ -40,7 +40,7 @@ final class SessionInsightAggregatorTests: XCTestCase {
         )
     }
 
-    func testFiveMinuteCacheSessionsCountAsColdAfterTheirOwnTTL() throws {
+    func testFiveMinuteCacheBreaksAreNotCountedAsColdResumes() throws {
         let samples = [
             sample(minute: 0, [entry(1, "payg", "claude-opus-5-5", idle: 600, context: 200_000, ttl: 300)]),
             sample(minute: 5, [entry(1, "payg", "claude-opus-5-5", idle: 20, context: 200_000, ttl: 300)])
@@ -48,8 +48,13 @@ final class SessionInsightAggregatorTests: XCTestCase {
 
         let summary = try XCTUnwrap(aggregator.summary(samples: samples, in: period()))
 
-        XCTAssertEqual(summary.coldResumeCount, 1)
-        XCTAssertEqual(summary.coldResumeTokens, 200_000)
+        XCTAssertEqual(summary.coldResumeCount, 0)
+    }
+
+    func testSamplesStoredBeforeTheTTLFieldStillDecode() throws {
+        let json = #"{"timestamp":0,"entries":[{"pid":1,"provider":"claude","project":"app","contextTokens":5,"idleSeconds":10}]}"#
+        let decoded = try JSONDecoder().decode(SessionSample.self, from: Data(json.utf8))
+        XCTAssertNil(decoded.entries.first?.cacheTTLSeconds)
     }
 
     /// Codex entries have no transcript, so they must not dilute the model

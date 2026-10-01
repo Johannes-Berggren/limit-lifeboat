@@ -120,8 +120,14 @@ public struct SessionInsightAggregator: Sendable {
                 currentIdle[entry.pid] = (idle, entry.cacheTTLSeconds ?? coldCacheSeconds)
                 // Idle time collapsing back to nothing means the session woke
                 // up; if it had been idle past the cache TTL, that turn paid
-                // for the whole context again.
-                if let previous = previousIdle[entry.pid], previous.idle >= previous.ttl, idle < previous.idle {
+                // for the whole context again. Only the 1h cache counts: a 5m
+                // one (usage credits, API key, TTL override) expires on every
+                // short break, and the digest's "/clear or start fresh" advice
+                // is about resuming after an hour, not that.
+                if let previous = previousIdle[entry.pid],
+                   previous.ttl >= coldCacheSeconds,
+                   previous.idle >= previous.ttl,
+                   idle < previous.idle {
                     coldResumes += 1
                     coldTokens += entry.contextTokens
                 }

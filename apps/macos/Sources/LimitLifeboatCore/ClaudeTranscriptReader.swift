@@ -210,6 +210,8 @@ public struct ClaudeTranscriptReader {
     public static func latestActivity(inTail data: Data, fallbackDate: Date) -> ClaudeSessionActivity? {
         let lines = data.split(separator: UInt8(ascii: "\n"))
         var latest: (message: [String: Any], usage: [String: Any], timestamp: Date)?
+        // Bounded so a tail with no cache write isn't fully parsed every scan.
+        var assistantTurnsLeft = 20
         for line in lines.reversed() {
             guard line.count > 2,
                   let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
@@ -227,6 +229,8 @@ public struct ClaudeTranscriptReader {
             if let ttl = cacheTTLSeconds(usage: usage) {
                 return activity(latest!, fallbackDate: fallbackDate, cacheTTLSeconds: ttl)
             }
+            assistantTurnsLeft -= 1
+            if assistantTurnsLeft == 0 { break }
         }
         return latest.map { activity($0, fallbackDate: fallbackDate, cacheTTLSeconds: nil) }
     }
