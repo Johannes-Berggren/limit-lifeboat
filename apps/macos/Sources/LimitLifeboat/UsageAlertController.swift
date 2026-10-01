@@ -400,6 +400,13 @@ final class UsageAlertController {
         if let credit = snapshot.creditStatus {
             parts.append(credit)
         }
+        if let hint = ClaudeSavedResetHint.text(
+            provider: profile.provider,
+            riskLevel: alert.riskLevel,
+            isActiveCLI: profile.isActiveCLI
+        ) {
+            parts.append(hint)
+        }
         return parts.joined(separator: " ")
     }
 }
