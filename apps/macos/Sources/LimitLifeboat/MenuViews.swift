@@ -23,6 +23,10 @@ struct MenuRootView: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: DS.Spacing.xl) {
+                        if let shortfall = state.shortfall {
+                            shortfallBanner(shortfall)
+                                .transition(.opacity.combined(with: .move(edge: .top)))
+                        }
                         // Tight memory is urgent enough to lead; otherwise the
                         // session list trails the accounts it is secondary to.
                         if sessions.assessment.isActionable {
@@ -48,8 +52,24 @@ struct MenuRootView: View {
         }
         .frame(width: DS.Popover.width, height: DS.Popover.height)
         .tint(DS.accent)
+        .animation(reduceMotion ? nil : DS.Motion.standard, value: state.shortfall)
         .onAppear { sessionPolicyNow = Date() }
         .onReceive(sessionTicker) { sessionPolicyNow = $0 }
+    }
+
+    private func shortfallBanner(_ shortfall: QuotaShortfall) -> some View {
+        let target = state.switchAdvice[shortfall.provider]?.bestCandidateID
+            .flatMap { id in state.profiles.first { $0.id == id } }
+        return ShortfallBannerView(
+            shortfall: shortfall,
+            switchTargetLabel: target?.label,
+            park: { state.parkSuggestedSessions() },
+            switchAccount: {
+                guard let target else { return }
+                Task { await state.switchCLI(to: target) }
+            },
+            resumeAll: { sessions.resumeAll() }
+        )
     }
 
     @ViewBuilder

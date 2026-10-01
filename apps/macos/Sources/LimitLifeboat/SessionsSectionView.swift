@@ -25,6 +25,19 @@ struct SessionsSectionView: View {
 
                 Spacer()
 
+                if !monitor.parked.isEmpty {
+                    Button {
+                        monitor.resumeAll()
+                    } label: {
+                        Label("\(monitor.parked.count) parked · Resume all", systemImage: "play.circle")
+                            .font(.caption.weight(.medium))
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(DS.warning)
+                    .help("Let every parked session continue")
+                    .transition(.opacity)
+                }
+
                 // Without agents running, tight memory is not this section's
                 // concern; say nothing rather than urge closing a session.
                 let shownLevel: MemoryGuardLevel = assessment.isActionable ? assessment.level : .ok
@@ -71,24 +84,38 @@ struct SessionsSectionView: View {
 
     private func sessionRow(_ row: AgentSessionRow, now: Date) -> some View {
         let session = row.session
+        let isParked = monitor.parked[row.id] != nil
+        let isStarred = monitor.isStarred(row)
         return HStack(spacing: DS.Spacing.md) {
             Image(systemName: DS.providerSymbol(session.provider))
                 .foregroundStyle(DS.providerAccent(session.provider))
                 .frame(width: 16)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(session.projectName)
-                    .font(.system(size: 12, weight: .medium))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text(detail(row, now: now))
+                HStack(spacing: DS.Spacing.xs) {
+                    Text(session.projectName)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    starButton(row, isStarred: isStarred)
+                }
+                Text(isParked ? parkedDetail(row, now: now) : detail(row, now: now))
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isParked ? AnyShapeStyle(DS.warning) : AnyShapeStyle(.secondary))
                     .lineLimit(1)
+                    .contentTransition(.opacity)
             }
             .help(session.workingDirectory ?? "")
 
             Spacer(minLength: DS.Spacing.sm)
+
+            if isParked {
+                Button("Resume") { monitor.resume(row.id) }
+                    .buttonStyle(.borderless)
+                    .font(.caption.weight(.medium))
+                    .help("Let this session continue")
+                    .transition(.opacity)
+            }
 
             Text(MemoryFormatting.bytes(session.footprintBytes))
                 .font(.system(size: 11, weight: .semibold).monospacedDigit())
@@ -96,6 +123,19 @@ struct SessionsSectionView: View {
                 .help("\(session.processCount) processes, including tools and servers the session started")
 
             Menu {
+                if monitor.canPark(row) {
+                    if isParked {
+                        Button("Resume Session") { monitor.resume(row.id) }
+                    } else {
+                        Button("Park at Next Step") { monitor.park(pids: [row.id], reason: .manual) }
+                            .disabled(isStarred)
+                    }
+                }
+                Button(isStarred ? "Unmark as Important" : "Mark as Important") {
+                    monitor.setStarred(!isStarred, for: row)
+                }
+                .disabled(session.workingDirectory == nil)
+                Divider()
                 Button("Reveal in Finder") { monitor.revealInFinder(row) }
                     .disabled(session.workingDirectory == nil)
                 Divider()
@@ -110,6 +150,37 @@ struct SessionsSectionView: View {
             .foregroundStyle(.secondary)
         }
         .padding(.vertical, DS.Spacing.sm)
+        .opacity(isParked ? 0.72 : 1)
+        .animation(DS.Motion.quick, value: isParked)
+    }
+
+    /// Important projects keep going when quota runs short; everything else
+    /// may be parked. A faint outline until set, so it reads as optional.
+    private func starButton(_ row: AgentSessionRow, isStarred: Bool) -> some View {
+        Button {
+            monitor.setStarred(!isStarred, for: row)
+        } label: {
+            Image(systemName: isStarred ? "star.fill" : "star")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(isStarred ? AnyShapeStyle(DS.warning) : AnyShapeStyle(.quaternary))
+                .contentTransition(.symbolEffect(.replace))
+        }
+        .buttonStyle(.plain)
+        .disabled(row.session.workingDirectory == nil)
+        .help(isStarred
+            ? "Important: never parked to save quota. Click to unmark."
+            : "Mark as important: never parked to save quota")
+        .accessibilityLabel(isStarred ? "Unmark as important" : "Mark as important")
+    }
+
+    private func parkedDetail(_ row: AgentSessionRow, now: Date) -> String {
+        var text = monitor.waitingPIDs.contains(row.id)
+            ? "Parked · waiting to resume"
+            : "Parked · stops at its next step"
+        if let releaseAt = monitor.parked[row.id]?.releaseAt, releaseAt > now {
+            text += " · resumes in \(DurationPhrase.short(releaseAt.timeIntervalSince(now)))"
+        }
+        return text
     }
 
     private func detail(_ row: AgentSessionRow, now: Date) -> String {

@@ -79,6 +79,18 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(usageCurvesEnabled, forKey: Keys.usageCurvesEnabled) }
     }
 
+    /// A heads-up, then a warning, when the active account will run a limit
+    /// dry well before it resets while sessions are working.
+    @Published var shortfallAlertsEnabled: Bool {
+        didSet { defaults.set(shortfallAlertsEnabled, forKey: Keys.shortfallAlertsEnabled) }
+    }
+
+    /// Opt-in: park unstarred sessions without asking when a shortfall is
+    /// projected, instead of offering it.
+    @Published var autoProtectEnabled: Bool {
+        didSet { defaults.set(autoProtectEnabled, forKey: Keys.autoProtectEnabled) }
+    }
+
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -99,6 +111,8 @@ final class SettingsStore: ObservableObject {
         self.memoryGraphEnabled = defaults.object(forKey: Keys.memoryGraphEnabled) as? Bool ?? false
         self.compactMenuBarEnabled = defaults.object(forKey: Keys.compactMenuBarEnabled) as? Bool ?? false
         self.usageCurvesEnabled = defaults.object(forKey: Keys.usageCurvesEnabled) as? Bool ?? true
+        self.shortfallAlertsEnabled = defaults.object(forKey: Keys.shortfallAlertsEnabled) as? Bool ?? true
+        self.autoProtectEnabled = defaults.object(forKey: Keys.autoProtectEnabled) as? Bool ?? false
     }
 
     private enum Keys {
@@ -115,5 +129,7 @@ final class SettingsStore: ObservableObject {
         static let memoryGraphEnabled = "memoryGraphEnabled"
         static let compactMenuBarEnabled = "compactMenuBarEnabled"
         static let usageCurvesEnabled = "usageCurvesEnabled"
+        static let shortfallAlertsEnabled = "shortfallAlertsEnabled"
+        static let autoProtectEnabled = "autoProtectEnabled"
     }
 }

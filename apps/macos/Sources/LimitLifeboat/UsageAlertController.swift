@@ -14,6 +14,10 @@ enum NotificationSwitchAction {
     static let categoryThisAccount = "limit-switch-here"
     static let categoryRefresh = "limit-refresh"
     static let categoryBudget = "limit-budget-mode"
+    static let categoryPark = "limit-park-sessions"
+    static let categoryParkOrSwitch = "limit-park-or-switch"
+    static let parkActionID = "park-sessions"
+    static let parkActionValue = "park"
     static let budgetActionID = "use-budget-mode"
     static let budgetActionValue = "budget"
     static let budgetModeKey = "budgetMode"
@@ -74,6 +78,50 @@ final class UsageAlertController {
                 NotificationSwitchAction.actionKey: NotificationSwitchAction.budgetActionValue,
                 NotificationSwitchAction.budgetModeKey: mode.rawValue
             ]
+        )
+    }
+
+    /// A limit runs dry well before it resets while sessions are working.
+    /// With a parking suggestion the notification offers it; with another
+    /// account to move to, switching comes first.
+    func handleShortfall(_ shortfall: QuotaShortfall, profileLabel: String, hasSwitchCandidate: Bool) {
+        let now = Date()
+        var body = QuotaShortfallText.headline(shortfall, now: now) + " " + QuotaShortfallText.detail(shortfall)
+        let category: String?
+        var userInfo: [String: Any] = [NotificationSwitchAction.providerKey: shortfall.provider.rawValue]
+        switch (shortfall.suggestion != nil, hasSwitchCandidate) {
+        case (true, true):
+            category = NotificationSwitchAction.categoryParkOrSwitch
+            userInfo[NotificationSwitchAction.actionKey] = NotificationSwitchAction.parkActionValue
+        case (true, false):
+            category = NotificationSwitchAction.categoryPark
+            userInfo[NotificationSwitchAction.actionKey] = NotificationSwitchAction.parkActionValue
+        case (false, true):
+            category = NotificationSwitchAction.categoryBest
+            userInfo = switchUserInfo(provider: shortfall.provider, targetID: nil)
+        case (false, false):
+            category = nil
+            if shortfall.provider == .claude {
+                body += " Star the sessions that matter in the menu so they keep going."
+            }
+        }
+        postNotification(
+            identifier: "shortfall-\(shortfall.profileID.uuidString)-\(shortfall.windowID)",
+            title: shortfall.stage == .warning
+                ? "\(profileLabel): \(shortfall.windowLabel) almost empty"
+                : "\(profileLabel): \(shortfall.windowLabel) won't last until the reset",
+            body: body,
+            categoryIdentifier: category,
+            userInfo: userInfo
+        )
+    }
+
+    func handleShortfallAutoParked(_ shortfall: QuotaShortfall, count: Int) {
+        postNotification(
+            identifier: "shortfall-parked-\(shortfall.profileID.uuidString)-\(shortfall.windowID)",
+            title: count == 1 ? "Parked 1 session to save quota" : "Parked \(count) sessions to save quota",
+            body: QuotaShortfallText.headline(shortfall, now: Date())
+                + " Starred sessions keep going; parked ones resume when the limit resets, or from the menu."
         )
     }
 
@@ -328,7 +376,26 @@ final class UsageAlertController {
             ],
             intentIdentifiers: []
         )
-        center.setNotificationCategories([switchToBest, switchToThisAccount, refreshNow, useCheaperMode])
+        let parkSessions = UNNotificationAction(
+            identifier: NotificationSwitchAction.parkActionID,
+            title: "Park Sessions"
+        )
+        let park = UNNotificationCategory(
+            identifier: NotificationSwitchAction.categoryPark,
+            actions: [parkSessions],
+            intentIdentifiers: []
+        )
+        let parkOrSwitch = UNNotificationCategory(
+            identifier: NotificationSwitchAction.categoryParkOrSwitch,
+            actions: [
+                UNNotificationAction(identifier: NotificationSwitchAction.actionID, title: "Switch to Best Account"),
+                parkSessions
+            ],
+            intentIdentifiers: []
+        )
+        center.setNotificationCategories([
+            switchToBest, switchToThisAccount, refreshNow, useCheaperMode, park, parkOrSwitch
+        ])
     }
 
     /// Per-window near-limit alerts. Session (5h) windows only notify when the

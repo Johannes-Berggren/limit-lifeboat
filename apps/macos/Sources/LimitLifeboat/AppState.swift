@@ -20,6 +20,9 @@ final class AppState: ObservableObject {
     /// Each window's stored readings, cached per refresh so the gauges can
     /// draw their usage curves without re-reading the history file.
     @Published private(set) var windowReadings: [UUID: [String: [BurnRateEstimator.Reading]]] = [:]
+    /// The most urgent "runs dry well before the reset" on an active account
+    /// with sessions working against it.
+    @Published private(set) var shortfall: QuotaShortfall?
     /// Per provider, the current best switch target (recomputed each refresh);
     /// drives the Switch-button highlight and auto-switching for both Claude
     /// and Codex.
@@ -275,6 +278,15 @@ final class AppState: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // Sessions start, go idle and get parked between usage refreshes.
+        sessionMonitor.$rows
+            .combineLatest(sessionMonitor.$parked, sessionMonitor.$starredProjects)
+            .dropFirst()
+            .sink { [weak self] _ in
+                // Published values land after willSet; read them next turn.
+                Task { @MainActor [weak self] in self?.recomputeShortfall() }
+            }
+            .store(in: &cancellables)
     }
 
     deinit {
@@ -2551,6 +2563,7 @@ final class AppState: ObservableObject {
             AppLog.history.error("Could not record a usage reading for account \(profile.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
         recomputeEstimates(for: profile, snapshot: snapshot)
+        recomputeShortfall()
         updateMenuBarSummary()
         // Near-limit alerts stay active-account-only: an inactive account
         // nearing its limit is not actionable (nobody is burning it down);
@@ -2606,6 +2619,108 @@ final class AppState: ObservableObject {
                 usageAlertController.handleBudgetSuggestion(suggestion, profileLabel: profile.label)
             }
         }
+    }
+
+    // MARK: - Quota shortfall
+
+    private static let notifiedShortfallKey = "notifiedQuotaShortfalls"
+
+    private func recomputeShortfall(now: Date = Date()) {
+        let monitor = sessionMonitor
+        // A park protects one account's quota; once the CLI moved to another
+        // account (or the park's own quota came back) it only holds work up.
+        monitor.resumeAll { entry in
+            guard entry.reason == .shortfall, let profileID = entry.profileID else { return false }
+            return profiles.first(where: { $0.id == profileID })?.isActiveCLI != true
+        }
+
+        let sessions = monitor.rows.map { row in
+            QuotaShortfallPolicy.Session(
+                pid: row.id,
+                provider: row.session.provider,
+                lastActivityAt: row.activity?.lastActivityAt,
+                isStarred: monitor.isStarred(row),
+                isParked: monitor.parked[row.id] != nil,
+                isParkable: monitor.canPark(row)
+            )
+        }
+        let policy = QuotaShortfallPolicy()
+        var best: QuotaShortfall?
+        for provider in Provider.allCases {
+            guard let profile = activeProfile(for: provider),
+                  let snapshot = snapshots[profile.id],
+                  !snapshot.isStale(asOf: now),
+                  let candidate = policy.shortfall(
+                      profile: profile,
+                      windows: snapshot.orderedDisplayWindows,
+                      estimates: burnRateEstimates[profile.id] ?? [:],
+                      sessions: sessions,
+                      lastParkedAt: monitor.lastParkedAt,
+                      now: now
+                  ) else {
+                continue
+            }
+            if best == nil || candidate.emptyAt < best!.emptyAt {
+                best = candidate
+            }
+        }
+        if shortfall != best {
+            shortfall = best
+        }
+        guard let best else { return }
+
+        if settings.autoProtectEnabled, let suggestion = best.suggestion {
+            parkForShortfall(best, pids: suggestion.pids)
+            usageAlertController.handleShortfallAutoParked(best, count: suggestion.pids.count)
+        } else if settings.shortfallAlertsEnabled {
+            notifyShortfallIfNew(best)
+        }
+    }
+
+    /// Once per stage per window life: a heads-up, then at most one warning.
+    /// Stored as "<profile>|<window>" → [reset epoch, stage]; a reset date
+    /// that moved by more than half an hour is a new life (TUI-sourced reset
+    /// dates jitter by minutes).
+    private func notifyShortfallIfNew(_ shortfall: QuotaShortfall) {
+        let key = "\(shortfall.profileID.uuidString)|\(shortfall.windowID)"
+        var notified = UserDefaults.standard.dictionary(forKey: Self.notifiedShortfallKey) as? [String: [Double]] ?? [:]
+        let reset = shortfall.resetAt.timeIntervalSince1970
+        if let previous = notified[key], previous.count == 2,
+           abs(previous[0] - reset) < 1_800,
+           Int(previous[1]) >= shortfall.stage.rawValue {
+            return
+        }
+        notified[key] = [reset, Double(shortfall.stage.rawValue)]
+        UserDefaults.standard.set(notified, forKey: Self.notifiedShortfallKey)
+        usageAlertController.handleShortfall(
+            shortfall,
+            profileLabel: profiles.first { $0.id == shortfall.profileID }?.label ?? shortfall.provider.displayName,
+            hasSwitchCandidate: switchAdvice[shortfall.provider]?.bestCandidateID != nil
+        )
+    }
+
+    private func parkForShortfall(_ shortfall: QuotaShortfall, pids: [Int32]) {
+        sessionMonitor.park(
+            pids: pids,
+            reason: .shortfall,
+            releaseAt: shortfall.resetAt,
+            profileID: shortfall.profileID
+        )
+        recomputeShortfall()
+    }
+
+    /// The banner's and notification's "Park N sessions": re-evaluated live,
+    /// since the notification may be minutes old.
+    func parkSuggestedSessions() {
+        recomputeShortfall()
+        guard let shortfall, let suggestion = shortfall.suggestion else {
+            usageAlertController.handleNotificationSwitchOutcome(
+                title: "Nothing to park",
+                body: "The quota no longer runs out before the reset, or every working session is starred."
+            )
+            return
+        }
+        parkForShortfall(shortfall, pids: suggestion.pids)
     }
 
     // MARK: - Burn rate

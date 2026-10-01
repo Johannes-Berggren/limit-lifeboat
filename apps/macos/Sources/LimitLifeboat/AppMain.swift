@@ -158,6 +158,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        if actionIdentifier == NotificationSwitchAction.parkActionID {
+            state?.parkSuggestedSessions()
+            return
+        }
+
+        // The park-or-switch notification carries the park payload, so its
+        // switch button is matched on the action alone.
+        if actionIdentifier == NotificationSwitchAction.actionID,
+           action == NotificationSwitchAction.parkActionValue,
+           let provider {
+            await state?.performNotificationSwitch(provider: provider, embeddedTargetID: nil)
+            return
+        }
+
         if actionIdentifier == NotificationSwitchAction.refreshActionID,
            action == NotificationSwitchAction.refreshActionValue,
            let provider {
