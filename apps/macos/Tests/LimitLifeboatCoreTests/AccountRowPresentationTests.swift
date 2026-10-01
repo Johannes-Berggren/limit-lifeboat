@@ -583,7 +583,7 @@ final class AccountRowPresentationTests: XCTestCase {
 
         XCTAssertEqual(presentation.billingBadge?.text, "PAYG")
         XCTAssertEqual(presentation.billingBadge?.tone, .danger)
-        XCTAssertTrue(presentation.billingBadge?.help.contains("extra usage may be billed") == true)
+        XCTAssertTrue(presentation.billingBadge?.help.contains("usage credits may be billed") == true)
     }
 
     func testPayAsYouGoBadgeHelpEmbedsSpendWhenReported() throws {

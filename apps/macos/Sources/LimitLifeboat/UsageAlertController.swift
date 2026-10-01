@@ -397,6 +397,16 @@ final class UsageAlertController {
         if let reset = alert.resetDescription ?? snapshot.resetDescription {
             parts.append("Resets \(reset).")
         }
+        // Ahead of the credit line: it's the actionable sentence, and banners
+        // truncate from the end.
+        if let hint = ClaudeSavedResetHint.text(
+            provider: profile.provider,
+            windowID: alert.windowID,
+            riskLevel: alert.riskLevel,
+            isActiveCLI: profile.isActiveCLI
+        ) {
+            parts.append(hint)
+        }
         if let credit = snapshot.creditStatus {
             parts.append(credit)
         }

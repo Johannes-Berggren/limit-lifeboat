@@ -40,6 +40,23 @@ final class SessionInsightAggregatorTests: XCTestCase {
         )
     }
 
+    func testFiveMinuteCacheBreaksAreNotCountedAsColdResumes() throws {
+        let samples = [
+            sample(minute: 0, [entry(1, "payg", "claude-opus-5-5", idle: 600, context: 200_000, ttl: 300)]),
+            sample(minute: 5, [entry(1, "payg", "claude-opus-5-5", idle: 20, context: 200_000, ttl: 300)])
+        ]
+
+        let summary = try XCTUnwrap(aggregator.summary(samples: samples, in: period()))
+
+        XCTAssertEqual(summary.coldResumeCount, 0)
+    }
+
+    func testSamplesStoredBeforeTheTTLFieldStillDecode() throws {
+        let json = #"{"timestamp":0,"entries":[{"pid":1,"provider":"claude","project":"app","contextTokens":5,"idleSeconds":10}]}"#
+        let decoded = try JSONDecoder().decode(SessionSample.self, from: Data(json.utf8))
+        XCTAssertNil(decoded.entries.first?.cacheTTLSeconds)
+    }
+
     /// Codex entries have no transcript, so they must not dilute the model
     /// share of the sessions that do report one.
     func testModelShareIgnoresSessionsWithoutAModel() throws {
@@ -119,8 +136,8 @@ final class SessionInsightAggregatorTests: XCTestCase {
         SessionSample(timestamp: start.addingTimeInterval(TimeInterval(minute * 60)), entries: entries)
     }
 
-    private func entry(_ pid: Int32, _ project: String, _ model: String?, idle: Int, context: Int = 1_000) -> SessionSample.Entry {
-        SessionSample.Entry(pid: pid, provider: .claude, project: project, model: model, contextTokens: context, idleSeconds: idle)
+    private func entry(_ pid: Int32, _ project: String, _ model: String?, idle: Int, context: Int = 1_000, ttl: Int? = nil) -> SessionSample.Entry {
+        SessionSample.Entry(pid: pid, provider: .claude, project: project, model: model, contextTokens: context, idleSeconds: idle, cacheTTLSeconds: ttl)
     }
 }
 
@@ -142,8 +159,17 @@ final class ColdCacheAlertPolicyTests: XCTestCase {
         XCTAssertTrue(policy.candidates(entries: entries, alreadyWarned: [1]).isEmpty)
     }
 
-    private func entry(_ pid: Int32, _ project: String, idle: Int?, context: Int) -> SessionSample.Entry {
-        SessionSample.Entry(pid: pid, provider: .claude, project: project, model: nil, contextTokens: context, idleSeconds: idle)
+    func testDoesNotWarnForFiveMinuteCacheSessions() {
+        let entries = [
+            entry(1, "payg", idle: 3_400, context: 400_000, ttl: 300),
+            entry(2, "plan", idle: 3_400, context: 400_000, ttl: 3_600)
+        ]
+
+        XCTAssertEqual(policy.candidates(entries: entries, alreadyWarned: []).map(\.pid), [2])
+    }
+
+    private func entry(_ pid: Int32, _ project: String, idle: Int?, context: Int, ttl: Int? = nil) -> SessionSample.Entry {
+        SessionSample.Entry(pid: pid, provider: .claude, project: project, model: nil, contextTokens: context, idleSeconds: idle, cacheTTLSeconds: ttl)
     }
 }
 
