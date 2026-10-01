@@ -199,18 +199,26 @@ public struct CodexIdentityReader {
             return "Go"
         case "plus":
             return "Plus"
-        case "pro":
-            return "Pro"
+        // The three Pro tiers ($100 / $200 / $500), labelled the way Codex's
+        // own `/status` names them since 0.158.
         case "prolite":
-            return "Pro Lite"
+            return "Pro"
+        case "pro":
+            return "Pro (More)"
+        case "promax":
+            return "Pro (Max)"
         case "team":
             return "Team"
-        case "business", "self_serve_business_usage_based":
+        case "business", "self_serve_business_usage_based", "self_serve_business_prolite":
             return "Business"
-        case "enterprise", "enterprise_cbp_usage_based":
+        case "enterprise", "enterprise_cbp_usage_based", "enterprise_cbp_automation", "ent26":
             return "Enterprise"
         case "edu":
             return "Edu"
+        case "edu_plus":
+            return "Edu Plus"
+        case "edu_pro":
+            return "Edu Pro"
         case "unknown":
             return nil
         default:

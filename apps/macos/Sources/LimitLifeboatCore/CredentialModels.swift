@@ -249,7 +249,7 @@ public enum CredentialFingerprint {
             let ownedKeys: [String]?
             switch (snapshot.provider, item.relativePath) {
             case (.codex, ".codex/auth.json"):
-                ownedKeys = CodexCredentialAdapter.ownedKeys
+                ownedKeys = CodexCredentialAdapter.fingerprintKeys
             case (.claude, ".claude.json"):
                 ownedKeys = ClaudeCredentialAdapter.accountOwnedKeys
             case (.claude, "Library/Application Support/Claude/config.json"):

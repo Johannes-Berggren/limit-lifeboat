@@ -118,7 +118,7 @@ public struct CodexResetAutomationPolicy: Sendable {
               snapshot.provider == .codex,
               snapshot.source == "Codex app server",
               !snapshot.isStale(asOf: now),
-              snapshot.codexRateLimitReachedType == "rate_limit_reached",
+              CodexRateLimitReachedType.isPlainRateLimit(snapshot.codexRateLimitReachedType),
               snapshot.codexRateLimitResetAvailability?.availableCount ?? 0 > 0,
               !redemptionState.blocksRedemption else {
             return false

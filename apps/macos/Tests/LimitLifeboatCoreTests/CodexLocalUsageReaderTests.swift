@@ -50,6 +50,31 @@ final class CodexLocalUsageReaderTests: XCTestCase {
         XCTAssertEqual(weekly.windowMinutes, 10080)
     }
 
+    func testWorkspaceCreditsDepletedIsDepletedButNotPayAsYouGo() throws {
+        let fixture = try TemporaryCodexUsageFixture()
+        defer { fixture.cleanup() }
+
+        try fixture.writeSession(
+            name: "workspace.jsonl",
+            lines: [
+                #"{"timestamp":"2026-07-03T12:00:00.000Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":40.0,"window_minutes":300,"resets_at":1783093420},"plan_type":"business","rate_limit_reached_type":"workspace_member_credits_depleted"}}}"#
+            ]
+        )
+
+        let profile = AccountProfile(provider: .codex, label: "Work")
+        let snapshot = try XCTUnwrap(
+            CodexLocalUsageReader(homeDirectory: fixture.home).readUsage(
+                for: profile,
+                now: Date(timeIntervalSince1970: 1783000000)
+            )
+        )
+
+        XCTAssertEqual(snapshot.riskLevel, .depleted)
+        XCTAssertEqual(snapshot.codexRateLimitReachedType, "workspace_member_credits_depleted")
+        XCTAssertFalse(snapshot.hasPayAsYouGoSignal, "used-up workspace credits are not billing")
+        XCTAssertFalse(snapshot.payAsYouGoLooksActive)
+    }
+
     func testReadsSingleWindowWhenOnlyPrimaryPresent() throws {
         let fixture = try TemporaryCodexUsageFixture()
         defer { fixture.cleanup() }
