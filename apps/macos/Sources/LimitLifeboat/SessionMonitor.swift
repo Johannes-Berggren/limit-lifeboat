@@ -212,7 +212,8 @@ final class SessionMonitor: ObservableObject {
                 project: row.session.projectName,
                 model: row.activity?.model,
                 contextTokens: row.activity?.contextTokens ?? 0,
-                idleSeconds: row.activity.map { Int(now.timeIntervalSince($0.lastActivityAt)) }
+                idleSeconds: row.activity.map { Int(now.timeIntervalSince($0.lastActivityAt)) },
+                cacheTTLSeconds: row.activity?.cacheTTLSeconds
             )
         }
 
