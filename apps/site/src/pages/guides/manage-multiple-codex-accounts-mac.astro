@@ -13,7 +13,7 @@ const faqs = [
   {
     question: "Where does Codex CLI keep authentication?",
     answer:
-      "OpenAI documents that Codex caches credentials in its configured credential store, which may be auth.json under CODEX_HOME or the operating-system credential store. Treat either location as sensitive.",
+      "It depends on cli_auth_credentials_store in ~/.codex/config.toml. With file, the login is auth.json under CODEX_HOME. With keyring or auto it goes in the macOS Keychain (the Codex Auth item), and with ephemeral it is held in memory only. Treat every location as sensitive. Limit Lifeboat switches by swapping auth.json, so it refuses to switch Codex unless the setting is file.",
   },
   {
     question: "Does Limit Lifeboat switch the ChatGPT desktop app?",
@@ -46,7 +46,7 @@ const faqs = [
   <AnswerBlock
     facts={[
       "codex login status reports the active authentication method; codex logout followed by codex login changes it.",
-      "Codex CLI credentials live in the configured credential store — auth.json under CODEX_HOME, or the operating-system credential store.",
+      "Codex CLI credentials live where cli_auth_credentials_store says: auth.json under CODEX_HOME (file), the macOS Keychain (keyring or auto), or memory only (ephemeral).",
       "OpenAI's ChatGPT account switcher covers ChatGPT on the web and is not currently supported in Codex desktop.",
       "Codex CLI authentication is shared with the Codex IDE extension, per OpenAI's current documentation.",
     ]}
@@ -66,7 +66,8 @@ const faqs = [
     <pre><code>codex login status
 codex logout
 codex login</code></pre>
-    <p>OpenAI documents these commands and the available credential stores in <a href="https://developers.openai.com/codex/auth/">Codex authentication</a>. Signing in with ChatGPT uses subscription access; signing in with an API key uses metered API billing instead.</p>
+    <p>OpenAI documents these commands and the available credential stores in <a href="https://learn.chatgpt.com/docs/auth">Codex authentication</a>. Signing in with ChatGPT uses subscription access; signing in with an API key uses metered API billing instead.</p>
+    <p>Where that login is kept depends on <code>cli_auth_credentials_store</code> in <code>~/.codex/config.toml</code>. With <code>file</code> it is <code>~/.codex/auth.json</code>; with <code>keyring</code> or <code>auto</code> it goes into the macOS Keychain as <code>Codex Auth</code>; with <code>ephemeral</code> it lives in memory only and is gone when the process exits. Since Codex 0.155, switching accounts also invalidates state tied to the previous identity, so expect a fresh start rather than a carried-over session.</p>
   </section>
 
   <section id="separate-surfaces">
@@ -80,7 +81,8 @@ codex login</code></pre>
     <h2>What does a scoped Codex switch write?</h2>
     <p>Limit Lifeboat captures the authenticated Codex account as a named local profile and stores its app-managed credential snapshot in macOS Keychain. The menu-bar view then keeps each account’s identity, last usage reading, reading age, and active state visible.</p>
     <p>A requested switch preserves unrelated Codex and MCP settings, stages private rollback material, restores the selected identity, and validates it before reporting success. A failed validation rolls back. If another process changes the live credentials during the transaction, the app does not overwrite that newer external change.</p>
-    <p>For Codex the write is scoped to four keys in <code>~/.codex/auth.json</code>: <code>auth_mode</code>, <code>tokens</code>, <code>OPENAI_API_KEY</code>, and <code>last_refresh</code>. Anything else in that file, and every other file under <code>~/.codex</code>, is left as it was.</p>
+    <p>For Codex the write is scoped to the credential keys in <code>~/.codex/auth.json</code>: <code>auth_mode</code>, <code>tokens</code>, <code>OPENAI_API_KEY</code>, and <code>last_refresh</code>, plus the newer <code>agent_identity</code>, <code>personal_access_token</code>, and Bedrock keys, so one account's token never lingers next to another's. Anything else in that file, and every other file under <code>~/.codex</code>, is left as it was.</p>
+    <p>Because the switch works by rewriting <code>auth.json</code>, it only means something when Codex actually reads its login from that file. If <code>cli_auth_credentials_store</code> is set to anything other than <code>file</code>, Limit Lifeboat refuses to switch Codex rather than report a switch that changed nothing. And Codex 0.156 and later can run a shared background app-server daemon that may still hold the previous login after a switch; when that applies, the app says so and suggests <code>codex app-server daemon restart</code>.</p>
     <p>Limit Lifeboat switches one global Codex CLI login at a time. It does not start parallel isolated Codex homes or switch ChatGPT Desktop. Manual switching is the default; optional switching at 5% session remaining or 1% weekly remaining is disabled until you explicitly enable it.</p>
   </section>
 

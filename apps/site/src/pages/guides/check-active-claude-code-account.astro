@@ -76,13 +76,16 @@ const faqs = [
       Run <code>/status</code> in a Claude Code session. It reports the authenticated account —
       email, organization and plan — along with version and configuration details. Use
       <code>/usage</code> separately when what you want is remaining capacity rather than identity;
-      the two questions are related but the commands are not interchangeable.
+      the two questions are related but the commands are not interchangeable. Since 2.1.210,
+      <code>/status</code> also shows a <strong>Login: Expired</strong> row when the saved login has
+      lapsed.
     </p>
     <h3>Codex CLI</h3>
     <p>
-      Run <code>codex login status</code>. Codex CLI caches its own login under
-      <code>~/.codex/auth.json</code>, independently of ChatGPT on the web, and the IDE extension
-      shares that CLI authentication rather than holding its own.
+      Run <code>codex login status</code>. Codex CLI caches its own login independently of ChatGPT
+      on the web: in <code>~/.codex/auth.json</code> by default, or in the macOS Keychain or memory
+      only, depending on <code>cli_auth_credentials_store</code> in <code>~/.codex/config.toml</code>.
+      The IDE extension shares that CLI authentication rather than holding its own.
     </p>
     <h3>What these commands cannot tell you</h3>
     <p>
@@ -120,6 +123,15 @@ const faqs = [
       under normal operation, so they agree under normal operation — and a switcher that writes a
       subset breaks that invariant silently.
     </p>
+    <p>
+      A fourth location can turn up uninvited. If a Keychain write fails, Claude Code falls back to
+      a plaintext <code>~/.claude/.credentials.json</code> (mode 0600). A leftover copy of that file
+      could shadow a fresh login, so <code>/login</code> appeared to succeed and the next prompt said
+      "Not logged in" or "Login expired". Claude Code 2.1.286 fixed that, but on an older version the
+      file is worth checking for. Anthropic's own route to several accounts, a separate
+      <code>CLAUDE_CONFIG_DIR</code> per account, sidesteps the split by giving each directory its
+      own Keychain entry.
+    </p>
   </section>
 
   <section id="diverge">
@@ -138,7 +150,8 @@ const faqs = [
     <p>
       The reason it is expensive is that nothing errors. There is no failed command to notice and no
       warning to dismiss. You look at the account name, see the one you expected, and work for three
-      hours against a different subscription — sometimes one with pay-as-you-go overage enabled.
+      hours against a different subscription — sometimes one with usage credits (formerly extra
+      usage) turned on, which bill at API rates.
     </p>
     <p>
       The defence is for the tool to verify rather than report. Limit Lifeboat confirms which account
@@ -161,6 +174,8 @@ const faqs = [
         <strong>An existing session is holding the old credential.</strong> A Claude Code session
         that started before the switch keeps the credential it started with. Restart the session —
         and note that on macOS an IDE extension tab may need reopening rather than just reloading.
+        For Codex 0.156 and later, a shared background app-server daemon can also still hold the
+        previous login; <code>codex app-server daemon restart</code> clears it.
       </li>
       <li>
         <strong>You are reading the limit from a different surface.</strong> A limit message in the

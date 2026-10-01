@@ -74,7 +74,7 @@ export const guides: readonly GuideMeta[] = [
     eyebrow: "Claude Code account guide",
     group: "switching",
     datePublished: "2026-07-15",
-    dateModified: "2026-08-01",
+    dateModified: "2026-09-30",
     readingTime: "6 minute read",
     imageAlt:
       "Limit Lifeboat showing separate Personal, Work, and Client Claude Code accounts with usage meters and an active-account indicator.",
@@ -92,7 +92,7 @@ export const guides: readonly GuideMeta[] = [
     eyebrow: "Codex CLI account guide",
     group: "switching",
     datePublished: "2026-07-15",
-    dateModified: "2026-08-01",
+    dateModified: "2026-09-30",
     readingTime: "6 minute read",
     imageAlt:
       "Limit Lifeboat showing a Codex CLI account alongside separate Claude Code accounts, with usage and active-login status.",
@@ -110,7 +110,7 @@ export const guides: readonly GuideMeta[] = [
     eyebrow: "Comparison",
     group: "switching",
     datePublished: "2026-08-01",
-    dateModified: "2026-08-06",
+    dateModified: "2026-09-30",
     readingTime: "8 minute read",
     imageAlt:
       "Limit Lifeboat menu-bar dashboard listing several saved Claude Code and Codex CLI accounts with their remaining usage.",
@@ -128,7 +128,7 @@ export const guides: readonly GuideMeta[] = [
     eyebrow: "Usage limits reference",
     group: "limits",
     datePublished: "2026-08-01",
-    dateModified: "2026-08-01",
+    dateModified: "2026-09-30",
     readingTime: "7 minute read",
     imageAlt:
       "Limit Lifeboat showing a Claude Code account with separate session, weekly all-models, and model-scoped usage meters.",
@@ -146,7 +146,7 @@ export const guides: readonly GuideMeta[] = [
     eyebrow: "Usage limits reference",
     group: "limits",
     datePublished: "2026-08-01",
-    dateModified: "2026-08-01",
+    dateModified: "2026-09-30",
     readingTime: "6 minute read",
     imageAlt:
       "Limit Lifeboat showing a Codex CLI account with its reported rate limit windows and an earned reset badge.",
@@ -158,13 +158,13 @@ export const guides: readonly GuideMeta[] = [
     title: "Claude Code Usage Limit Reached: What to Do",
     metaTitle: "Claude Code Usage Limit Reached: Options",
     description:
-      "You hit the Claude Code usage limit. Here are the real options: wait for the window, add extra usage, change model, or move to another account you own.",
+      "You hit the Claude Code usage limit. The real options: wait for the window, add usage credits, change model, or move to another account you own.",
     summary:
-      "A decision guide for the moment Claude Code stops: wait, buy extra usage, drop to a cheaper model, or move to another authorized account.",
+      "A decision guide for the moment Claude Code stops: wait, buy usage credits, drop to a cheaper model, or move to another authorized account.",
     eyebrow: "Decision guide",
     group: "limits",
     datePublished: "2026-08-01",
-    dateModified: "2026-08-01",
+    dateModified: "2026-09-30",
     readingTime: "6 minute read",
     imageAlt:
       "Limit Lifeboat showing one depleted Claude Code account and another with remaining weekly capacity.",
@@ -182,7 +182,7 @@ export const guides: readonly GuideMeta[] = [
     eyebrow: "Reading usage accurately",
     group: "limits",
     datePublished: "2026-07-15",
-    dateModified: "2026-08-06",
+    dateModified: "2026-09-30",
     readingTime: "7 minute read",
     imageAlt:
       "Limit Lifeboat menu-bar dashboard showing session and weekly usage meters for three Claude Code accounts and one Codex CLI account.",
@@ -200,7 +200,7 @@ export const guides: readonly GuideMeta[] = [
     eyebrow: "Policy and boundaries",
     group: "policy",
     datePublished: "2026-08-01",
-    dateModified: "2026-08-06",
+    dateModified: "2026-09-30",
     readingTime: "7 minute read",
     imageAlt:
       "Limit Lifeboat showing separate saved accounts, each with its own provider-enforced usage windows.",
@@ -236,7 +236,7 @@ export const guides: readonly GuideMeta[] = [
     eyebrow: "Troubleshooting",
     group: "troubleshooting",
     datePublished: "2026-08-01",
-    dateModified: "2026-08-06",
+    dateModified: "2026-09-30",
     readingTime: "7 minute read",
     imageAlt:
       "Limit Lifeboat showing a Claude Code account whose saved login has expired, with a Log In action available.",
@@ -272,7 +272,7 @@ export const guides: readonly GuideMeta[] = [
     eyebrow: "Troubleshooting",
     group: "troubleshooting",
     datePublished: "2026-08-06",
-    dateModified: "2026-08-06",
+    dateModified: "2026-09-30",
     readingTime: "7 minute read",
     imageAlt:
       "Limit Lifeboat showing which saved Claude Code account the CLI is currently authenticated as, with its usage meters.",
@@ -309,7 +309,7 @@ export const staticPages: readonly StaticPageMeta[] = [
     title: "Claude Code and Codex Guides",
     summary: "Every guide, grouped by switching, usage limits, policy, and troubleshooting.",
     kicker: "Practical guides",
-    dateModified: "2026-08-06",
+    dateModified: "2026-09-30",
     changefreq: "weekly",
     priority: 0.8,
   },

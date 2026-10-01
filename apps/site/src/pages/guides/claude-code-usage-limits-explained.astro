@@ -19,7 +19,7 @@ const faqs = [
   {
     question: "Can I reset a Claude Code limit early?",
     answer:
-      "No. The windows are enforced by Anthropic and cannot be reset on request. The supported ways to get more capacity are Anthropic's documented extra-usage options and higher plan tiers.",
+      "Normally, no. The windows are enforced by Anthropic and you wait for them to roll over. The exception is a one-off: alongside Opus 5.5 in September 2026, Anthropic gave subscribers a saved rate-limit reset they can use when they choose. Beyond that, the supported ways to get more capacity are usage credits (formerly called extra usage) and higher plan tiers.",
   },
   {
     question: "Does checking usage consume any of my limit?",
@@ -55,6 +55,7 @@ const faqs = [
       "Session window: approximately 5 hours (300 minutes), rolling rather than fixed-reset.",
       "Weekly all-models window: 7 days (10,080 minutes).",
       "Model-scoped weekly windows: 7 days each, tracked separately per model family.",
+      "On Max, Team Premium and Enterprise Premium, Fable gets its own weekly row and can use up to 50% of the weekly limit.",
       "The tightest window governs. Capacity in the others does not help once one is exhausted.",
       "/usage inside Claude Code is the authoritative view of your current limits.",
     ]}
@@ -107,6 +108,19 @@ const faqs = [
       Some accounts see a scoped window for a heavier model alongside the all-models one; others do
       not. Treat the set you actually see in <code>/usage</code> as the real one, not a list from an
       article.
+    </p>
+    <p>
+      Fable models are the clearest example. On Max, Team Premium and Enterprise Premium, Fable
+      shows as its own weekly row in <code>/usage</code> and can use up to half of the weekly
+      limit, but that usage counts against the same weekly limit rather than coming on top of it.
+      On Pro and on Team or Enterprise Standard seats, Fable has been
+      <a href="https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan">usage-credits only since 20 July 2026</a>,
+      so it never appears as a plan window there.
+    </p>
+    <p>
+      The window lengths have not changed, but the allowances inside them do move. With the Opus
+      5.5 release on 22 September 2026, Anthropic said it had raised five-hour limits on Pro, Max,
+      Team and seat-based Enterprise plans, without publishing new numbers.
     </p>
   </section>
 

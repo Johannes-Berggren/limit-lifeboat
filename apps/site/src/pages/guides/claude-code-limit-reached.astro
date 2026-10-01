@@ -9,7 +9,7 @@ const faqs = [
   {
     question: "Can I reset the Claude Code weekly limit early?",
     answer:
-      "No. The weekly window is enforced by Anthropic and cannot be reset on request. The supported routes to more capacity are Anthropic's documented extra-usage options and higher plan tiers.",
+      "Normally, no. The weekly window is enforced by Anthropic and you wait for it to roll over. The one exception so far: with Opus 5.5 in September 2026, Anthropic gave subscribers a saved rate-limit reset they can use when they choose. Otherwise, the supported routes to more capacity are usage credits (formerly extra usage) and higher plan tiers.",
   },
   {
     question: "How long until my Claude Code limit resets?",
@@ -54,8 +54,8 @@ const faqs = [
       "Run /usage first: the right response depends entirely on which window is exhausted.",
       "A model-scoped weekly window can be worked around by changing model. The session and all-models windows cannot.",
       "The session window rolls, so capacity returns gradually rather than at a single reset point.",
-      "Anthropic's extra usage and higher plan tiers are the supported routes to more capacity on the same account.",
-      "Limits cannot be reset early on request.",
+      "Usage credits (formerly called extra usage) and higher plan tiers are the supported routes to more capacity on the same account.",
+      "Limits normally cannot be reset early. The exception is the one-off saved reset Anthropic gave subscribers with Opus 5.5.",
     ]}
   >
     <p>
@@ -63,7 +63,7 @@ const faqs = [
       else, because the fix depends on which window is empty. If a model-scoped weekly window ran
       out, switching to a lighter model gets you working immediately. If the session window ran out,
       capacity returns gradually over the next few hours. If the weekly all-models window ran out,
-      the options are extra usage, a higher tier, API billing, or waiting.
+      the options are usage credits, a higher tier, API billing, or waiting.
     </p>
   </AnswerBlock>
 
@@ -81,6 +81,12 @@ const faqs = [
       each one measures. Skipping this step is how people spend four hours waiting for a session
       window when they could have changed model and carried on.
     </p>
+    <p>
+      The error text often tells you already: a per-model weekly limit shows up as
+      <a href="https://code.claude.com/docs/en/errors">"You've hit your Opus limit"</a> or the
+      Sonnet equivalent rather than a generic limit message. Recent Claude Code versions also add
+      <code>/rate-limit-options</code> (2.1.284) for the choices available at that point.
+    </p>
   </section>
 
   <section id="options">
@@ -93,6 +99,12 @@ const faqs = [
       have to wait for a single reset moment before doing anything at all. A weekly window is
       different — that one has a definite reset point and waiting can mean days.
     </p>
+    <p>
+      One exception is worth checking for. Alongside Opus 5.5 on 22 September 2026, Anthropic gave
+      subscribers a saved rate-limit reset to use when they choose. The details beyond that are
+      thin, so check your own account before counting on it, but if you still have it, a
+      week-ending weekly limit is the moment it was made for.
+    </p>
 
     <h3>2. Change model</h3>
     <p>
@@ -101,12 +113,22 @@ const faqs = [
       model's own window is exhausted. Costs nothing, takes seconds.
     </p>
 
-    <h3>3. Buy extra usage or move up a tier</h3>
+    <h3>3. Buy usage credits or move up a tier</h3>
     <p>
-      Anthropic documents extra-usage options and higher plan tiers, and these are the sanctioned
-      routes to more capacity on the account you are already using. If you hit the weekly window
-      most weeks, this is the answer rather than a workaround — you are simply on too small a plan
-      for your workload.
+      <a href="https://support.claude.com/en/articles/12429409-extra-usage-for-paid-claude-plans">Usage credits</a>
+      (Anthropic renamed them from "extra usage") and higher plan tiers are the sanctioned routes to
+      more capacity on the account you are already using. Credits are available on Pro, Max 5x and
+      Max 20x, are billed at API rates, and can be capped with an optional monthly spend limit; turn
+      them on in claude.ai under Settings &gt; Usage or with <code>/usage-credits</code> in Claude
+      Code. Since 2.1.234, Claude Code also has a "Continue automatically at usage limit" option in
+      <code>/config</code> (managed setting <code>autoContinueAtUsageLimit</code>).
+    </p>
+    <p>
+      One cost detail: on a subscription, the main conversation's prompt cache lives for an hour
+      while you are within your plan, but drops to five minutes while you are drawing on usage
+      credits, so pauses between turns cost more. If you hit the weekly window most weeks, a higher
+      tier is the answer rather than a workaround — you are simply on too small a plan for your
+      workload.
     </p>
 
     <h3>4. Switch to API billing</h3>
@@ -157,7 +179,7 @@ const faqs = [
           </tr>
           <tr>
             <th scope="row">Weekly window empty, first time this month</th>
-            <td>Extra usage, or wait for the reset.</td>
+            <td>Usage credits, or wait for the reset.</td>
           </tr>
           <tr>
             <th scope="row">Weekly window empty most weeks</th>

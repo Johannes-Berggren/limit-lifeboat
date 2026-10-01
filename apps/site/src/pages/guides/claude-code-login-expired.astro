@@ -14,7 +14,7 @@ const faqs = [
   {
     question: "Does /login fix an expired Claude Code session?",
     answer:
-      "Usually, and it should be your first attempt. /login renews in place without needing a logout first and resolves most expiry cases. Only escalate to a full logout, terminal restart, and fresh login if renewing in place fails.",
+      "Usually, and it should be your first attempt. /login renews in place without needing a logout first and resolves most expiry cases. If it succeeds but the next prompt still says Not logged in or Login expired, check for a leftover ~/.claude/.credentials.json file, which caused exactly that before Claude Code 2.1.286. Only escalate to a full logout, terminal restart, and fresh login if renewing in place fails.",
   },
   {
     question: "Will re-logging in lose my settings or MCP servers?",
@@ -57,6 +57,7 @@ const faqs = [
   <AnswerBlock
     facts={[
       "Refresh tokens are single-use: two processes refreshing the same login race, and the loser's copy is dead.",
+      "Check /status first: since Claude Code 2.1.210 it shows a Login: Expired row when the login is the problem.",
       "Try /login first — it renews in place and does not require a logout.",
       "If that fails: /logout, close the terminal completely, reopen, and log in again.",
       "Re-authenticating never touches settings.json, MCP servers, hooks, or local history.",
@@ -102,7 +103,11 @@ const faqs = [
 
   <section id="recovery">
     <h2>Recovery, in order</h2>
-    <p>Work down this list and stop at the first step that works. Each is more disruptive than the last.</p>
+    <p>
+      First confirm that the login really is the problem. Since Claude Code 2.1.210,
+      <code>/status</code> shows a <strong>Login: Expired</strong> row when it is. Then work down
+      this list and stop at the first step that works. Each is more disruptive than the last.
+    </p>
     <ol>
       <li>
         <strong>Run <code>/login</code> inside Claude Code.</strong> It renews in place, without a
@@ -121,7 +126,11 @@ const faqs = [
       <li>
         <strong>Clear the stored credential.</strong> Remove Claude Code's saved credential and
         authenticate from a clean state. On macOS the login lives in the Keychain item
-        <code>Claude Code-credentials</code> rather than in a plain file.
+        <code>Claude Code-credentials</code>. If a Keychain write ever fails, Claude Code falls back
+        to a plaintext <code>~/.claude/.credentials.json</code> (mode 0600), and a leftover copy of
+        that file made <code>/login</code> appear to succeed while the next prompt still said "Not
+        logged in" or "Login expired". Claude Code 2.1.286 fixed that; on older versions, check for
+        the file and remove the stale copy.
       </li>
       <li>
         <strong>Use an API key temporarily.</strong> Setting <code>ANTHROPIC_API_KEY</code> bypasses
@@ -146,6 +155,8 @@ const faqs = [
         <strong>Be deliberate about parallel sessions.</strong> Several Claude Code instances on one
         account is the single biggest contributor. If you need genuine parallelism, tools that give
         each profile an isolated configuration directory avoid sharing one credential between them.
+        Anthropic's own method for multiple accounts is a separate <code>CLAUDE_CONFIG_DIR</code>
+        per account, each of which gets its own Keychain entry.
       </li>
       <li>
         <strong>Audit what else touches your credentials.</strong> Any background tool that refreshes
@@ -157,7 +168,9 @@ const faqs = [
         will rotate the same token from different places.
       </li>
       <li>
-        <strong>Keep Claude Code current.</strong> Refresh-race handling has improved over time.
+        <strong>Keep Claude Code current.</strong> Refresh-race handling has improved over time,
+        and since 2.1.203 Claude Code warns you three days before a login expires, so a genuine
+        expiry no longer has to arrive unannounced.
       </li>
     </ul>
     <p>

@@ -46,7 +46,7 @@ const faqs = [
   <AnswerBlock
     facts={[
       "Claude Code's own commands are /login to authenticate, /status to confirm the active account, and /usage to read current limits.",
-      "Claude Code authentication lives in the Keychain item Claude Code-credentials, in ~/Library/Application Support/Claude/config.json, and in ~/.claude.json — not in settings.json.",
+      "Claude Code authentication lives in the Keychain item Claude Code-credentials, in ~/Library/Application Support/Claude/config.json, and in ~/.claude.json — not in settings.json. If a Keychain write fails, Claude Code falls back to a plaintext ~/.claude/.credentials.json.",
       "Switching the CLI does not switch claude.ai in the browser or the Claude desktop app.",
       "Usage limits are enforced per account by Anthropic. Switching never pools, merges, or extends them.",
     ]}
@@ -67,6 +67,7 @@ const faqs = [
 /status
 /usage</code></pre>
     <p>This is the source-of-truth path and the right fallback whenever a saved login has expired. Anthropic documents <code>/login</code>, <code>/status</code>, and <code>/usage</code> in the <a href="https://support.claude.com/en/articles/14553413-claude-code-cheatsheet">Claude Code command reference</a>.</p>
+    <p>For keeping several accounts side by side, Anthropic’s documented method is a separate <code>CLAUDE_CONFIG_DIR</code> per account, and each directory gets its own Keychain entry. It works, at the cost of launching Claude Code with the right directory every time and maintaining settings and MCP configuration in each one.</p>
     <p>Nothing below replaces this flow. Every account still has to be authenticated by Anthropic at least once, through Anthropic’s own browser flow, before any tool can save it.</p>
   </section>
 
@@ -94,7 +95,7 @@ const faqs = [
   <section id="boundaries">
     <h2>Where are the account boundaries?</h2>
     <p>Use only accounts you are authorized to access. A work or enterprise account may be governed by organization retention, access, and acceptable-use policies that do not apply to a personal account. Switching the CLI does not move conversations, combine billing, transfer files, or merge provider-enforced usage limits.</p>
-    <p>Limit Lifeboat is not affiliated with Anthropic and does not make a blanket claim that every multi-subscription pattern is permitted. Follow the terms for each account and use Anthropic’s documented extra-usage or plan options when you need more capacity. <a href="/guides/multiple-claude-accounts-allowed">What the terms actually prohibit</a> goes through this in detail.</p>
+    <p>Limit Lifeboat is not affiliated with Anthropic and does not make a blanket claim that every multi-subscription pattern is permitted. Follow the terms for each account and use Anthropic’s usage credits (formerly extra usage) or plan options when you need more capacity. <a href="/guides/multiple-claude-accounts-allowed">What the terms actually prohibit</a> goes through this in detail.</p>
     <p>For the other supported provider, read <a href="/guides/manage-multiple-codex-accounts-mac">how to manage multiple Codex CLI accounts</a>. To confirm a switch actually landed, see <a href="/guides/check-active-claude-code-account">how to check which Claude Code account is active</a>; if a previous switcher took your MCP servers with it, <a href="/guides/claude-code-lost-mcp-servers">recovering a lost MCP configuration</a> covers the way back. When two tools report different remaining usage, <a href="/guides/claude-code-codex-usage-monitor-mac">the reasons are knowable</a>. If the CLI keeps asking you to log in again, that is a <a href="/guides/claude-code-login-expired">separate problem with its own causes</a>.</p>
   </section>
 </GuideLayout>
