@@ -513,7 +513,7 @@ public struct CodexAccountUsageService {
 
     private static func creditStatus(_ reading: CodexRateLimitReading) -> String? {
         if let reachedType = reading.reachedType, !reachedType.isEmpty {
-            return "Rate limit reached: \(reachedType)."
+            return CodexRateLimitReachedType.statusText(reachedType)
         }
         guard let credits = reading.credits else { return nil }
         if credits.unlimited {

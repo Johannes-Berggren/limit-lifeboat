@@ -263,7 +263,7 @@ public struct AccountRowPresentation: Equatable, Sendable {
     private static func billingBadge(_ mode: BillingUsageMode?, spend: PayAsYouGoSpend?) -> BillingBadgePresentation? {
         switch mode {
         case .overLimitPayAsYouGo:
-            let spendClause = spend?.summaryText.map { "\($0)." } ?? "extra usage may be billed."
+            let spendClause = spend?.summaryText.map { "\($0)." } ?? "usage credits may be billed."
             return BillingBadgePresentation(
                 text: "PAYG",
                 tone: .danger,
