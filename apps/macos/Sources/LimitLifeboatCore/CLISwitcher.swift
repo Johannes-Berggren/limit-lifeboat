@@ -31,6 +31,7 @@ public enum CLISwitcherError: Error, LocalizedError {
     case invalidJSON(String)
     case backupFailed(path: String, underlying: Error)
     case credentialConflict(String)
+    case unsupportedCodexCredentialStore(CodexCredentialStoreMode)
     case restoreValidationFailed(
         provider: Provider,
         reason: String,
@@ -57,6 +58,8 @@ public enum CLISwitcherError: Error, LocalizedError {
             return "Could not back up \(path) before switching; nothing was changed. (\(underlying.localizedDescription))"
         case .credentialConflict(let path):
             return "Credentials changed in another app at \(path). The outside change was preserved; refresh and try again."
+        case .unsupportedCodexCredentialStore(let mode):
+            return "Codex is set to keep its login outside ~/.codex/auth.json (cli_auth_credentials_store = \"\(mode.configValue)\" in ~/.codex/config.toml), so switching accounts would have no effect. Nothing was changed. Set it to \"file\" to switch Codex accounts."
         case .restoreValidationFailed(let provider, let reason, _):
             return "The restored \(provider.displayName) login could not be verified, so the previous login was restored. \(reason)"
         case .rollbackConflict(let paths, let recoveryDirectory, let underlying, _):
@@ -401,6 +404,12 @@ public final class CLISwitcher {
     ) throws -> RestoreResult {
         if profile.provider == .claude {
             try validateClaudeOAuthMutationLease()
+        }
+        if profile.provider == .codex {
+            let storeMode = CodexCredentialStoreMode.current(homeDirectory: homeDirectory)
+            guard storeMode.supportsFileSwitching else {
+                throw CLISwitcherError.unsupportedCodexCredentialStore(storeMode)
+            }
         }
         let snapshot = storedRecord.snapshot
         guard snapshot.provider == profile.provider else {
@@ -1127,6 +1136,20 @@ public final class CLISwitcher {
 
     public func hasActiveProcesses(provider: Provider) -> Bool {
         CLIProcessInspector().hasActiveProcesses(provider: provider)
+    }
+
+    public func isCodexDaemonRunning() -> Bool {
+        CLIProcessInspector().isCodexDaemonRunning()
+    }
+
+    /// Claude Code falls back to a plaintext `~/.claude/.credentials.json`
+    /// when a Keychain write fails. A leftover copy can shadow the Keychain
+    /// login that a switch just restored (Claude Code 2.1.286 changelog).
+    public func hasClaudePlaintextCredentialsFile() -> Bool {
+        let url = homeDirectory
+            .appendingPathComponent(".claude", isDirectory: true)
+            .appendingPathComponent(".credentials.json")
+        return fileManager.fileExists(atPath: url.path)
     }
 
     /// Resolves an absolute path to a CLI executable so it can be launched from

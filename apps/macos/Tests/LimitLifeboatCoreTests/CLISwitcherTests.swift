@@ -915,6 +915,86 @@ final class CLISwitcherTests: XCTestCase {
         XCTAssertEqual(try codexAccessToken(at: authURL), "account-b")
     }
 
+    func testCodexRestoreClearsPreviousAccountsNewerCredentialFields() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let authURL = fixture.home.appendingPathComponent(".codex/auth.json")
+        try FileManager.default.createDirectory(at: authURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(#"{"tokens":{"access_token":"account-a"}}"#.utf8).write(to: authURL)
+
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: MemoryCredentialStore(),
+            claudeCLICredentialSource: FakeClaudeCLICredentialSource()
+        )
+        let profile = AccountProfile(provider: .codex, label: "A")
+        _ = try switcher.captureAndStoreSnapshot(for: profile)
+        try Data(#"{"tokens":{"access_token":"account-b"},"personal_access_token":"pat-b","agent_identity":{"id":"b"}}"#.utf8)
+            .write(to: authURL)
+
+        _ = try switcher.restoreSnapshot(for: profile)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: authURL)) as? [String: Any])
+        XCTAssertEqual(try codexAccessToken(at: authURL), "account-a")
+        XCTAssertNil(object["personal_access_token"], "account B's token must not survive a switch to A")
+        XCTAssertNil(object["agent_identity"])
+    }
+
+    func testCodexFingerprintIgnoresNewerOwnedKeys() throws {
+        func snapshot(_ json: String) -> CredentialSnapshot {
+            CredentialSnapshot(
+                provider: .codex,
+                items: [
+                    CredentialSnapshotItem(
+                        relativePath: ".codex/auth.json",
+                        kind: .jsonFields,
+                        contents: Data(json.utf8),
+                        posixPermissions: nil,
+                        ownedJSONKeys: CodexCredentialAdapter.ownedKeys
+                    )
+                ]
+            )
+        }
+        // An account saved before the newer keys existed must keep matching
+        // its live file after Codex adds one, or the guarded live refresh
+        // stops writing rotated tokens back.
+        XCTAssertEqual(
+            CredentialFingerprint.make(for: snapshot(#"{"tokens":{"access_token":"a"}}"#)),
+            CredentialFingerprint.make(for: snapshot(#"{"tokens":{"access_token":"a"},"agent_identity":{"id":"x"}}"#))
+        )
+        XCTAssertNotEqual(
+            CredentialFingerprint.make(for: snapshot(#"{"tokens":{"access_token":"a"}}"#)),
+            CredentialFingerprint.make(for: snapshot(#"{"tokens":{"access_token":"b"}}"#))
+        )
+    }
+
+    func testCodexRestoreRefusesKeyringCredentialStoreWithoutWriting() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.cleanup() }
+        let authURL = fixture.home.appendingPathComponent(".codex/auth.json")
+        try FileManager.default.createDirectory(at: authURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(#"{"tokens":{"access_token":"account-a"}}"#.utf8).write(to: authURL)
+
+        let switcher = CLISwitcher(
+            homeDirectory: fixture.home,
+            backupDirectory: fixture.backups,
+            credentialStore: MemoryCredentialStore(),
+            claudeCLICredentialSource: FakeClaudeCLICredentialSource()
+        )
+        let profile = AccountProfile(provider: .codex, label: "A")
+        _ = try switcher.captureAndStoreSnapshot(for: profile)
+        try Data(#"{"tokens":{"access_token":"account-b"}}"#.utf8).write(to: authURL)
+        try Data("cli_auth_credentials_store = \"keyring\"\n".utf8)
+            .write(to: fixture.home.appendingPathComponent(".codex/config.toml"))
+
+        XCTAssertThrowsError(try switcher.restoreSnapshot(for: profile)) { error in
+            guard case CLISwitcherError.unsupportedCodexCredentialStore(.keyring) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+        XCTAssertEqual(try codexAccessToken(at: authURL), "account-b")
+    }
+
     func testCodexRestorePreservesUnknownExternalFields() throws {
         let fixture = try TemporaryFixture()
         defer { fixture.cleanup() }
