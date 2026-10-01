@@ -1087,7 +1087,7 @@ struct BillingStatusView: View {
             parts.append("Not over the included limit.")
         case .includedSubscriptionNearLimit:
             parts.append(includedUsageText(snapshot, prefix: "Included subscription"))
-            parts.append("Extra credits may apply after the included limit.")
+            parts.append("Usage credits may apply after the included limit.")
         case .overLimitPayAsYouGo:
             parts.append("Included usage appears depleted or unavailable.")
             parts.append("Usage beyond the plan may be billed as usage credits (pay-as-you-go).")

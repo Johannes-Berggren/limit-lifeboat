@@ -17,4 +17,13 @@ final class CodexRateLimitReachedTypeTests: XCTestCase {
     func testUnknownValuesPassThrough() {
         XCTAssertEqual(CodexRateLimitReachedType.statusText("future_limit"), "Rate limit reached: future_limit.")
     }
+
+    func testClassifiesPlainLimitAndWorkspaceCreditsInEitherSpelling() {
+        XCTAssertTrue(CodexRateLimitReachedType.isPlainRateLimit("rate_limit_reached"))
+        XCTAssertTrue(CodexRateLimitReachedType.isPlainRateLimit("RateLimitReached"))
+        XCTAssertFalse(CodexRateLimitReachedType.isPlainRateLimit("workspace_owner_usage_limit_reached"))
+        XCTAssertFalse(CodexRateLimitReachedType.isPlainRateLimit(nil))
+        XCTAssertTrue(CodexRateLimitReachedType.isWorkspaceCreditsDepleted("WorkspaceOwnerCreditsDepleted"))
+        XCTAssertFalse(CodexRateLimitReachedType.isWorkspaceCreditsDepleted("workspace_member_usage_limit_reached"))
+    }
 }

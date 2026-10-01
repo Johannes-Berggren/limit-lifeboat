@@ -22,6 +22,18 @@ enum CodexRateLimitReachedType {
         }
     }
 
+    /// The plain per-account limit, the only state an earned reset can clear.
+    static func isPlainRateLimit(_ raw: String?) -> Bool {
+        raw.map(normalized) == "ratelimitreached"
+    }
+
+    /// The workspace has no credits left, so nothing will be billed as
+    /// pay-as-you-go for this account until an owner adds more.
+    static func isWorkspaceCreditsDepleted(_ raw: String?) -> Bool {
+        guard let value = raw.map(normalized) else { return false }
+        return value.hasPrefix("workspace") && value.hasSuffix("creditsdepleted")
+    }
+
     /// Accepts snake_case and PascalCase spellings of the same value.
     private static func normalized(_ raw: String) -> String {
         raw.lowercased().replacingOccurrences(of: "_", with: "")

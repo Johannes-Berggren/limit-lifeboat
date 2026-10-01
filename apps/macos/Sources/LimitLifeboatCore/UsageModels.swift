@@ -374,6 +374,11 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
     }
 
     public var hasPayAsYouGoSignal: Bool {
+        // "Workspace credits are used up" mentions credits but means the
+        // opposite of billing: nothing more can be charged.
+        if CodexRateLimitReachedType.isWorkspaceCreditsDepleted(codexRateLimitReachedType) {
+            return false
+        }
         let text = "\(creditStatus ?? "") \(message)".lowercased()
         return text.contains("pay-as-you-go")
             || text.contains("pay as you go")

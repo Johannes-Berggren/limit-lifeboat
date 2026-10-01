@@ -35,15 +35,25 @@ public struct CodexLocalUsageReader {
         guard let selectedLimit = event.limits.max(by: { $0.usedPercent < $1.usedPercent }) else {
             return nil
         }
-        return UsageSnapshotFactory.snapshot(
+        var snapshot = UsageSnapshotFactory.snapshot(
             accountID: profile.id,
             provider: .codex,
             windows: windows,
             creditStatus: creditStatus(from: event),
+            codexRateLimitReachedType: event.reachedType,
             source: "local Codex CLI logs",
             lastRefreshed: now,
             message: message(for: selectedLimit, event: event)
         )
+        // Same rule as the app-server path: Codex saying a limit was reached
+        // is authoritative even when the sampled percentages are below 100.
+        if event.reachedType?.isEmpty == false {
+            snapshot.riskLevel = .depleted
+            for index in snapshot.windows.indices {
+                snapshot.windows[index].riskLevel = .depleted
+            }
+        }
+        return snapshot
     }
 
     private func makeWindow(from limit: CodexRateLimit, now: Date) -> UsageWindow {
