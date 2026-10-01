@@ -3204,6 +3204,18 @@ final class AppState: ObservableObject {
         allowUnverifiedTarget: Bool = false,
         preLeaseLiveGeneration: ClaudeLiveGenerationBaseline? = nil
     ) async -> Bool {
+        // Refuse before any preflight work (which may refresh tokens) when
+        // Codex keeps its login outside auth.json. restoreSnapshot enforces
+        // the same rule at the write boundary.
+        if profile.provider == .codex {
+            let storeMode = CodexCredentialStoreMode.current(
+                homeDirectory: FileManager.default.homeDirectoryForCurrentUser
+            )
+            if !storeMode.supportsFileSwitching {
+                statusMessage = CLISwitcherError.unsupportedCodexCredentialStore(storeMode).localizedDescription
+                return false
+            }
+        }
         if storedCredentialWorkflow == nil {
             guard let mutationOwner = beginCredentialMutation(for: profile.provider) else {
                 if automatic {
@@ -3838,6 +3850,12 @@ final class AppState: ObservableObject {
             )
 
             statusMessage = "Switched \(profile.provider.displayName) CLI to \(profile.label)."
+            if profile.provider == .codex, cliSwitcher.isCodexDaemonRunning() {
+                statusMessage += " Codex's background server is running and may still use the previous account; restart it with `codex app-server daemon restart`."
+            }
+            if profile.provider == .claude, cliSwitcher.hasClaudePlaintextCredentialsFile() {
+                statusMessage += " A leftover ~/.claude/.credentials.json may override the switched login; if Claude Code shows the wrong account, move that file aside."
+            }
             AppLog.switching.notice("Switched \(profile.provider.displayName, privacy: .public) CLI to account \(profile.id, privacy: .public) (interactive: \(interactive, privacy: .public))")
             // The single funnel every switch passes through (manual, auto,
             // notification click) — the weekly digest counts these events.
