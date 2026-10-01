@@ -301,6 +301,9 @@ struct MenuRootView: View {
                         codexResetState: state.codexResetStates[profile.id] ?? .idle,
                         loginExpiresAt: state.loginExpiresAt(for: profile),
                         estimates: state.burnRateEstimates[profile.id] ?? [:],
+                        windowReadings: settings.usageCurvesEnabled
+                            ? state.windowReadings[profile.id] ?? [:]
+                            : [:],
                         adviceReason: advisedID == profile.id ? state.switchAdvice[provider]?.reason : nil,
                         showOrganizationName: settings.showOrganizationNames,
                         // Rank comes from repository order (providerProfiles),
@@ -444,6 +447,8 @@ struct AccountRowView: View {
     var codexResetState: CodexResetRedemptionState = .idle
     var loginExpiresAt: Date? = nil
     let estimates: [String: BurnRateEstimate]
+    /// Stored readings per window; empty draws the plain fill bars.
+    var windowReadings: [String: [BurnRateEstimator.Reading]] = [:]
     /// Non-nil exactly when this account is the advised switch target.
     var adviceReason: String? = nil
     var showOrganizationName: Bool = true
@@ -719,7 +724,9 @@ struct AccountRowView: View {
                         window: window,
                         depletesAt: presentation.paceForecast?.windowID == window.id
                             ? presentation.paceForecast?.depletesAt
-                            : nil
+                            : nil,
+                        readings: windowReadings[window.id],
+                        projectedDepletion: projectedDepletion(for: window)
                     )
                 }
             }
@@ -729,6 +736,16 @@ struct AccountRowView: View {
                 .font(.caption)
                 .foregroundStyle(.tertiary)
         }
+    }
+
+    /// Every window draws its own runway, not just the one carrying the card's
+    /// pace caption, but only from readings the card trusts.
+    private func projectedDepletion(for window: UsageWindow) -> Date? {
+        guard presentation.showsPace,
+              case .depletesAt(let date)? = estimates[window.id] else {
+            return nil
+        }
+        return date
     }
 
     private var hasExpandableDetails: Bool {
@@ -1149,46 +1166,41 @@ struct BillingStatusView: View {
 struct UsageGauge: View {
     let window: UsageWindow
     /// When the recent pace projects this limit running out before it resets.
+    /// Drives the caption; only the card's most urgent window carries it.
     var depletesAt: Date? = nil
+    /// Stored readings for this window. Nil keeps the plain fill bar.
+    var readings: [BurnRateEstimator.Reading]? = nil
+    /// This window's own projected depletion, drawn on its runway.
+    var projectedDepletion: Date? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 60)) { context in
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: DS.Spacing.xs) {
-                    Text(window.label)
-                        .font(.caption2.weight(.medium))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .help(window.label)
-
-                    Spacer(minLength: 0)
-
-                    Text(usageValue)
-                        .font(
-                            .system(
-                                size: 11,
-                                weight: .semibold,
-                                design: .rounded
-                            )
-                        )
-                        .monospacedDigit()
-                        .fixedSize(horizontal: true, vertical: false)
-                        .contentTransition(.numericText())
-                        .animation(reduceMotion ? nil : DS.Motion.quick, value: usageValue)
+            let runway = runway(now: context.date)
+            VStack(alignment: .leading, spacing: 5) {
+                // The rate is a nice-to-have; the label is not. Drop the rate
+                // before truncating a long label like "Weekly (Opus)".
+                ViewThatFits(in: .horizontal) {
+                    header(rate: runway?.ratePerHour.flatMap(UsageRatePhrase.text(perHour:)))
+                    header(rate: nil)
                 }
 
-                GeometryReader { proxy in
-                    ZStack(alignment: .leading) {
-                        Capsule()
-                            .fill(Color.primary.opacity(0.09))
-                        Capsule()
-                            .fill(riskColor)
-                            .frame(width: fillWidth(in: proxy.size.width))
+                if let runway {
+                    RunwayTrack(runway: runway, tint: riskColor)
+                        .frame(height: DS.Gauge.runwayHeight)
+                } else {
+                    GeometryReader { proxy in
+                        ZStack(alignment: .leading) {
+                            Capsule()
+                                .fill(Color.primary.opacity(0.09))
+                            Capsule()
+                                .fill(riskColor)
+                                .frame(width: fillWidth(in: proxy.size.width))
+                        }
+                        .animation(reduceMotion ? nil : DS.Motion.progress, value: window.usedFraction)
                     }
-                    .animation(reduceMotion ? nil : DS.Motion.progress, value: window.usedFraction)
+                    .frame(height: DS.Gauge.barHeight)
                 }
-                .frame(height: 5)
 
                 if let caption = caption(now: context.date) {
                     caption
@@ -1201,11 +1213,52 @@ struct UsageGauge: View {
                         .monospacedDigit()
                 }
             }
-            .help(gaugeHelp)
+            .help(gaugeHelp(runway: runway))
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(window.label)
-            .accessibilityValue(accessibilityValue(now: context.date))
+            .accessibilityValue(accessibilityValue(now: context.date, runway: runway))
         }
+    }
+
+    private func header(rate: String?) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: DS.Spacing.xs) {
+            Text(window.label)
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .help(window.label)
+                .layoutPriority(1)
+
+            Spacer(minLength: DS.Spacing.xs)
+
+            if let rate {
+                Text(rate)
+                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
+                    .fixedSize()
+            }
+
+            Text(usageValue)
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .fixedSize(horizontal: true, vertical: false)
+                .contentTransition(.numericText())
+                .animation(reduceMotion ? nil : DS.Motion.quick, value: usageValue)
+        }
+    }
+
+    private func runway(now: Date) -> UsageRunway? {
+        guard let readings else {
+            return nil
+        }
+        return UsageRunwayBuilder().runway(
+            window: window,
+            readings: readings,
+            depletesAt: projectedDepletion,
+            now: now
+        )
     }
 
     /// The gauge footer: reset timing, plus the pace forecast when one is
@@ -1257,8 +1310,11 @@ struct UsageGauge: View {
         UsagePercent.text(window.usedPercent)
     }
 
-    private func accessibilityValue(now: Date) -> String {
+    private func accessibilityValue(now: Date, runway: UsageRunway?) -> String {
         var parts = ["\(usageValue) used"]
+        if let rate = runway?.ratePerHour.flatMap(UsageRatePhrase.text(perHour:)) {
+            parts.append("using \(rate)")
+        }
         if let resetText = UsageResetTiming.compactText(
             resetDate: window.resetDate,
             resetDescription: window.resetDescription,
@@ -1273,13 +1329,22 @@ struct UsageGauge: View {
         return parts.joined(separator: ", ")
     }
 
-    private var gaugeHelp: String {
+    private func gaugeHelp(runway: UsageRunway?) -> String {
         var lines = [window.label, "\(usageValue) used"]
+        if let rate = runway?.ratePerHour.flatMap(UsageRatePhrase.text(perHour:)) {
+            lines.append("Recent pace: \(rate)")
+        }
         if let resetHelp {
             lines.append(resetHelp)
         }
-        if let depletesAt {
-            lines.append("At the current pace, this limit runs out around \(Self.longClock(depletesAt)) before it resets.")
+        if let depletion = depletesAt ?? projectedDepletion {
+            var line = "At the current pace, this limit runs out around \(Self.longClock(depletion))"
+            if let resetDate = window.resetDate, resetDate > depletion {
+                line += ", \(DurationPhrase.short(resetDate.timeIntervalSince(depletion))) before it resets."
+            } else {
+                line += " before it resets."
+            }
+            lines.append(line)
         }
         return lines.joined(separator: "\n")
     }

@@ -73,6 +73,12 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(compactMenuBarEnabled, forKey: Keys.compactMenuBarEnabled) }
     }
 
+    /// Draws each gauge as the window's timeline with its usage curve and
+    /// projected runway; off falls back to the plain fill bar.
+    @Published var usageCurvesEnabled: Bool {
+        didSet { defaults.set(usageCurvesEnabled, forKey: Keys.usageCurvesEnabled) }
+    }
+
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -92,6 +98,7 @@ final class SettingsStore: ObservableObject {
         self.cacheAlertsEnabled = defaults.object(forKey: Keys.cacheAlertsEnabled) as? Bool ?? true
         self.memoryGraphEnabled = defaults.object(forKey: Keys.memoryGraphEnabled) as? Bool ?? false
         self.compactMenuBarEnabled = defaults.object(forKey: Keys.compactMenuBarEnabled) as? Bool ?? false
+        self.usageCurvesEnabled = defaults.object(forKey: Keys.usageCurvesEnabled) as? Bool ?? true
     }
 
     private enum Keys {
@@ -107,5 +114,6 @@ final class SettingsStore: ObservableObject {
         static let cacheAlertsEnabled = "cacheAlertsEnabled"
         static let memoryGraphEnabled = "memoryGraphEnabled"
         static let compactMenuBarEnabled = "compactMenuBarEnabled"
+        static let usageCurvesEnabled = "usageCurvesEnabled"
     }
 }

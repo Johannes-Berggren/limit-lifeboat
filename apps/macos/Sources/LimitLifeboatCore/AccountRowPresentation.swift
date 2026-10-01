@@ -123,6 +123,9 @@ public struct AccountRowPresentation: Equatable, Sendable {
     /// Non-nil when a fresh reading projects a window running out before its
     /// reset — the card's visible counterpart to the pace notification.
     public var paceForecast: PaceForecast?
+    /// Whether burn-rate projections may be drawn on this card at all: false
+    /// for stale or pre-reset readings, the same gate as `paceForecast`.
+    public var showsPace: Bool
     public var switchTitle: String
     public var switchHelp: String
     public var highlightsSwitch: Bool
@@ -171,6 +174,8 @@ public struct AccountRowPresentation: Equatable, Sendable {
         )
         self.billingBadge = Self.billingBadge(snapshot?.billingUsageMode, spend: snapshot?.payAsYouGoSpend)
         self.gauges = Self.gaugeGroups(profile: profile, snapshot: snapshot, now: now)
+        self.showsPace = snapshot.map { !$0.isStale(asOf: now) } == true
+            && !self.gauges.showsPreResetNote
         self.paceForecast = Self.paceForecast(
             snapshot: snapshot,
             gauges: self.gauges,
