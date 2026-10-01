@@ -10,6 +10,14 @@ struct CLIProcessInspector {
         }
     }
 
+    /// Codex 0.156+ can keep a shared app-server running in the background
+    /// (`codex app-server --listen unix:// --managed-daemon`). It loads the
+    /// login when it starts, so after a file swap it may keep serving the
+    /// previous account until it is restarted.
+    func isCodexDaemonRunning() -> Bool {
+        runPgrep(arguments: ["-f", "codex app-server .*--managed-daemon"])
+    }
+
     private func runPgrep(arguments: [String]) -> Bool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")

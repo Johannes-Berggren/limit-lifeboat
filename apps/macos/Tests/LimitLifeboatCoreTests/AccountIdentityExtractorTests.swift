@@ -41,7 +41,7 @@ final class AccountIdentityExtractorTests: XCTestCase {
         let auth = #"{"tokens":{"id_token":"\#(token)","account_id":"acct_123"}}"#
 
         let info = try XCTUnwrap(CodexIdentityReader.accountInfo(fromAuthJSON: Data(auth.utf8)))
-        XCTAssertEqual(info.planLabel, "Pro")
+        XCTAssertEqual(info.planLabel, "Pro (More)")
         XCTAssertEqual(info.identity?.email, "codex@example.com")
         XCTAssertEqual(info.identity?.accountID, "acct_123")
         XCTAssertEqual(info.identity?.organization, "Example Labs")
@@ -62,8 +62,14 @@ final class AccountIdentityExtractorTests: XCTestCase {
     func testCodexPlanLabelNormalizer() {
         XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "free"), "Free")
         XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "plus"), "Plus")
-        XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "pro"), "Pro")
-        XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "prolite"), "Pro Lite")
+        XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "prolite"), "Pro")
+        XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "pro"), "Pro (More)")
+        XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "promax"), "Pro (Max)")
+        XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "self_serve_business_prolite"), "Business")
+        XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "ent26"), "Enterprise")
+        XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "enterprise_cbp_automation"), "Enterprise")
+        XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "edu_plus"), "Edu Plus")
+        XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "edu_pro"), "Edu Pro")
         XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "team"), "Team")
         XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "self_serve_business_usage_based"), "Business")
         XCTAssertEqual(CodexIdentityReader.planLabel(forPlanType: "enterprise_cbp_usage_based"), "Enterprise")

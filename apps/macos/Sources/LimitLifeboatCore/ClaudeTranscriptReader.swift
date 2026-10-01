@@ -9,11 +9,17 @@ public struct ClaudeSessionActivity: Equatable, Sendable {
     /// has expired.
     public let contextTokens: Int
     public let lastActivityAt: Date
+    /// Lifetime of the main conversation's prompt cache, read from the newest
+    /// turn that wrote cache: 3,600 when it wrote 1h entries, 300 when it only
+    /// wrote 5m ones (usage credits, an API key, or a `promptCacheTtl`
+    /// override). Nil when the tail holds no cache write to tell from.
+    public let cacheTTLSeconds: Int?
 
-    public init(model: String?, contextTokens: Int, lastActivityAt: Date) {
+    public init(model: String?, contextTokens: Int, lastActivityAt: Date, cacheTTLSeconds: Int? = nil) {
         self.model = model
         self.contextTokens = contextTokens
         self.lastActivityAt = lastActivityAt
+        self.cacheTTLSeconds = cacheTTLSeconds
     }
 }
 
@@ -203,6 +209,9 @@ public struct ClaudeTranscriptReader {
     /// parse, which is harmless.
     public static func latestActivity(inTail data: Data, fallbackDate: Date) -> ClaudeSessionActivity? {
         let lines = data.split(separator: UInt8(ascii: "\n"))
+        var latest: (message: [String: Any], usage: [String: Any], timestamp: Date)?
+        // Bounded so a tail with no cache write isn't fully parsed every scan.
+        var assistantTurnsLeft = 20
         for line in lines.reversed() {
             guard line.count > 2,
                   let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
@@ -211,18 +220,46 @@ public struct ClaudeTranscriptReader {
                   let usage = message["usage"] as? [String: Any] else {
                 continue
             }
-            let context = [
-                "input_tokens",
-                "cache_read_input_tokens",
-                "cache_creation_input_tokens"
-            ].reduce(0) { $0 + ((usage[$1] as? NSNumber)?.intValue ?? 0) }
-            let timestamp = (object["timestamp"] as? String).flatMap(parseTimestamp) ?? fallbackDate
-            return ClaudeSessionActivity(
-                model: message["model"] as? String,
-                contextTokens: context,
-                lastActivityAt: max(timestamp, fallbackDate)
-            )
+            if latest == nil {
+                let timestamp = (object["timestamp"] as? String).flatMap(parseTimestamp) ?? fallbackDate
+                latest = (message, usage, timestamp)
+            }
+            // A turn served fully from cache writes nothing, so keep walking
+            // back to the newest turn that shows which TTL was in use.
+            if let ttl = cacheTTLSeconds(usage: usage) {
+                return activity(latest!, fallbackDate: fallbackDate, cacheTTLSeconds: ttl)
+            }
+            assistantTurnsLeft -= 1
+            if assistantTurnsLeft == 0 { break }
         }
+        return latest.map { activity($0, fallbackDate: fallbackDate, cacheTTLSeconds: nil) }
+    }
+
+    private static func activity(
+        _ turn: (message: [String: Any], usage: [String: Any], timestamp: Date),
+        fallbackDate: Date,
+        cacheTTLSeconds: Int?
+    ) -> ClaudeSessionActivity {
+        let context = [
+            "input_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens"
+        ].reduce(0) { $0 + ((turn.usage[$1] as? NSNumber)?.intValue ?? 0) }
+        return ClaudeSessionActivity(
+            model: turn.message["model"] as? String,
+            contextTokens: context,
+            lastActivityAt: max(turn.timestamp, fallbackDate),
+            cacheTTLSeconds: cacheTTLSeconds
+        )
+    }
+
+    /// `usage.cache_creation` splits cache writes by TTL.
+    static func cacheTTLSeconds(usage: [String: Any]) -> Int? {
+        guard let creation = usage["cache_creation"] as? [String: Any] else { return nil }
+        let oneHour = (creation["ephemeral_1h_input_tokens"] as? NSNumber)?.intValue ?? 0
+        let fiveMinutes = (creation["ephemeral_5m_input_tokens"] as? NSNumber)?.intValue ?? 0
+        if oneHour > 0 { return 3_600 }
+        if fiveMinutes > 0 { return 300 }
         return nil
     }
 
