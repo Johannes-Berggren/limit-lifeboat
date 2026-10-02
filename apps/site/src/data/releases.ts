@@ -15,6 +15,16 @@ export interface Release {
 
 export const releases: readonly Release[] = [
   {
+    version: "1.1.15",
+    date: "2026-10-02",
+    highlights: [
+      "Added runway gauges, early quota-shortfall warnings, and optional session parking when usage will run out before reset.",
+      "Added a compact icon-only menu bar mode and clearer recovery guidance when a Claude account reaches its limit.",
+      "Hardened account switching for current Codex credential stores, Claude login files, plan tiers, and prompt-cache behavior.",
+      "Refreshed the Claude Code and Codex guides for the latest upstream behavior.",
+    ],
+  },
+  {
     version: "1.1.14",
     date: "2026-09-20",
     highlights: [
