@@ -155,6 +155,7 @@ struct SettingsView: View {
 
                     Section("Appearance") {
                         Toggle("Show organization names", isOn: $settings.showOrganizationNames)
+                        Toggle("Draw usage curves in the gauges", isOn: $settings.usageCurvesEnabled)
                         Toggle(
                             "Show only the lifeboat icon in the menu bar",
                             isOn: $settings.compactMenuBarEnabled

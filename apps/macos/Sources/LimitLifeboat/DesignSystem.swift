@@ -31,6 +31,12 @@ enum DS {
         static let panel: CGFloat = 22
     }
 
+    enum Gauge {
+        static let barHeight: CGFloat = 5
+        static let runwayHeight: CGFloat = 18
+        static let runwayRadius: CGFloat = 5
+    }
+
     enum Motion {
         static let quick = Animation.easeOut(duration: 0.18)
         static let standard = Animation.spring(response: 0.32, dampingFraction: 0.88)

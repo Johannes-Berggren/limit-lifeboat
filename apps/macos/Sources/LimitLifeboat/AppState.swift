@@ -17,6 +17,9 @@ final class AppState: ObservableObject {
     /// Per-account, per-window burn-rate projections; only `.depletesAt`
     /// values render anything in the UI.
     @Published private(set) var burnRateEstimates: [UUID: [String: BurnRateEstimate]] = [:]
+    /// Each window's stored readings, cached per refresh so the gauges can
+    /// draw their usage curves without re-reading the history file.
+    @Published private(set) var windowReadings: [UUID: [String: [BurnRateEstimator.Reading]]] = [:]
     /// Per provider, the current best switch target (recomputed each refresh);
     /// drives the Switch-button highlight and auto-switching for both Claude
     /// and Codex.
@@ -2612,13 +2615,16 @@ final class AppState: ObservableObject {
             return
         }
         var estimates: [String: BurnRateEstimate] = [:]
+        var readingsByWindow: [String: [BurnRateEstimator.Reading]] = [:]
         for window in snapshot.orderedDisplayWindows {
             let readings = historyStore
                 .readings(accountID: profile.id, windowID: window.id)
                 .map { BurnRateEstimator.Reading(timestamp: $0.timestamp, reading: $0.reading) }
             estimates[window.id] = burnRateEstimator.estimate(readings: readings, window: window)
+            readingsByWindow[window.id] = readings
         }
         burnRateEstimates[profile.id] = estimates
+        windowReadings[profile.id] = readingsByWindow
     }
 
     private func recomputeAllEstimates() {
@@ -3058,6 +3064,7 @@ final class AppState: ObservableObject {
             AppLog.history.error("Could not delete switch events for account \(profile.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
         burnRateEstimates[profile.id] = nil
+        windowReadings[profile.id] = nil
         claudeUsagePausedSince[profile.id] = nil
         usagePausedNotificationTasks[profile.id]?.cancel()
         usagePausedNotificationTasks[profile.id] = nil
