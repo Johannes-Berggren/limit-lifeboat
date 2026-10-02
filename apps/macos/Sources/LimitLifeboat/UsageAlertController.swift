@@ -38,6 +38,7 @@ final class UsageAlertController {
     private let thresholdPlanner = ThresholdAlertPlanner()
     private let notifiedResetsKey = "notifiedResetDates"
     private let notifiedPaceKey = "notifiedPaceAlerts"
+    private let notifiedShortfallKey = "notifiedQuotaShortfalls"
     private let weeklyDigestSentKey = "lastWeeklyDigestSentAt"
 
     /// Dedupe state for the weekly digest, persisted alongside the other
@@ -84,7 +85,43 @@ final class UsageAlertController {
     /// A limit runs dry well before it resets while sessions are working.
     /// With a parking suggestion the notification offers it; with another
     /// account to move to, switching comes first.
-    func handleShortfall(_ shortfall: QuotaShortfall, profileLabel: String, hasSwitchCandidate: Bool) {
+    /// Once per stage per window life: a heads-up, then at most one warning.
+    /// Stored as "<profile>|<window>" → [reset epoch, stage]; a reset date
+    /// that moved by more than half an hour is a new life (TUI-sourced reset
+    /// dates jitter by minutes).
+    func handleShortfallIfNew(_ shortfall: QuotaShortfall, profileLabel: String, hasSwitchCandidate: Bool) {
+        let key = "\(shortfall.profileID.uuidString)|\(shortfall.windowID)"
+        let stored = UserDefaults.standard.dictionary(forKey: notifiedShortfallKey) as? [String: [Double]] ?? [:]
+        if let previous = stored[key], previous.count == 2,
+           abs(previous[0] - shortfall.resetAt.timeIntervalSince1970) < 1_800,
+           Int(previous[1]) >= shortfall.stage.rawValue {
+            return
+        }
+        markShortfallNotified(shortfall)
+        handleShortfall(shortfall, profileLabel: profileLabel, hasSwitchCandidate: hasSwitchCandidate)
+    }
+
+    func markShortfallNotified(_ shortfall: QuotaShortfall) {
+        var stored = UserDefaults.standard.dictionary(forKey: notifiedShortfallKey) as? [String: [Double]] ?? [:]
+        stored["\(shortfall.profileID.uuidString)|\(shortfall.windowID)"] = [
+            shortfall.resetAt.timeIntervalSince1970,
+            Double(shortfall.stage.rawValue)
+        ]
+        UserDefaults.standard.set(stored, forKey: notifiedShortfallKey)
+    }
+
+    /// Records a pace alert as delivered without posting it, for when the
+    /// shortfall alert already covers the same window.
+    func suppressPaceAlert(_ alert: PaceAlert) {
+        markWindowNotified(
+            defaultsKey: notifiedPaceKey,
+            profileID: alert.profileID,
+            windowID: alert.windowID,
+            date: alert.resetDate ?? Date()
+        )
+    }
+
+    private func handleShortfall(_ shortfall: QuotaShortfall, profileLabel: String, hasSwitchCandidate: Bool) {
         let now = Date()
         var body = QuotaShortfallText.headline(shortfall, now: now) + " " + QuotaShortfallText.detail(shortfall)
         let category: String?
@@ -245,8 +282,8 @@ final class UsageAlertController {
     /// so UserDefaults does not accumulate dead entries forever.
     func forgetProfile(_ profileID: UUID) {
         let prefix = "\(profileID.uuidString)|"
-        for defaultsKey in [notifiedResetsKey, notifiedPaceKey] {
-            let stored = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double] ?? [:]
+        for defaultsKey in [notifiedResetsKey, notifiedPaceKey, notifiedShortfallKey] {
+            let stored = UserDefaults.standard.dictionary(forKey: defaultsKey) ?? [:]
             let remaining = stored.filter { !$0.key.hasPrefix(prefix) }
             UserDefaults.standard.set(remaining, forKey: defaultsKey)
         }

@@ -338,21 +338,26 @@ final class SessionMonitor: ObservableObject {
         row.session.provider == .claude
     }
 
+    /// Parks the given sessions (skipping starred, Codex and gone ones) and
+    /// returns how many were parked: zero when the hook could not be
+    /// installed, with `parkError` saying why.
+    @discardableResult
     func park(
         pids: [Int32],
         reason: SessionParkState.Reason,
         releaseAt: Date? = nil,
         profileID: UUID? = nil
-    ) {
+    ) -> Int {
         parkError = nil
         do {
             try installParkHook()
         } catch {
             parkError = error.localizedDescription
-            return
+            return 0
         }
         let now = Date()
-        for row in rows where pids.contains(row.id) && canPark(row) && !isStarred(row) {
+        var count = 0
+        for row in rows where pids.contains(row.id) && canPark(row) && !isStarred(row) && parked[row.id] == nil {
             parked[row.id] = SessionParkState.Entry(
                 pid: row.session.pid,
                 startedAt: row.session.startedAt,
@@ -362,9 +367,11 @@ final class SessionMonitor: ObservableObject {
                 releaseAt: releaseAt,
                 profileID: profileID
             )
+            count += 1
         }
         lastParkedAt = now
         writeParkState(now: now)
+        return count
     }
 
     func resume(_ pid: Int32) {

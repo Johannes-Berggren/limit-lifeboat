@@ -300,7 +300,11 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                         if sessionMonitor.isParkHookInstalled {
                             LabeledContent("Claude Code park hook") {
-                                Button("Remove") { sessionMonitor.uninstallParkHook() }
+                                Button("Remove") {
+                                    // Auto-protect would only put it back.
+                                    settings.autoProtectEnabled = false
+                                    sessionMonitor.uninstallParkHook()
+                                }
                             }
                         }
                         if let error = sessionMonitor.parkError {

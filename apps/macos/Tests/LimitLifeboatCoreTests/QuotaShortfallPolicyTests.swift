@@ -87,6 +87,30 @@ final class QuotaShortfallPolicyTests: XCTestCase {
         XCTAssertEqual(settled.suggestion?.pids, [1])
     }
 
+    func testAnUnchangedPaceAfterParkingDoesNotAskForMore() throws {
+        // Half of four sessions had to pause; two already are. The pace still
+        // reflects all four, since it looks back past the park.
+        let sessions = [
+            session(1, activeSecondsAgo: 5),
+            session(2, activeSecondsAgo: 10),
+            session(3, activeSecondsAgo: 5, parked: true),
+            session(4, activeSecondsAgo: 5, parked: true),
+        ]
+        let shortfall = try XCTUnwrap(evaluate(
+            emptyIn: 90 * 60, resetIn: 3 * 3_600, sessions: sessions, lastParkedAt: now.addingTimeInterval(-2 * 3_600)
+        ))
+        XCTAssertNil(shortfall.suggestion)
+    }
+
+    func testSessionsWithoutATranscriptYetAreParkedLast() throws {
+        let fresh = QuotaShortfallPolicy.Session(pid: 9, provider: .claude, lastActivityAt: nil, isParkable: true)
+        let shortfall = try XCTUnwrap(evaluate(
+            emptyIn: 90 * 60, resetIn: 3 * 3_600,
+            sessions: [fresh, session(1, activeSecondsAgo: 120)]
+        ))
+        XCTAssertEqual(shortfall.suggestion?.pids, [1])
+    }
+
     func testText() throws {
         let shortfall = try XCTUnwrap(evaluate(
             emptyIn: 20 * 60, resetIn: 2 * 3_600,

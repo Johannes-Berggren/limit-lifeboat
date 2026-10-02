@@ -59,7 +59,16 @@ public struct SessionParkState: Codable, Equatable, Sendable {
 
     public static let fileName = "session-park.json"
 
+    /// With nothing parked the file is removed instead: the hook's first
+    /// check is whether it exists, so every tool call in every session stays
+    /// a single `test -f` until something is actually parked.
     public func write(to url: URL) throws {
+        guard !parked.isEmpty else {
+            if FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
+            return
+        }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .secondsSince1970
         try encoder.encode(self).write(to: url, options: .atomic)

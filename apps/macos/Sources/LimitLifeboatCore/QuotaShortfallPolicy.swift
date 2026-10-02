@@ -181,6 +181,7 @@ public struct QuotaShortfallPolicy: Sendable {
             parkedCount: mine.filter(\.isParked).count,
             suggestion: settling ? nil : suggestion(
                 active: active,
+                alreadyParked: mine.filter(\.isParked).count,
                 timeToEmpty: timeToEmpty,
                 timeToReset: best.resetAt.timeIntervalSince(now)
             )
@@ -191,8 +192,15 @@ public struct QuotaShortfallPolicy: Sendable {
     /// timeToEmpty / timeToReset of today's. Burn is split evenly across the
     /// working sessions — crude, but the only attribution there is — so that
     /// fraction of them keeps going and the rest pause.
+    ///
+    /// The pace is measured over a long lookback (90 minutes for a session
+    /// window, two days for a weekly one), so sessions parked since then
+    /// still count among the burners it reflects. Counting them, and
+    /// subtracting them from what is needed, keeps an unchanged projection
+    /// from asking for ever more parks.
     func suggestion(
         active: [Session],
+        alreadyParked: Int = 0,
         timeToEmpty: TimeInterval,
         timeToReset: TimeInterval
     ) -> QuotaShortfall.ParkSuggestion? {
@@ -200,10 +208,13 @@ public struct QuotaShortfallPolicy: Sendable {
             return nil
         }
         let share = max(0, min(1, 1 - timeToEmpty / timeToReset))
-        let needed = Int((Double(active.count) * share).rounded(.up))
+        let burners = active.count + alreadyParked
+        let needed = Int((Double(burners) * share).rounded(.up)) - alreadyParked
+        // A session with no transcript yet has most likely just started; it
+        // sorts as the most recent, never as the stalest.
         let candidates = active
             .filter { $0.isParkable && !$0.isStarred }
-            .sorted { ($0.lastActivityAt ?? .distantPast, $0.pid) < ($1.lastActivityAt ?? .distantPast, $1.pid) }
+            .sorted { ($0.lastActivityAt ?? .distantFuture, $0.pid) < ($1.lastActivityAt ?? .distantFuture, $1.pid) }
         guard needed > 0, !candidates.isEmpty else {
             return nil
         }
