@@ -119,9 +119,32 @@ public enum MemoryGuardHookScript {
     }
 }
 
-/// Adds or removes the Memory Guard `UserPromptSubmit` hook in Claude Code's
-/// user settings, leaving every other setting and hook untouched.
+/// Adds or removes one of Limit Lifeboat's Claude Code hooks in the user
+/// settings, leaving every other setting and hook untouched.
 public struct ClaudeHookInstaller {
+    /// Which hook this installer manages: the event it registers under, the
+    /// script file name that marks its entries as ours, and its timeout.
+    public struct Hook: Equatable, Sendable {
+        public var event: String
+        public var scriptFileName: String
+        public var timeoutSeconds: Int
+        public var matcher: String?
+
+        public init(event: String, scriptFileName: String, timeoutSeconds: Int, matcher: String? = nil) {
+            self.event = event
+            self.scriptFileName = scriptFileName
+            self.timeoutSeconds = timeoutSeconds
+            self.matcher = matcher
+        }
+
+        /// Holds a brand-new session's first prompt while memory is critical.
+        public static let memoryGuard = Hook(
+            event: "UserPromptSubmit",
+            scriptFileName: MemoryGuardHookScript.fileName,
+            timeoutSeconds: 5
+        )
+    }
+
     public enum InstallerError: LocalizedError, Equatable {
         case unexpectedHooksShape
 
@@ -142,11 +165,15 @@ public struct ClaudeHookInstaller {
         case needsRepair
     }
 
-    private static let event = "UserPromptSubmit"
+    private let hook: Hook
     private let file: ClaudeSettingsFile
 
-    public init(settingsURL: URL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".claude/settings.json")) {
+    public init(
+        hook: Hook = .memoryGuard,
+        settingsURL: URL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/settings.json")
+    ) {
+        self.hook = hook
         self.file = ClaudeSettingsFile(url: settingsURL)
     }
 
@@ -154,7 +181,7 @@ public struct ClaudeHookInstaller {
         guard let settings = try? file.read(), let entries = try? entries(in: settings) else {
             return .notInstalled
         }
-        let commands = entries.flatMap(Self.managedCommands)
+        let commands = entries.flatMap(managedCommands)
         guard !commands.isEmpty else { return .notInstalled }
         let expected = MemoryGuardHookScript.shellQuoted(expectedScriptPath)
         return commands.allSatisfy { $0 == expected } ? .installed : .needsRepair
@@ -163,10 +190,13 @@ public struct ClaudeHookInstaller {
     public func install(scriptPath: String) throws {
         var settings = try file.read()
         let command = MemoryGuardHookScript.shellQuoted(scriptPath)
-        let managed: [String: Any] = [
-            "hooks": [["type": "command", "command": command, "timeout": 5]]
+        var managed: [String: Any] = [
+            "hooks": [["type": "command", "command": command, "timeout": hook.timeoutSeconds]]
         ]
-        var entries = try entries(in: settings).filter { Self.managedCommands($0).isEmpty }
+        if let matcher = hook.matcher {
+            managed["matcher"] = matcher
+        }
+        var entries = try entries(in: settings).filter { managedCommands($0).isEmpty }
         entries.append(managed)
         try setEntries(entries, in: &settings)
         try file.write(settings)
@@ -176,16 +206,16 @@ public struct ClaudeHookInstaller {
         guard file.exists else { return }
         var settings = try file.read()
         let current = try entries(in: settings)
-        let remaining = current.filter { Self.managedCommands($0).isEmpty }
+        let remaining = current.filter { managedCommands($0).isEmpty }
         guard remaining.count != current.count else { return }
         try setEntries(remaining, in: &settings)
         try file.write(settings)
     }
 
-    private static func managedCommands(_ entry: [String: Any]) -> [String] {
+    private func managedCommands(_ entry: [String: Any]) -> [String] {
         (entry["hooks"] as? [[String: Any]] ?? [])
             .compactMap { $0["command"] as? String }
-            .filter { $0.contains(MemoryGuardHookScript.fileName) }
+            .filter { $0.contains(hook.scriptFileName) }
     }
 
     /// Refuses anything but the documented shape rather than coercing it:
@@ -194,7 +224,7 @@ public struct ClaudeHookInstaller {
     private func entries(in settings: [String: Any]) throws -> [[String: Any]] {
         guard let rawHooks = settings["hooks"] else { return [] }
         guard let hooks = rawHooks as? [String: Any] else { throw InstallerError.unexpectedHooksShape }
-        guard let rawEntries = hooks[Self.event] else { return [] }
+        guard let rawEntries = hooks[hook.event] else { return [] }
         guard let entries = rawEntries as? [[String: Any]] else { throw InstallerError.unexpectedHooksShape }
         return entries
     }
@@ -205,7 +235,7 @@ public struct ClaudeHookInstaller {
             guard let existing = rawHooks as? [String: Any] else { throw InstallerError.unexpectedHooksShape }
             hooks = existing
         }
-        hooks[Self.event] = entries.isEmpty ? nil : entries
+        hooks[hook.event] = entries.isEmpty ? nil : entries
         settings["hooks"] = hooks.isEmpty ? nil : hooks
     }
 }

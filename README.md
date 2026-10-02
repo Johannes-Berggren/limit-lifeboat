@@ -13,14 +13,25 @@ possible it keeps a protected recovery directory and says so, instead of
 guessing.
 
 Switching never touches `settings.json`, MCP server definitions, hooks,
-permissions, or local history. Two optional features write to Claude Code's
-settings, both off until you turn them on: the Memory Guard hook, which
-changes only its own entry, and budget modes, which set a few model and effort
-keys and restore your previous values when you switch back to Quality.
+permissions, or local history. Three optional features write to Claude Code's
+settings, all off until you use them: the Memory Guard hook and the session
+park hook, which each change only their own entry, and budget modes, which set
+a few model and effort keys and restore your previous values when you switch
+back to Quality.
 
 The menu-bar app also shows what every saved account has left — session,
 weekly, and model-scoped windows for Claude, the 7-day window for Codex — so
-you can see which account to move to before you move. When OpenAI supplies
+you can see which account to move to before you move. Each gauge spans the
+window from its start to its reset and traces how fast it has filled, so a
+limit that will run dry before it resets shows as a red stretch at the end.
+
+When that happens with agent sessions working, the app says so and offers to
+park the least recently active Claude Code sessions, so the ones you starred as
+important finish before the reset. A parked session stops at its next tool
+call and continues when you resume it or the limit resets; nothing is killed
+mid-request. Parking adds a `PreToolUse` hook the first time you use it, and the
+hook lets everything through whenever the app is not running. Set
+`LIMIT_LIFEBOAT_PARK=off` for sessions that must never be parked. When OpenAI supplies
 earned Codex rate-limit resets, it shows the authoritative available count for
 each Codex account.
 

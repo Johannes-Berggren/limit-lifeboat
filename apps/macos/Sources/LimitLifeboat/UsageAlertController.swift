@@ -14,6 +14,10 @@ enum NotificationSwitchAction {
     static let categoryThisAccount = "limit-switch-here"
     static let categoryRefresh = "limit-refresh"
     static let categoryBudget = "limit-budget-mode"
+    static let categoryPark = "limit-park-sessions"
+    static let categoryParkOrSwitch = "limit-park-or-switch"
+    static let parkActionID = "park-sessions"
+    static let parkActionValue = "park"
     static let budgetActionID = "use-budget-mode"
     static let budgetActionValue = "budget"
     static let budgetModeKey = "budgetMode"
@@ -34,6 +38,7 @@ final class UsageAlertController {
     private let thresholdPlanner = ThresholdAlertPlanner()
     private let notifiedResetsKey = "notifiedResetDates"
     private let notifiedPaceKey = "notifiedPaceAlerts"
+    private let notifiedShortfallKey = "notifiedQuotaShortfalls"
     private let weeklyDigestSentKey = "lastWeeklyDigestSentAt"
 
     /// Dedupe state for the weekly digest, persisted alongside the other
@@ -74,6 +79,86 @@ final class UsageAlertController {
                 NotificationSwitchAction.actionKey: NotificationSwitchAction.budgetActionValue,
                 NotificationSwitchAction.budgetModeKey: mode.rawValue
             ]
+        )
+    }
+
+    /// A limit runs dry well before it resets while sessions are working.
+    /// With a parking suggestion the notification offers it; with another
+    /// account to move to, switching comes first.
+    /// Once per stage per window life: a heads-up, then at most one warning.
+    /// Stored as "<profile>|<window>" → [reset epoch, stage]; a reset date
+    /// that moved by more than half an hour is a new life (TUI-sourced reset
+    /// dates jitter by minutes).
+    func handleShortfallIfNew(_ shortfall: QuotaShortfall, profileLabel: String, hasSwitchCandidate: Bool) {
+        let key = "\(shortfall.profileID.uuidString)|\(shortfall.windowID)"
+        let stored = UserDefaults.standard.dictionary(forKey: notifiedShortfallKey) as? [String: [Double]] ?? [:]
+        if let previous = stored[key], previous.count == 2,
+           abs(previous[0] - shortfall.resetAt.timeIntervalSince1970) < 1_800,
+           Int(previous[1]) >= shortfall.stage.rawValue {
+            return
+        }
+        markShortfallNotified(shortfall)
+        handleShortfall(shortfall, profileLabel: profileLabel, hasSwitchCandidate: hasSwitchCandidate)
+    }
+
+    func markShortfallNotified(_ shortfall: QuotaShortfall) {
+        var stored = UserDefaults.standard.dictionary(forKey: notifiedShortfallKey) as? [String: [Double]] ?? [:]
+        stored["\(shortfall.profileID.uuidString)|\(shortfall.windowID)"] = [
+            shortfall.resetAt.timeIntervalSince1970,
+            Double(shortfall.stage.rawValue)
+        ]
+        UserDefaults.standard.set(stored, forKey: notifiedShortfallKey)
+    }
+
+    /// Records a pace alert as delivered without posting it, for when the
+    /// shortfall alert already covers the same window.
+    func suppressPaceAlert(_ alert: PaceAlert) {
+        markWindowNotified(
+            defaultsKey: notifiedPaceKey,
+            profileID: alert.profileID,
+            windowID: alert.windowID,
+            date: alert.resetDate ?? Date()
+        )
+    }
+
+    private func handleShortfall(_ shortfall: QuotaShortfall, profileLabel: String, hasSwitchCandidate: Bool) {
+        let now = Date()
+        var body = QuotaShortfallText.headline(shortfall, now: now) + " " + QuotaShortfallText.detail(shortfall)
+        let category: String?
+        var userInfo: [String: Any] = [NotificationSwitchAction.providerKey: shortfall.provider.rawValue]
+        switch (shortfall.suggestion != nil, hasSwitchCandidate) {
+        case (true, true):
+            category = NotificationSwitchAction.categoryParkOrSwitch
+            userInfo[NotificationSwitchAction.actionKey] = NotificationSwitchAction.parkActionValue
+        case (true, false):
+            category = NotificationSwitchAction.categoryPark
+            userInfo[NotificationSwitchAction.actionKey] = NotificationSwitchAction.parkActionValue
+        case (false, true):
+            category = NotificationSwitchAction.categoryBest
+            userInfo = switchUserInfo(provider: shortfall.provider, targetID: nil)
+        case (false, false):
+            category = nil
+            if shortfall.provider == .claude {
+                body += " Star the sessions that matter in the menu so they keep going."
+            }
+        }
+        postNotification(
+            identifier: "shortfall-\(shortfall.profileID.uuidString)-\(shortfall.windowID)",
+            title: shortfall.stage == .warning
+                ? "\(profileLabel): \(shortfall.windowLabel) almost empty"
+                : "\(profileLabel): \(shortfall.windowLabel) won't last until the reset",
+            body: body,
+            categoryIdentifier: category,
+            userInfo: userInfo
+        )
+    }
+
+    func handleShortfallAutoParked(_ shortfall: QuotaShortfall, count: Int) {
+        postNotification(
+            identifier: "shortfall-parked-\(shortfall.profileID.uuidString)-\(shortfall.windowID)",
+            title: count == 1 ? "Parked 1 session to save quota" : "Parked \(count) sessions to save quota",
+            body: QuotaShortfallText.headline(shortfall, now: Date())
+                + " Starred sessions keep going; parked ones resume when the limit resets, or from the menu."
         )
     }
 
@@ -197,8 +282,8 @@ final class UsageAlertController {
     /// so UserDefaults does not accumulate dead entries forever.
     func forgetProfile(_ profileID: UUID) {
         let prefix = "\(profileID.uuidString)|"
-        for defaultsKey in [notifiedResetsKey, notifiedPaceKey] {
-            let stored = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double] ?? [:]
+        for defaultsKey in [notifiedResetsKey, notifiedPaceKey, notifiedShortfallKey] {
+            let stored = UserDefaults.standard.dictionary(forKey: defaultsKey) ?? [:]
             let remaining = stored.filter { !$0.key.hasPrefix(prefix) }
             UserDefaults.standard.set(remaining, forKey: defaultsKey)
         }
@@ -328,7 +413,26 @@ final class UsageAlertController {
             ],
             intentIdentifiers: []
         )
-        center.setNotificationCategories([switchToBest, switchToThisAccount, refreshNow, useCheaperMode])
+        let parkSessions = UNNotificationAction(
+            identifier: NotificationSwitchAction.parkActionID,
+            title: "Park Sessions"
+        )
+        let park = UNNotificationCategory(
+            identifier: NotificationSwitchAction.categoryPark,
+            actions: [parkSessions],
+            intentIdentifiers: []
+        )
+        let parkOrSwitch = UNNotificationCategory(
+            identifier: NotificationSwitchAction.categoryParkOrSwitch,
+            actions: [
+                UNNotificationAction(identifier: NotificationSwitchAction.actionID, title: "Switch to Best Account"),
+                parkSessions
+            ],
+            intentIdentifiers: []
+        )
+        center.setNotificationCategories([
+            switchToBest, switchToThisAccount, refreshNow, useCheaperMode, park, parkOrSwitch
+        ])
     }
 
     /// Per-window near-limit alerts. Session (5h) windows only notify when the

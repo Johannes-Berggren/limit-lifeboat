@@ -289,6 +289,33 @@ struct SettingsView: View {
                         }
                     }
 
+                    Section("Quota Runway") {
+                        Toggle("Warn when a limit will run dry well before it resets", isOn: $settings.shortfallAlertsEnabled)
+                        Toggle("Park unstarred sessions automatically", isOn: $settings.autoProtectEnabled)
+                        Label(
+                            "When sessions are using quota faster than it lasts, Limit Lifeboat offers to park the least recently active ones so the rest finish before the reset. Star a session's project in the menu to keep it running. A parked Claude Code session stops at its next tool call and continues when you resume it or the limit resets. Codex sessions are shown but can't be parked. Set LIMIT_LIFEBOAT_PARK=off for sessions that must never be parked.",
+                            systemImage: "info.circle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        if sessionMonitor.isParkHookInstalled {
+                            LabeledContent("Claude Code park hook") {
+                                Button("Remove") {
+                                    // Auto-protect would only put it back.
+                                    settings.autoProtectEnabled = false
+                                    sessionMonitor.uninstallParkHook()
+                                }
+                            }
+                        }
+                        if let error = sessionMonitor.parkError {
+                            StatusBanner(
+                                text: error,
+                                systemImage: "exclamationmark.triangle.fill",
+                                color: DS.danger
+                            )
+                        }
+                    }
+
                     Section("Updates") {
                         LabeledContent("Version", value: AppInfo.version)
                         if updater.isEnabled {

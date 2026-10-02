@@ -192,6 +192,24 @@ public enum DurationPhrase {
         let days = Int((Double(hours) / 24).rounded(.up))
         return "\(days)d"
     }
+
+    /// Two units for spans under ten hours ("1h 35m"), for projections where
+    /// "2h" and "2h" side by side would hide the gap that matters. Rounded to
+    /// the nearest 5 minutes past the first hour — it is an estimate, and
+    /// minute precision would overstate it.
+    public static func precise(_ seconds: TimeInterval) -> String {
+        let minutes = Int((max(0, seconds) / 60).rounded())
+        if minutes < 60 {
+            return "\(max(1, minutes))m"
+        }
+        guard minutes < 600 else {
+            return short(seconds)
+        }
+        let rounded = Int((Double(minutes) / 5).rounded()) * 5
+        let hours = rounded / 60
+        let rest = rounded % 60
+        return rest == 0 ? "\(hours)h" : "\(hours)h \(rest)m"
+    }
 }
 
 /// User-facing reset timing shared by quota gauges. A parsed date wins over

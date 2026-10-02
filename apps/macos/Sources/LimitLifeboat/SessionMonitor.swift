@@ -24,6 +24,16 @@ final class SessionMonitor: ObservableObject {
     @Published private(set) var trend = MemoryTrend()
     @Published private(set) var isPromptHookInstalled = false
     @Published private(set) var promptHookError: String?
+    /// Sessions held at their next tool call, by pid.
+    @Published private(set) var parked: [Int32: SessionParkState.Entry] = [:]
+    /// Parked sessions whose hook is actually waiting — they reached a tool
+    /// call — as opposed to still finishing the turn they were in.
+    @Published private(set) var waitingPIDs: Set<Int32> = []
+    /// Projects (working directories) marked important: never parked.
+    @Published private(set) var starredProjects: Set<String>
+    @Published private(set) var isParkHookInstalled = false
+    @Published private(set) var parkError: String?
+    private(set) var lastParkedAt: Date?
 
     private let settings: SettingsStore
     private let stateDirectory: URL
@@ -37,6 +47,8 @@ final class SessionMonitor: ObservableObject {
     private var transcriptBindings = ClaudeTranscriptReader.Bindings()
     private var hasCompletedFirstSample = false
     private let hookInstaller = ClaudeHookInstaller()
+    private let parkHookInstaller = ClaudeHookInstaller(hook: SessionParkHookScript.hook)
+    private static let starredProjectsKey = "starredSessionProjects"
     private let notify: (MemoryGuardAssessment) -> Void
     private let notifyColdCache: ([ColdCacheAlertPolicy.Candidate]) -> Void
     private let policy = MemoryGuardPolicy()
@@ -62,6 +74,7 @@ final class SessionMonitor: ObservableObject {
         self.insightStore = SessionInsightStore(applicationSupportDirectory: stateDirectory)
         self.notify = notify
         self.notifyColdCache = notifyColdCache
+        self.starredProjects = Set(UserDefaults.standard.stringArray(forKey: Self.starredProjectsKey) ?? [])
     }
 
     private var stateFileURL: URL {
@@ -71,6 +84,19 @@ final class SessionMonitor: ObservableObject {
     private var hookScriptURL: URL {
         stateDirectory.appendingPathComponent("hooks", isDirectory: true)
             .appendingPathComponent(MemoryGuardHookScript.fileName)
+    }
+
+    private var parkStateURL: URL {
+        stateDirectory.appendingPathComponent(SessionParkState.fileName)
+    }
+
+    private var parkHookScriptURL: URL {
+        stateDirectory.appendingPathComponent("hooks", isDirectory: true)
+            .appendingPathComponent(SessionParkHookScript.fileName)
+    }
+
+    private var parkWaitingDirectory: URL {
+        stateDirectory.appendingPathComponent("hooks/parked", isDirectory: true)
     }
 
     func start() {
@@ -89,12 +115,19 @@ final class SessionMonitor: ObservableObject {
             setPromptHookInstalled(true)
         }
         refreshPromptHookStatus()
+        // A previous launch may have left sessions parked; this one starts
+        // with none, and says so before the hook's staleness check would.
+        writeParkState(now: Date())
+        if parkHookInstaller.status(expectedScriptPath: parkHookScriptURL.path) != .notInstalled {
+            try? installParkHook()
+        }
+        isParkHookInstalled = parkHookInstaller.status(expectedScriptPath: parkHookScriptURL.path) == .installed
         scanTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.scan()
                 // Cheap enough to watch closely while agents run; otherwise
                 // only a slow heartbeat until the next session appears.
-                let busy = self.map { !$0.rows.isEmpty || $0.assessment.level > .ok } ?? false
+                let busy = self.map { !$0.rows.isEmpty || $0.assessment.level > .ok || !$0.parked.isEmpty } ?? false
                 try? await Task.sleep(nanoseconds: UInt64(busy ? 20 : 90) * 1_000_000_000)
             }
         }
@@ -192,6 +225,7 @@ final class SessionMonitor: ObservableObject {
         try? MemoryGuardState(assessment: assessment, now: now).write(to: stateFileURL)
 
         recordSample(rows: rows, now: now)
+        refreshParks(rows: rows, now: now)
 
         if assessment.level == .ok {
             lastNotified = nil
@@ -276,6 +310,130 @@ final class SessionMonitor: ObservableObject {
         )
         try Data(script.utf8).write(to: hookScriptURL, options: .atomic)
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hookScriptURL.path)
+    }
+
+    // MARK: - Parking
+
+    func isStarred(_ row: AgentSessionRow) -> Bool {
+        row.session.workingDirectory.map(starredProjects.contains) ?? false
+    }
+
+    func setStarred(_ starred: Bool, for row: AgentSessionRow) {
+        guard let directory = row.session.workingDirectory else { return }
+        if starred {
+            starredProjects.insert(directory)
+            // Marking something important while it is parked means "let it run".
+            for other in rows where other.session.workingDirectory == directory {
+                parked[other.id] = nil
+            }
+            writeParkState(now: Date())
+        } else {
+            starredProjects.remove(directory)
+        }
+        UserDefaults.standard.set(starredProjects.sorted(), forKey: Self.starredProjectsKey)
+    }
+
+    /// Only Claude Code runs the park hook.
+    func canPark(_ row: AgentSessionRow) -> Bool {
+        row.session.provider == .claude
+    }
+
+    /// Parks the given sessions (skipping starred, Codex and gone ones) and
+    /// returns how many were parked: zero when the hook could not be
+    /// installed, with `parkError` saying why.
+    @discardableResult
+    func park(
+        pids: [Int32],
+        reason: SessionParkState.Reason,
+        releaseAt: Date? = nil,
+        profileID: UUID? = nil
+    ) -> Int {
+        parkError = nil
+        do {
+            try installParkHook()
+        } catch {
+            parkError = error.localizedDescription
+            return 0
+        }
+        let now = Date()
+        var count = 0
+        for row in rows where pids.contains(row.id) && canPark(row) && !isStarred(row) && parked[row.id] == nil {
+            parked[row.id] = SessionParkState.Entry(
+                pid: row.session.pid,
+                startedAt: row.session.startedAt,
+                project: row.session.projectName,
+                reason: reason,
+                parkedAt: now,
+                releaseAt: releaseAt,
+                profileID: profileID
+            )
+            count += 1
+        }
+        lastParkedAt = now
+        writeParkState(now: now)
+        return count
+    }
+
+    func resume(_ pid: Int32) {
+        parked[pid] = nil
+        writeParkState(now: Date())
+    }
+
+    /// Resumes every park matching `predicate` (all of them by default).
+    func resumeAll(where predicate: (SessionParkState.Entry) -> Bool = { _ in true }) {
+        let before = parked.count
+        parked = parked.filter { !predicate($0.value) }
+        if parked.count != before {
+            writeParkState(now: Date())
+        }
+    }
+
+    /// Drops parks for sessions that exited (or whose pid was reused) and
+    /// those whose quota has come back, then rewrites the state: the write is
+    /// also the heartbeat that tells the hook the app is still running.
+    private func refreshParks(rows: [AgentSessionRow], now: Date) {
+        let live = Dictionary(rows.map { ($0.id, $0.session.startedAt) }, uniquingKeysWith: { first, _ in first })
+        parked = parked.filter { pid, entry in
+            guard let startedAt = live[pid], abs(startedAt.timeIntervalSince(entry.startedAt)) < 1 else {
+                return false
+            }
+            return entry.releaseAt.map { $0 > now } ?? true
+        }
+        writeParkState(now: now)
+    }
+
+    private func writeParkState(now: Date) {
+        let entries = parked.values.sorted { $0.pid < $1.pid }
+        try? SessionParkState(parked: entries, now: now).write(to: parkStateURL)
+        let markers = (try? FileManager.default.contentsOfDirectory(atPath: parkWaitingDirectory.path)) ?? []
+        waitingPIDs = Set(markers.compactMap(Int32.init)).intersection(parked.keys)
+    }
+
+    private func installParkHook() throws {
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(
+            at: parkHookScriptURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let script = SessionParkHookScript.contents(stateFile: parkStateURL, waitingDirectory: parkWaitingDirectory)
+        try Data(script.utf8).write(to: parkHookScriptURL, options: .atomic)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: parkHookScriptURL.path)
+        if parkHookInstaller.status(expectedScriptPath: parkHookScriptURL.path) != .installed {
+            try parkHookInstaller.install(scriptPath: parkHookScriptURL.path)
+        }
+        isParkHookInstalled = true
+    }
+
+    /// Removes the park hook from Claude Code, resuming anything parked.
+    func uninstallParkHook() {
+        resumeAll()
+        do {
+            try parkHookInstaller.uninstall()
+            parkError = nil
+        } catch {
+            parkError = error.localizedDescription
+        }
+        isParkHookInstalled = parkHookInstaller.status(expectedScriptPath: parkHookScriptURL.path) == .installed
     }
 
     func revealInFinder(_ row: AgentSessionRow) {
