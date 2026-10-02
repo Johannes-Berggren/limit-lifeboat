@@ -58,11 +58,14 @@ public struct UsageRunwayBuilder: Sendable {
 
     /// Nil when the window has no timeline to draw on (no reset date or
     /// length), the reset already passed, or there is no history this life.
-    /// The gauge then falls back to its plain fill bar.
+    /// The gauge then falls back to its plain fill bar. `showsPace: false`
+    /// (stale or pre-reset readings) draws the history alone: no projection,
+    /// dry stretch or rate from numbers the card does not trust.
     public func runway(
         window: UsageWindow,
         readings: [BurnRateEstimator.Reading],
         depletesAt: Date?,
+        showsPace: Bool = true,
         now: Date
     ) -> UsageRunway? {
         guard let resetDate = window.resetDate,
@@ -95,7 +98,9 @@ public struct UsageRunwayBuilder: Sendable {
         var projectionEnd: UsageRunway.Point?
         var dryStart: Double?
         var rate: Double?
-        if let depletesAt, depletesAt > now, depletesAt < resetDate {
+        if !showsPace {
+            // History only.
+        } else if let depletesAt, depletesAt > now, depletesAt < resetDate {
             let dryX = x(depletesAt)
             projectionEnd = UsageRunway.Point(x: dryX, y: 1)
             dryStart = dryX

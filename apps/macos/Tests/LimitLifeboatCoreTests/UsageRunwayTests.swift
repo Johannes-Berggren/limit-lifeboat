@@ -109,6 +109,21 @@ final class UsageRunwayTests: XCTestCase {
         XCTAssertNil(builder.runway(window: elapsed, readings: [reading(minutesAgo: 10, 5)], depletesAt: nil, now: now))
     }
 
+    func testUntrustedReadingsDrawHistoryWithoutPace() throws {
+        let window = sessionWindow(usedPercent: 80, resetIn: 2 * 3_600)
+        let runway = try XCTUnwrap(builder.runway(
+            window: window,
+            readings: [reading(minutesAgo: 60, 50)],
+            depletesAt: now.addingTimeInterval(20 * 60),
+            showsPace: false,
+            now: now
+        ))
+        XCTAssertFalse(runway.history.isEmpty)
+        XCTAssertNil(runway.projectionEnd)
+        XCTAssertNil(runway.dryStart)
+        XCTAssertNil(runway.ratePerHour)
+    }
+
     func testRatePhrase() {
         XCTAssertNil(UsageRatePhrase.text(perHour: 0))
         XCTAssertEqual(UsageRatePhrase.text(perHour: 0.42), "0.4%/h")

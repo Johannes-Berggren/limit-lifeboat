@@ -726,7 +726,8 @@ struct AccountRowView: View {
                             ? presentation.paceForecast?.depletesAt
                             : nil,
                         readings: windowReadings[window.id],
-                        projectedDepletion: projectedDepletion(for: window)
+                        projectedDepletion: projectedDepletion(for: window),
+                        showsPace: presentation.showsPace
                     )
                 }
             }
@@ -1172,6 +1173,9 @@ struct UsageGauge: View {
     var readings: [BurnRateEstimator.Reading]? = nil
     /// This window's own projected depletion, drawn on its runway.
     var projectedDepletion: Date? = nil
+    /// False for readings the card flags as stale or pre-reset: the runway
+    /// then draws history only, with no pace.
+    var showsPace = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -1257,6 +1261,7 @@ struct UsageGauge: View {
             window: window,
             readings: readings,
             depletesAt: projectedDepletion,
+            showsPace: showsPace,
             now: now
         )
     }
