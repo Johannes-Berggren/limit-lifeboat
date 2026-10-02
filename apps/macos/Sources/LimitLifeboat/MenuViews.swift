@@ -725,7 +725,9 @@ struct AccountRowView: View {
                         depletesAt: presentation.paceForecast?.windowID == window.id
                             ? presentation.paceForecast?.depletesAt
                             : nil,
-                        readings: windowReadings[window.id],
+                        // Curves on (a non-empty map) but no history for this
+                        // window: an empty series, so it still lines up.
+                        readings: windowReadings.isEmpty ? nil : windowReadings[window.id] ?? [],
                         projectedDepletion: projectedDepletion(for: window),
                         showsPace: presentation.showsPace
                     )
@@ -1204,6 +1206,9 @@ struct UsageGauge: View {
                         .animation(reduceMotion ? nil : DS.Motion.progress, value: window.usedFraction)
                     }
                     .frame(height: DS.Gauge.barHeight)
+                    // With curves on, a gauge without history keeps the
+                    // runway's height so captions line up across the card.
+                    .frame(height: readings == nil ? nil : DS.Gauge.runwayHeight)
                 }
 
                 if let caption = caption(now: context.date) {
