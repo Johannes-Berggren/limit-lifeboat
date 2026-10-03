@@ -325,9 +325,9 @@ public struct ClaudeUsageAPIClient: Sendable {
     private func creditStatus(for state: PayAsYouGoState?) -> String {
         switch state {
         case .enabledActive:
-            return "Included usage exhausted — now on pay-as-you-go credits."
+            return "Included usage exhausted — now on usage credits (pay-as-you-go)."
         case .enabledIdle:
-            return "Pay-as-you-go credits are enabled as a backstop."
+            return "Usage credits are enabled as a backstop."
         case .disabled, .none:
             return "Live Anthropic account view across devices."
         }

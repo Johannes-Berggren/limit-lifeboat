@@ -174,8 +174,8 @@ const faqs = [
         <strong>An existing session is holding the old credential.</strong> A Claude Code session
         that started before the switch keeps the credential it started with. Restart the session —
         and note that on macOS an IDE extension tab may need reopening rather than just reloading.
-        For Codex 0.156 and later, a shared background app-server daemon can also still hold the
-        previous login; <code>codex app-server daemon restart</code> clears it.
+        For Codex 0.156 and later, a shared background app-server daemon keeps the previous login
+        in memory until it is restarted; <code>codex app-server daemon restart</code> clears it.
       </li>
       <li>
         <strong>You are reading the limit from a different surface.</strong> A limit message in the

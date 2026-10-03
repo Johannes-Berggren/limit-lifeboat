@@ -3998,7 +3998,7 @@ final class AppState: ObservableObject {
 
             statusMessage = "Switched \(profile.provider.displayName) CLI to \(profile.label)."
             if profile.provider == .codex, cliSwitcher.isCodexDaemonRunning() {
-                statusMessage += " Codex's background server is running and may still use the previous account; restart it with `codex app-server daemon restart`."
+                statusMessage += " Codex's background server is running and keeps using the previous account until restarted: run `codex app-server daemon restart`."
             }
             if profile.provider == .claude, cliSwitcher.hasClaudePlaintextCredentialsFile() {
                 statusMessage += " A leftover ~/.claude/.credentials.json may override the switched login; if Claude Code shows the wrong account, move that file aside."
