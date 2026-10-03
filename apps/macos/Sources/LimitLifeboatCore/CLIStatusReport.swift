@@ -141,26 +141,61 @@ public enum CLIStatusLine {
     /// Readings older than this are marked with `?`. Matched to the app's own
     /// stale threshold so both surfaces call the same reading stale.
     public static let staleAfter: TimeInterval = 30 * 60
+    /// Claude Code's own numbers carry no risk level; mark them from here,
+    /// the app's default warning threshold.
+    static let liveWarningPercent = 80
 
-    public static func text(for report: CLIStatusReport) -> String {
-        let segments = report.accounts
+    /// - Parameter claude: what Claude Code piped in, when the status line
+    ///   runs inside it. It fills in for a stale or missing stored Claude
+    ///   reading (it only knows the 5h and 7d windows of the session's own
+    ///   login, so a fresh cross-device reading still wins) and adds the
+    ///   session's prompt-cache state. The payload names no account: right
+    ///   after a switch, a session still running on the previous login can
+    ///   report that login's numbers, which is why a fresh stored reading
+    ///   always takes precedence.
+    public static func text(
+        for report: CLIStatusReport,
+        claude: ClaudeStatusLineInput? = nil,
+        now: Date = Date()
+    ) -> String {
+        var segments = report.accounts
             .filter(\.isActive)
-            .compactMap(segment(for:))
+            .compactMap { segment(for: $0, claude: claude) }
+        if let cache = claude?.promptCache.flatMap({ cacheSegment($0, now: now) }) {
+            segments.append(cache)
+        }
 
         return segments.isEmpty ? "no active account" : segments.joined(separator: " · ")
     }
 
-    private static func segment(for account: CLIAccountStatus) -> String? {
-        guard let reading = account.reading else {
-            return "\(account.provider) —"
-        }
-        guard let percent = reading.mostConstrainedPercent else {
-            return "\(account.provider) —"
+    private static func segment(for account: CLIAccountStatus, claude: ClaudeStatusLineInput?) -> String? {
+        let live = account.provider == Provider.claude.rawValue ? claude?.rateLimitPercent : nil
+        guard let reading = account.reading, let percent = reading.mostConstrainedPercent else {
+            return live.map { "\(account.provider) \($0)%\($0 >= liveWarningPercent ? "!" : "")" }
+                ?? "\(account.provider) —"
         }
 
-        let stale = TimeInterval(reading.ageSeconds) > staleAfter ? "?" : ""
+        let isStale = TimeInterval(reading.ageSeconds) > staleAfter
+        if isStale, let live {
+            return "\(account.provider) \(live)%\(live >= liveWarningPercent ? "!" : "")"
+        }
+        let stale = isStale ? "?" : ""
         let alert = (reading.risk == "depleted" || reading.risk == "warning") ? "!" : ""
         return "\(account.provider) \(percent)%\(alert)\(stale)"
+    }
+
+    /// "cache 42m" while warm (time left before it expires), "cache cold
+    /// 350K" once it has expired (what the next message re-reads uncached).
+    private static func cacheSegment(_ cache: ClaudeStatusLineInput.PromptCache, now: Date) -> String? {
+        if cache.warm {
+            guard let expiresAt = cache.expiresAt else { return cache.ttl.map { "cache \($0)" } }
+            let remaining = expiresAt.timeIntervalSince(now)
+            if remaining >= 60 { return "cache \(Int(remaining / 60))m" }
+            if remaining > 0 { return "cache <1m" }
+            // Already past expiry (an older payload, or clock skew): cold.
+        }
+        guard let tokens = cache.recacheTokensIfCold, tokens > 0 else { return "cache cold" }
+        return "cache cold \(MemoryFormatting.tokens(tokens))"
     }
 }
 

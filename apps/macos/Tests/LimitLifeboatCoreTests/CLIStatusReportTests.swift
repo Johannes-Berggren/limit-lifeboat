@@ -281,6 +281,70 @@ final class CLIStatusReportTests: XCTestCase {
         XCTAssertEqual(CLIStatusLine.text(for: report), "claude 40%?")
     }
 
+    func testStatusLineUsesClaudeCodesOwnNumbersOnlyWhenTheStoredReadingIsStale() {
+        let account = profile("Work", .claude, active: true)
+        let live = ClaudeStatusLineInput(rateLimitPercent: 55)
+        let stale = CLIStatusReportBuilder.report(
+            profiles: [account],
+            snapshots: [account.id: snapshot(account.id, .claude, percents: [("Weekly", 40)], ageSeconds: CLIStatusLine.staleAfter + 1)],
+            now: now
+        )
+        XCTAssertEqual(CLIStatusLine.text(for: stale, claude: live, now: now), "claude 55%")
+
+        let fresh = CLIStatusReportBuilder.report(
+            profiles: [account],
+            snapshots: [account.id: snapshot(account.id, .claude, percents: [("Weekly", 40)])],
+            now: now
+        )
+        XCTAssertEqual(CLIStatusLine.text(for: fresh, claude: live, now: now), "claude 40%")
+
+        let codex = profile("Codex", .codex, active: true)
+        let codexOnly = CLIStatusReportBuilder.report(profiles: [codex], snapshots: [:], now: now)
+        XCTAssertEqual(CLIStatusLine.text(for: codexOnly, claude: live, now: now), "codex —")
+    }
+
+    func testStatusLineShowsPromptCacheState() {
+        let account = profile("Work", .claude, active: true)
+        let report = CLIStatusReportBuilder.report(
+            profiles: [account],
+            snapshots: [account.id: snapshot(account.id, .claude, percents: [("Weekly", 40)])],
+            now: now
+        )
+        let warm = ClaudeStatusLineInput(promptCache: .init(warm: true, ttl: "1h", expiresAt: now.addingTimeInterval(42 * 60 + 5), recacheTokensIfCold: 350_000))
+        XCTAssertEqual(CLIStatusLine.text(for: report, claude: warm, now: now), "claude 40% · cache 42m")
+        let cold = ClaudeStatusLineInput(promptCache: .init(warm: false, ttl: "1h", expiresAt: nil, recacheTokensIfCold: 350_000))
+        XCTAssertEqual(CLIStatusLine.text(for: report, claude: cold, now: now), "claude 40% · cache cold 350K")
+        let expired = ClaudeStatusLineInput(promptCache: .init(warm: true, ttl: "1h", expiresAt: now.addingTimeInterval(-5), recacheTokensIfCold: 350_000))
+        XCTAssertEqual(CLIStatusLine.text(for: report, claude: expired, now: now), "claude 40% · cache cold 350K")
+    }
+
+    func testLiveFallbackMarksHighUsage() {
+        let account = profile("Work", .claude, active: true)
+        let report = CLIStatusReportBuilder.report(profiles: [account], snapshots: [:], now: now)
+        XCTAssertEqual(CLIStatusLine.text(for: report, claude: ClaudeStatusLineInput(rateLimitPercent: 92), now: now), "claude 92%!")
+    }
+
+    func testNoCacheSegmentWhenTheProviderReportsNoCaching() {
+        let json = #"{"prompt_cache":{"warm":false,"caching_observed":false,"recache_tokens_if_cold":null}}"#
+        XCTAssertNil(ClaudeStatusLineInput.parse(Data(json.utf8)))
+    }
+
+    func testParsesClaudeCodeStatusLinePayload() throws {
+        let json = #"""
+        {"model":{"id":"claude-opus-5-5"},
+         "rate_limits":{"five_hour":{"used_percentage":12.4,"resets_at":1785003600},"seven_day":{"used_percentage":61.6,"resets_at":1785400000}},
+         "prompt_cache":{"warm":true,"ttl":"1h","expires_at":1785002520,"hit_ratio":0.97,"recache_tokens_if_cold":210000}}
+        """#
+        let input = try XCTUnwrap(ClaudeStatusLineInput.parse(Data(json.utf8)))
+        XCTAssertEqual(input.rateLimitPercent, 62)
+        XCTAssertEqual(input.promptCache?.warm, true)
+        XCTAssertEqual(input.promptCache?.expiresAt, Date(timeIntervalSince1970: 1_785_002_520))
+        XCTAssertEqual(input.promptCache?.recacheTokensIfCold, 210_000)
+
+        XCTAssertNil(ClaudeStatusLineInput.parse(Data(#"{"model":{"id":"x"}}"#.utf8)), "nothing usable")
+        XCTAssertNil(ClaudeStatusLineInput.parse(Data("{\"truncat".utf8)))
+    }
+
     func testStatusLineWithNoActiveAccountSaysSoRatherThanPrintingNothing() {
         let report = CLIStatusReportBuilder.report(
             profiles: [profile("Idle", .claude)],

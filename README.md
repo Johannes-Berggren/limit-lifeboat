@@ -177,8 +177,12 @@ Wire it into Claude Code's own status line in `~/.claude/settings.json`:
 { "statusLine": { "type": "command", "command": "limit-lifeboat statusline" } }
 ```
 
-It deliberately does not read stdin, so it cannot block a shell prompt that
-hands it a descriptor nobody closes.
+Inside Claude Code it also reads the session JSON Claude Code pipes in. It adds
+the session's prompt cache (`cache 42m` left, or `cache cold 350K` for what the
+next message re-reads), and uses Claude Code's own 5h/7d numbers when the app's
+reading is stale. It reads a pipe, socket or file (Claude Code uses a socket), never a terminal, and gives
+up after 150 ms, so a shell prompt or tmux that hands it a descriptor nobody
+closes is never blocked.
 
 `preflight` checks this Mac directly rather than the store: it counts running
 Claude Code and Codex sessions (including the tools and servers they started),

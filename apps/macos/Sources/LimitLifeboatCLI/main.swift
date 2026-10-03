@@ -65,6 +65,9 @@ EXAMPLES
   # Claude Code statusLine, in ~/.claude/settings.json:
   #   "statusLine": { "type": "command", "command": "limit-lifeboat statusline" }
   # A trailing ! means warning or depleted, ? means the reading is over 30m old.
+  # Inside Claude Code it also shows the session's prompt cache ("cache 42m"
+  # left, or "cache cold 350K" to re-read) and uses Claude Code's own 5h/7d
+  # numbers when the app's reading is stale.
 
   # Refuse to start another agent when memory is critical:
   #   limit-lifeboat preflight && claude
@@ -153,61 +156,7 @@ do {
 }
 
 if command == "statusline" {
-    // Deliberately does not read stdin, even though Claude Code pipes its
-    // session JSON in. Draining it would block until EOF, and a status line
-    // gets invoked from shell prompts, tmux, and bar widgets that hand over an
-    // inherited descriptor nobody ever closes — one hung read there freezes the
-    // user's prompt. The payload has nothing this needs anyway: the missing
-    // piece is the cross-account view, which it does not carry. Claude Code
-    // tolerates an unread stdin.
-    print(CLIStatusLine.text(for: report))
+    let claude = StatusLineStdinReader.read(fd: STDIN_FILENO).flatMap(ClaudeStatusLineInput.parse)
+    print(CLIStatusLine.text(for: report, claude: claude))
     exit(ExitCode.success.rawValue)
 }
-
-let accounts = command == "active" ? report.accounts.filter(\.isActive) : report.accounts
-
-if wantsJSON {
-    let encoder = JSONEncoder.appEncoder
-    let filtered = CLIStatusReport(generatedAt: report.generatedAt, accounts: accounts)
-    guard let data = try? encoder.encode(filtered), let text = String(data: data, encoding: .utf8) else {
-        fail("could not encode the report.", .unavailable)
-    }
-    print(text)
-    exit(ExitCode.success.rawValue)
-}
-
-guard !accounts.isEmpty else {
-    // Not an error: a fresh install with no accounts yet is a normal state, and
-    // a status line calling this on every prompt should not see a failure.
-    print(
-        report.accounts.isEmpty
-            ? "No accounts saved yet. Log in with `claude` or `codex login`, then open Limit Lifeboat."
-            : "No account is currently active."
-    )
-    exit(ExitCode.success.rawValue)
-}
-
-for account in accounts {
-    let marker = account.isActive ? "*" : " "
-    let identity = account.email ?? account.organization ?? account.plan ?? ""
-    let name = identity.isEmpty ? account.label : "\(account.label) (\(identity))"
-    print("\(marker) [\(account.provider)] \(name)")
-
-    guard command != "list" else { continue }
-
-    guard let reading = account.reading else {
-        print("      no reading yet")
-        continue
-    }
-
-    for window in reading.windows {
-        let resets = window.resetsAt.map { " · \(UsageResetTiming.compactText(resetDate: $0, resetDescription: nil) ?? "")" } ?? ""
-        print("      \(window.label): \(window.usedPercent)% used [\(window.risk)]\(resets)")
-    }
-    if let extra = reading.extraUsage {
-        print("      \(extra)")
-    }
-    print("      updated \(DurationPhrase.short(TimeInterval(reading.ageSeconds))) ago via \(reading.source)")
-}
-
-exit(ExitCode.success.rawValue)
