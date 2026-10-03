@@ -273,12 +273,12 @@ struct SettingsView: View {
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        Toggle("Hold new Codex sessions too", isOn: Binding(
+                        Toggle("Hold new Codex sessions too (approve once in Codex /hooks)", isOn: Binding(
                             get: { sessionMonitor.isCodexPromptHookInstalled },
                             set: { sessionMonitor.setCodexPromptHookInstalled($0) }
                         ))
                         Label(
-                            "Adds the same hook to ~/.codex/hooks.json, leaving your other Codex hooks as they are. Codex runs it only after you approve it once: open Codex, run /hooks, and trust the Limit Lifeboat hook.",
+                            "Adds the same hook to ~/.codex/hooks.json, leaving your other Codex hooks as they are. Codex runs it only after you approve it once: open Codex, run /hooks, and trust the Limit Lifeboat hook. Codex's /review starts like a new session, so it can be the one prompt held.",
                             systemImage: "info.circle"
                         )
                         .font(.caption)
@@ -290,6 +290,13 @@ struct SettingsView: View {
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        if let error = sessionMonitor.codexPromptHookError {
+                            StatusBanner(
+                                text: error,
+                                systemImage: "exclamationmark.triangle.fill",
+                                color: DS.danger
+                            )
+                        }
                         if let error = sessionMonitor.promptHookError {
                             StatusBanner(
                                 text: error,

@@ -81,8 +81,8 @@ public enum MemoryGuardHookScript {
         [ -z "$(field agent_id)" ] || exit 0
         # A transcript with a reply in it means a resumed conversation: Claude
         # Code marks replies "type":"assistant", Codex rollouts "role":"assistant".
-        # Codex compresses rollouts older than a week (.zst); only an old,
-        # resumed session can point at one.
+        # (Codex decompresses a week-old .zst rollout before resuming, so a
+        # .zst path is not expected; treat one as old, never as new.)
         transcript=$(field transcript_path)
         case "$transcript" in *.zst) exit 0 ;; esac
         if [ -n "$transcript" ] && [ -f "$transcript" ] && /usr/bin/grep -q -e '"type":"assistant"' -e '"role":"assistant"' "$transcript"; then
@@ -178,14 +178,23 @@ public struct ClaudeHookInstaller {
 
     private let hook: Hook
     private let file: ClaudeSettingsFile
+    /// Codex remembers which hooks the user trusted by position
+    /// (`<file>:<event>:<group index>:<handler index>`). Removing or moving our
+    /// group would shift every later group onto a neighbour's trust entry and
+    /// silently stop the user's own hooks. So for Codex, uninstall leaves an
+    /// empty group in place (dropped only when it is last) and reinstall
+    /// reuses that slot.
+    private let keepsGroupPositions: Bool
 
     public init(
         hook: Hook = .memoryGuard,
         settingsURL: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/settings.json")
+            .appendingPathComponent(".claude/settings.json"),
+        keepsGroupPositions: Bool = false
     ) {
         self.hook = hook
         self.file = ClaudeSettingsFile(url: settingsURL)
+        self.keepsGroupPositions = keepsGroupPositions
     }
 
     public func status(expectedScriptPath: String) -> Status {
@@ -207,8 +216,15 @@ public struct ClaudeHookInstaller {
         if let matcher = hook.matcher {
             managed["matcher"] = matcher
         }
-        var entries = try entries(in: settings).filter { managedCommands($0).isEmpty }
-        entries.append(managed)
+        var entries = try entries(in: settings)
+        if keepsGroupPositions,
+           let slot = entries.firstIndex(where: { !managedCommands($0).isEmpty }) ?? entries.firstIndex(where: isEmptyGroup) {
+            entries[slot] = managed
+            entries = entries.enumerated().filter { $0.offset == slot || managedCommands($0.element).isEmpty }.map(\.element)
+        } else {
+            entries = entries.filter { managedCommands($0).isEmpty }
+            entries.append(managed)
+        }
         try setEntries(entries, in: &settings)
         try file.write(settings)
     }
@@ -217,10 +233,20 @@ public struct ClaudeHookInstaller {
         guard file.exists else { return }
         var settings = try file.read()
         let current = try entries(in: settings)
-        let remaining = current.filter { managedCommands($0).isEmpty }
-        guard remaining.count != current.count else { return }
+        var remaining: [[String: Any]]
+        if keepsGroupPositions {
+            remaining = current.map { managedCommands($0).isEmpty ? $0 : ["hooks": [[String: Any]]()] }
+            while let last = remaining.last, isEmptyGroup(last) { remaining.removeLast() }
+        } else {
+            remaining = current.filter { managedCommands($0).isEmpty }
+        }
+        guard !NSArray(array: remaining).isEqual(to: current) else { return }
         try setEntries(remaining, in: &settings)
         try file.write(settings)
+    }
+
+    private func isEmptyGroup(_ entry: [String: Any]) -> Bool {
+        (entry["hooks"] as? [Any])?.isEmpty == true && (entry["matcher"] as? String ?? "").isEmpty
     }
 
     private func managedCommands(_ entry: [String: Any]) -> [String] {

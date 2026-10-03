@@ -67,6 +67,35 @@ final class ClaudeHookInstallerTests: XCTestCase {
         XCTAssertEqual(((after["hooks"] as? [String: Any])?["UserPromptSubmit"] as? [[String: Any]])?.count, 1)
     }
 
+    /// Codex keys hook trust by group position, so the Codex installer must
+    /// never shift the user's own UserPromptSubmit groups.
+    func testCodexInstallerKeepsOtherGroupsInPlace() throws {
+        let hooksURL = directory.appendingPathComponent("hooks.json")
+        try Data(#"{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"first.sh"}]}]}}"#.utf8).write(to: hooksURL)
+        let installer = ClaudeHookInstaller(settingsURL: hooksURL, keepsGroupPositions: true)
+        try installer.install(scriptPath: "/x/limit-lifeboat-memory-guard.sh")
+        // The user adds a hook after ours.
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: hooksURL)) as? [String: Any])
+        var hooks = try XCTUnwrap(object["hooks"] as? [String: Any])
+        var groups = try XCTUnwrap(hooks["UserPromptSubmit"] as? [[String: Any]])
+        groups.append(["matcher": "", "hooks": [["type": "command", "command": "later.sh"]]])
+        hooks["UserPromptSubmit"] = groups
+        object["hooks"] = hooks
+        try JSONSerialization.data(withJSONObject: object).write(to: hooksURL)
+
+        func commands() throws -> [String?] {
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: hooksURL)) as? [String: Any])
+            let groups = try XCTUnwrap((object["hooks"] as? [String: Any])?["UserPromptSubmit"] as? [[String: Any]])
+            return groups.map { (($0["hooks"] as? [[String: Any]])?.first?["command"] as? String) }
+        }
+
+        try installer.uninstall()
+        XCTAssertEqual(try commands(), ["first.sh", nil, "later.sh"], "later.sh stays at index 2")
+
+        try installer.install(scriptPath: "/y/limit-lifeboat-memory-guard.sh")
+        XCTAssertEqual(try commands(), ["first.sh", "'/y/limit-lifeboat-memory-guard.sh'", "later.sh"], "reinstall reuses the slot")
+    }
+
     func testErrorsNameCodexHooksFile() throws {
         let hooksURL = directory.appendingPathComponent("hooks.json")
         try Data("not json".utf8).write(to: hooksURL)
@@ -219,7 +248,7 @@ final class MemoryGuardHookScriptTests: XCTestCase {
         try writeState(.critical, updatedAt: Date())
         // A resumed Codex rollout carries replies as "role":"assistant".
         let resumed = directory.appendingPathComponent("rollout-resumed.jsonl")
-        try Data(#"{"type":"session_meta","payload":{}}\n{"type":"response_item","payload":{"type":"message","role":"assistant"}}"#.utf8).write(to: resumed)
+        try Data("{\"type\":\"session_meta\",\"payload\":{}}\n{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\"}}".utf8).write(to: resumed)
         XCTAssertEqual(try run(input: payload(session: "r", transcript: resumed.path)).status, 0)
         // Week-old rollouts are compressed; only a resumed session points there.
         XCTAssertEqual(try run(input: payload(session: "z", transcript: "/x/rollout-old.jsonl.zst")).status, 0)

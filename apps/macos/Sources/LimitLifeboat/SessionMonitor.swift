@@ -24,6 +24,7 @@ final class SessionMonitor: ObservableObject {
     @Published private(set) var trend = MemoryTrend()
     @Published private(set) var isPromptHookInstalled = false
     @Published private(set) var isCodexPromptHookInstalled = false
+    @Published private(set) var codexPromptHookError: String?
     @Published private(set) var promptHookError: String?
     /// Sessions held at their next tool call, by pid.
     @Published private(set) var parked: [Int32: SessionParkState.Entry] = [:]
@@ -48,7 +49,10 @@ final class SessionMonitor: ObservableObject {
     private var transcriptBindings = ClaudeTranscriptReader.Bindings()
     private var hasCompletedFirstSample = false
     private let hookInstaller = ClaudeHookInstaller()
-    private let codexHookInstaller = ClaudeHookInstaller(settingsURL: ClaudeHookInstaller.Hook.codexHooksURL)
+    private let codexHookInstaller = ClaudeHookInstaller(
+        settingsURL: ClaudeHookInstaller.Hook.codexHooksURL,
+        keepsGroupPositions: true
+    )
     private let parkHookInstaller = ClaudeHookInstaller(hook: SessionParkHookScript.hook)
     private static let starredProjectsKey = "starredSessionProjects"
     private let notify: (MemoryGuardAssessment) -> Void
@@ -307,7 +311,7 @@ final class SessionMonitor: ObservableObject {
     /// Same script, registered in ~/.codex/hooks.json. Codex only runs a
     /// user hook after it has been trusted once in its /hooks screen.
     func setCodexPromptHookInstalled(_ installed: Bool) {
-        promptHookError = nil
+        codexPromptHookError = nil
         do {
             if installed {
                 try writeHookScript()
@@ -316,7 +320,7 @@ final class SessionMonitor: ObservableObject {
                 try codexHookInstaller.uninstall()
             }
         } catch {
-            promptHookError = error.localizedDescription
+            codexPromptHookError = error.localizedDescription
         }
         refreshPromptHookStatus()
     }
