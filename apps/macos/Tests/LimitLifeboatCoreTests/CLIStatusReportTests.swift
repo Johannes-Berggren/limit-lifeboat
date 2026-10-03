@@ -314,6 +314,19 @@ final class CLIStatusReportTests: XCTestCase {
         XCTAssertEqual(CLIStatusLine.text(for: report, claude: warm, now: now), "claude 40% · cache 42m")
         let cold = ClaudeStatusLineInput(promptCache: .init(warm: false, ttl: "1h", expiresAt: nil, recacheTokensIfCold: 350_000))
         XCTAssertEqual(CLIStatusLine.text(for: report, claude: cold, now: now), "claude 40% · cache cold 350K")
+        let expired = ClaudeStatusLineInput(promptCache: .init(warm: true, ttl: "1h", expiresAt: now.addingTimeInterval(-5), recacheTokensIfCold: 350_000))
+        XCTAssertEqual(CLIStatusLine.text(for: report, claude: expired, now: now), "claude 40% · cache cold 350K")
+    }
+
+    func testLiveFallbackMarksHighUsage() {
+        let account = profile("Work", .claude, active: true)
+        let report = CLIStatusReportBuilder.report(profiles: [account], snapshots: [:], now: now)
+        XCTAssertEqual(CLIStatusLine.text(for: report, claude: ClaudeStatusLineInput(rateLimitPercent: 92), now: now), "claude 92%!")
+    }
+
+    func testNoCacheSegmentWhenTheProviderReportsNoCaching() {
+        let json = #"{"prompt_cache":{"warm":false,"caching_observed":false,"recache_tokens_if_cold":null}}"#
+        XCTAssertNil(ClaudeStatusLineInput.parse(Data(json.utf8)))
     }
 
     func testParsesClaudeCodeStatusLinePayload() throws {

@@ -180,7 +180,7 @@ Wire it into Claude Code's own status line in `~/.claude/settings.json`:
 Inside Claude Code it also reads the session JSON Claude Code pipes in. It adds
 the session's prompt cache (`cache 42m` left, or `cache cold 350K` for what the
 next message re-reads), and uses Claude Code's own 5h/7d numbers when the app's
-reading is stale. It only reads a pipe or a file, never a terminal, and gives
+reading is stale. It reads a pipe, socket or file (Claude Code uses a socket), never a terminal, and gives
 up after 150 ms, so a shell prompt or tmux that hands it a descriptor nobody
 closes is never blocked.
 

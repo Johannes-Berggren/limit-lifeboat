@@ -26,7 +26,11 @@ public struct ClaudeStatusLineInput: Equatable, Sendable {
             return nil
         }
         var input = ClaudeStatusLineInput()
-        if let cache = object["prompt_cache"] as? [String: Any], let warm = cache["warm"] as? Bool {
+        // `caching_observed: false` means the provider reports no cache
+        // tokens at all; "cold" would be wrong there, so show nothing.
+        if let cache = object["prompt_cache"] as? [String: Any],
+           let warm = cache["warm"] as? Bool,
+           cache["caching_observed"] as? Bool != false {
             input.promptCache = PromptCache(
                 warm: warm,
                 ttl: cache["ttl"] as? String,
