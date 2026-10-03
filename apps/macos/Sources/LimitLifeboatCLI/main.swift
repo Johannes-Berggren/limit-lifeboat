@@ -65,6 +65,9 @@ EXAMPLES
   # Claude Code statusLine, in ~/.claude/settings.json:
   #   "statusLine": { "type": "command", "command": "limit-lifeboat statusline" }
   # A trailing ! means warning or depleted, ? means the reading is over 30m old.
+  # Inside Claude Code it also shows the session's prompt cache ("cache 42m"
+  # left, or "cache cold 350K" to re-read) and uses Claude Code's own 5h/7d
+  # numbers when the app's reading is stale.
 
   # Refuse to start another agent when memory is critical:
   #   limit-lifeboat preflight && claude
@@ -153,15 +156,36 @@ do {
 }
 
 if command == "statusline" {
-    // Deliberately does not read stdin, even though Claude Code pipes its
-    // session JSON in. Draining it would block until EOF, and a status line
-    // gets invoked from shell prompts, tmux, and bar widgets that hand over an
-    // inherited descriptor nobody ever closes — one hung read there freezes the
-    // user's prompt. The payload has nothing this needs anyway: the missing
-    // piece is the cross-account view, which it does not carry. Claude Code
-    // tolerates an unread stdin.
-    print(CLIStatusLine.text(for: report))
+    let claude = readStatusLineStdin().flatMap(ClaudeStatusLineInput.parse)
+    print(CLIStatusLine.text(for: report, claude: claude))
     exit(ExitCode.success.rawValue)
+}
+
+/// Claude Code pipes its session JSON (prompt-cache state, 5h/7d limits) to a
+/// status line. But this command also runs from shell prompts, tmux, and bar
+/// widgets that hand over a terminal or an inherited descriptor nobody ever
+/// closes, and one blocking read there freezes the user's prompt. So: never a
+/// terminal, only a pipe or a file, and never longer than 150ms in total.
+func readStatusLineStdin() -> Data? {
+    guard isatty(STDIN_FILENO) == 0 else { return nil }
+    var info = stat()
+    guard fstat(STDIN_FILENO, &info) == 0 else { return nil }
+    let type = info.st_mode & S_IFMT
+    guard type == S_IFIFO || type == S_IFREG else { return nil }
+
+    let deadline = Date().addingTimeInterval(0.15)
+    var data = Data()
+    var buffer = [UInt8](repeating: 0, count: 65_536)
+    while data.count < 1_048_576 {
+        let remaining = Int32(deadline.timeIntervalSinceNow * 1_000)
+        guard remaining > 0 else { break }
+        var descriptor = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
+        guard poll(&descriptor, 1, remaining) > 0 else { break }
+        let count = read(STDIN_FILENO, &buffer, buffer.count)
+        guard count > 0 else { break }
+        data.append(buffer, count: count)
+    }
+    return data.isEmpty ? nil : data
 }
 
 let accounts = command == "active" ? report.accounts.filter(\.isActive) : report.accounts
