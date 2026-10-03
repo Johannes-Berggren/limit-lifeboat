@@ -11,9 +11,12 @@ struct CLIProcessInspector {
     }
 
     /// Codex 0.156+ can keep a shared app-server running in the background
-    /// (`codex app-server --listen unix:// --managed-daemon`). It loads the
-    /// login when it starts, so after a file swap it may keep serving the
-    /// previous account until it is restarted.
+    /// (`codex app-server --listen unix:// --managed-daemon`). Codex's
+    /// AuthManager caches the login in memory and only re-reads auth.json on
+    /// its own login/logout, or during a refresh when the file still holds the
+    /// same account id. After a swap it keeps serving the previous account
+    /// until restarted, then fails with "signed in to another account" once
+    /// that token expires; it never writes the old login back.
     func isCodexDaemonRunning() -> Bool {
         runPgrep(arguments: ["-f", "codex app-server .*--managed-daemon"])
     }
