@@ -273,6 +273,16 @@ struct SettingsView: View {
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        Toggle("Hold new Codex sessions too", isOn: Binding(
+                            get: { sessionMonitor.isCodexPromptHookInstalled },
+                            set: { sessionMonitor.setCodexPromptHookInstalled($0) }
+                        ))
+                        Label(
+                            "Adds the same hook to ~/.codex/hooks.json, leaving your other Codex hooks as they are. Codex runs it only after you approve it once: open Codex, run /hooks, and trust the Limit Lifeboat hook.",
+                            systemImage: "info.circle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                         Toggle("Show a memory graph in the menu bar and popover", isOn: $settings.memoryGraphEnabled)
                         Label(
                             "Memory used over the last 30 minutes. Turns orange or red with Memory Guard.",

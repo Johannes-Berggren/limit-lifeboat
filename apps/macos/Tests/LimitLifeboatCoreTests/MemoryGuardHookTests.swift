@@ -48,6 +48,33 @@ final class ClaudeHookInstallerTests: XCTestCase {
         XCTAssertNil(try read()["hooks"])
     }
 
+    func testInstallsIntoCodexHooksJSONAlongsideExistingHooks() throws {
+        let hooksURL = directory.appendingPathComponent("hooks.json")
+        try Data(#"{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"bb-hook.sh","timeout":30}]}],"Stop":[{"matcher":"","hooks":[{"type":"command","command":"bb-stop.sh"}]}]}}"#.utf8)
+            .write(to: hooksURL)
+        let installer = ClaudeHookInstaller(settingsURL: hooksURL)
+
+        try installer.install(scriptPath: "/x/limit-lifeboat-memory-guard.sh")
+
+        XCTAssertEqual(installer.status(expectedScriptPath: "/x/limit-lifeboat-memory-guard.sh"), .installed)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: hooksURL)) as? [String: Any])
+        let hooks = try XCTUnwrap(object["hooks"] as? [String: Any])
+        XCTAssertNotNil(hooks["Stop"])
+        XCTAssertEqual((hooks["UserPromptSubmit"] as? [[String: Any]])?.count, 2)
+
+        try installer.uninstall()
+        let after = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: hooksURL)) as? [String: Any])
+        XCTAssertEqual(((after["hooks"] as? [String: Any])?["UserPromptSubmit"] as? [[String: Any]])?.count, 1)
+    }
+
+    func testErrorsNameCodexHooksFile() throws {
+        let hooksURL = directory.appendingPathComponent("hooks.json")
+        try Data("not json".utf8).write(to: hooksURL)
+        XCTAssertThrowsError(try ClaudeHookInstaller(settingsURL: hooksURL).install(scriptPath: "/x/limit-lifeboat-memory-guard.sh")) { error in
+            XCTAssertTrue(error.localizedDescription.hasPrefix("Codex hooks.json"), error.localizedDescription)
+        }
+    }
+
     func testRefusesToRewriteUnparseableSettings() throws {
         try write("{ // comments are not JSON\n}")
         let installer = ClaudeHookInstaller(settingsURL: settingsURL)
@@ -186,6 +213,22 @@ final class MemoryGuardHookScriptTests: XCTestCase {
         XCTAssertEqual(try run(input: payload(session: "c", transcript: transcript.path)).status, 0)
         XCTAssertEqual(try run(input: payload(session: "d", agentID: "sub-1")).status, 0)
         XCTAssertEqual(try run(input: payload(session: "e", event: "SessionStart")).status, 0)
+    }
+
+    func testCodexSessionsAreHeldOnlyWhenNew() throws {
+        try writeState(.critical, updatedAt: Date())
+        // A resumed Codex rollout carries replies as "role":"assistant".
+        let resumed = directory.appendingPathComponent("rollout-resumed.jsonl")
+        try Data(#"{"type":"session_meta","payload":{}}\n{"type":"response_item","payload":{"type":"message","role":"assistant"}}"#.utf8).write(to: resumed)
+        XCTAssertEqual(try run(input: payload(session: "r", transcript: resumed.path)).status, 0)
+        // Week-old rollouts are compressed; only a resumed session points there.
+        XCTAssertEqual(try run(input: payload(session: "z", transcript: "/x/rollout-old.jsonl.zst")).status, 0)
+        // A brand-new Codex session has only its session_meta line.
+        let fresh = directory.appendingPathComponent("rollout-new.jsonl")
+        try Data(#"{"type":"session_meta","payload":{}}"#.utf8).write(to: fresh)
+        let held = try run(input: payload(session: "n", transcript: fresh.path))
+        XCTAssertEqual(held.status, 2)
+        XCTAssertTrue(held.stderr.contains("memory is critically low"))
     }
 
     func testMissingStateNeverHolds() throws {

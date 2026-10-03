@@ -23,6 +23,7 @@ final class SessionMonitor: ObservableObject {
     /// the graph is off.
     @Published private(set) var trend = MemoryTrend()
     @Published private(set) var isPromptHookInstalled = false
+    @Published private(set) var isCodexPromptHookInstalled = false
     @Published private(set) var promptHookError: String?
     /// Sessions held at their next tool call, by pid.
     @Published private(set) var parked: [Int32: SessionParkState.Entry] = [:]
@@ -47,6 +48,7 @@ final class SessionMonitor: ObservableObject {
     private var transcriptBindings = ClaudeTranscriptReader.Bindings()
     private var hasCompletedFirstSample = false
     private let hookInstaller = ClaudeHookInstaller()
+    private let codexHookInstaller = ClaudeHookInstaller(settingsURL: ClaudeHookInstaller.Hook.codexHooksURL)
     private let parkHookInstaller = ClaudeHookInstaller(hook: SessionParkHookScript.hook)
     private static let starredProjectsKey = "starredSessionProjects"
     private let notify: (MemoryGuardAssessment) -> Void
@@ -113,6 +115,16 @@ final class SessionMonitor: ObservableObject {
             // The hook points at a script path that is no longer ours; left
             // alone it would fail on every prompt. Reinstall at today's path.
             setPromptHookInstalled(true)
+        }
+        switch codexHookInstaller.status(expectedScriptPath: hookScriptURL.path) {
+        case .notInstalled:
+            break
+        case .installed:
+            try? writeHookScript()
+        case .needsRepair:
+            // Repairing changes the command, which Codex treats as a new hook
+            // to trust again in /hooks — still better than a failing one.
+            setCodexPromptHookInstalled(true)
         }
         refreshPromptHookStatus()
         // A previous launch may have left sessions parked; this one starts
@@ -292,10 +304,28 @@ final class SessionMonitor: ObservableObject {
         refreshPromptHookStatus()
     }
 
+    /// Same script, registered in ~/.codex/hooks.json. Codex only runs a
+    /// user hook after it has been trusted once in its /hooks screen.
+    func setCodexPromptHookInstalled(_ installed: Bool) {
+        promptHookError = nil
+        do {
+            if installed {
+                try writeHookScript()
+                try codexHookInstaller.install(scriptPath: hookScriptURL.path)
+            } else {
+                try codexHookInstaller.uninstall()
+            }
+        } catch {
+            promptHookError = error.localizedDescription
+        }
+        refreshPromptHookStatus()
+    }
+
     /// Only an entry pointing at this build's script counts as installed, so
     /// Settings never shows a drifted, failing hook as working.
     private func refreshPromptHookStatus() {
         isPromptHookInstalled = hookInstaller.status(expectedScriptPath: hookScriptURL.path) == .installed
+        isCodexPromptHookInstalled = codexHookInstaller.status(expectedScriptPath: hookScriptURL.path) == .installed
     }
 
     private func writeHookScript() throws {

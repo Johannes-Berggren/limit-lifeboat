@@ -4,18 +4,23 @@ import Foundation
 /// keep a one-step backup and never touch a file that does not parse.
 public struct ClaudeSettingsFile {
     public enum SettingsError: LocalizedError, Equatable {
-        case unreadable(String)
+        case unreadable(file: String, detail: String)
 
         public var errorDescription: String? {
             switch self {
-            case .unreadable(let detail):
-                return "Claude Code settings could not be read as JSON, so they were left unchanged. \(detail)"
+            case .unreadable(let file, let detail):
+                return "\(file) could not be read as JSON, so it was left unchanged. \(detail)"
             }
         }
     }
 
     public let url: URL
     private let fileManager: FileManager
+
+    /// How errors name the file: Claude Code's settings or Codex's hooks.json.
+    public var displayName: String {
+        url.lastPathComponent == "hooks.json" ? "Codex hooks.json" : "Claude Code settings"
+    }
 
     public init(
         url: URL = FileManager.default.homeDirectoryForCurrentUser
@@ -41,10 +46,10 @@ public struct ClaudeSettingsFile {
         do {
             object = try JSONSerialization.jsonObject(with: data)
         } catch {
-            throw SettingsError.unreadable(error.localizedDescription)
+            throw SettingsError.unreadable(file: displayName, detail: error.localizedDescription)
         }
         guard let settings = object as? [String: Any] else {
-            throw SettingsError.unreadable("The top level is not an object.")
+            throw SettingsError.unreadable(file: displayName, detail: "The top level is not an object.")
         }
         return settings
     }
