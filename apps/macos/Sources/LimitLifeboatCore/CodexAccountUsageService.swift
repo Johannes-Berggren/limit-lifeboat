@@ -521,9 +521,23 @@ public struct CodexAccountUsageService {
         }
         guard credits.hasCredits else { return nil }
         if let balance = credits.balance, !balance.isEmpty {
-            return "Usage credits available: \(balance)."
+            return "Usage credits available: \(formattedCreditBalance(balance))."
         }
         return "Usage credits are available."
+    }
+
+    /// Codex reports the balance as a decimal string with up to ten places
+    /// ("62494.6760250000"). Whole credits are enough once the balance is in
+    /// the hundreds; small balances keep two decimals.
+    static func formattedCreditBalance(_ raw: String) -> String {
+        guard let value = Decimal(string: raw, locale: Locale(identifier: "en_US_POSIX")) else { return raw }
+        let formatter = NumberFormatter()
+        formatter.locale = Locale(identifier: "en_US")
+        formatter.numberStyle = .decimal
+        let digits = value >= 100 ? 0 : 2
+        formatter.minimumFractionDigits = digits
+        formatter.maximumFractionDigits = digits
+        return formatter.string(from: value as NSDecimalNumber) ?? raw
     }
 
     private static func hasSubscriptionTokens(_ data: Data) -> Bool {

@@ -826,4 +826,11 @@ private struct UsageExecutableScriptFixture {
     func cleanup() {
         try? FileManager.default.removeItem(at: directory)
     }
+
+    func testCreditBalanceIsRoundedForDisplay() {
+        XCTAssertEqual(CodexAccountUsageService.formattedCreditBalance("62494.6760250000"), "62,495")
+        XCTAssertEqual(CodexAccountUsageService.formattedCreditBalance("12.5"), "12.50")
+        XCTAssertEqual(CodexAccountUsageService.formattedCreditBalance("0"), "0.00")
+        XCTAssertEqual(CodexAccountUsageService.formattedCreditBalance("lots"), "lots")
+    }
 }
