@@ -15,6 +15,13 @@ export interface Release {
 
 export const releases: readonly Release[] = [
   {
+    version: "1.1.17",
+    date: "2026-10-05",
+    highlights: [
+      "Made Codex Memory Guard setup approve its hook automatically and keep that approval when another tool rearranges the hook configuration, while preserving user and managed-policy choices.",
+    ],
+  },
+  {
     version: "1.1.16",
     date: "2026-10-05",
     highlights: [
