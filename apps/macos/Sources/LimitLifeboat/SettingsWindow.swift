@@ -297,7 +297,15 @@ struct SettingsView: View {
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             case .needsApproval:
-                                Label("Not approved in Codex yet. Codex asks about it when it next starts, or approve it with /hooks.", systemImage: "exclamationmark.circle")
+                                HStack {
+                                    Label("Not approved in Codex yet. Codex asks about it when it next starts.", systemImage: "exclamationmark.circle")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Button("Approve now") { sessionMonitor.approveCodexHookNow() }
+                                        .controlSize(.small)
+                                }
+                            case .blockedByPolicy:
+                                Label("Your Codex setup is managed by a policy, so approve the hook in Codex with /hooks (or ask your admin).", systemImage: "lock")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             case .disabledInCodex:

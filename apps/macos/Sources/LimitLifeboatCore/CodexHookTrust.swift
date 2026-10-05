@@ -14,6 +14,11 @@ public enum CodexHookTrust {
         case needsApproval
         /// The user turned the hook off in Codex; respected, never re-enabled.
         case disabledInCodex
+        /// A managed policy (requirements.toml / MDM) pins the credential
+        /// store, so a session here could load and refresh the real login, or
+        /// it allows managed hooks only. Nothing is written; the user or their
+        /// admin approves it in Codex.
+        case blockedByPolicy
         case notFound
     }
 
@@ -55,11 +60,11 @@ public enum CodexHookTrust {
         codexHome: URL,
         timeout: TimeInterval = 20
     ) throws -> Status {
-        guard let hook = try ourHook(scriptFileName: scriptFileName, executableURL: executableURL, codexHome: codexHome, timeout: timeout) else {
-            return .notFound
-        }
+        let (hook, policyBlocks) = try ourHook(scriptFileName: scriptFileName, executableURL: executableURL, codexHome: codexHome, timeout: timeout)
+        guard let hook else { return .notFound }
         if !hook.enabled { return .disabledInCodex }
-        return hook.trustStatus == "trusted" || hook.trustStatus == "managed" ? .trusted : .needsApproval
+        if hook.trustStatus == "trusted" || hook.trustStatus == "managed" { return .trusted }
+        return policyBlocks ? .blockedByPolicy : .needsApproval
     }
 
     /// Approves our hook if Codex lists it as untrusted or modified. Returns
@@ -71,11 +76,11 @@ public enum CodexHookTrust {
         codexHome: URL,
         timeout: TimeInterval = 20
     ) throws -> Status {
-        guard let hook = try ourHook(scriptFileName: scriptFileName, executableURL: executableURL, codexHome: codexHome, timeout: timeout) else {
-            return .notFound
-        }
+        let (hook, policyBlocks) = try ourHook(scriptFileName: scriptFileName, executableURL: executableURL, codexHome: codexHome, timeout: timeout)
+        guard let hook else { return .notFound }
         guard hook.enabled else { return .disabledInCodex }
         guard hook.trustStatus == "untrusted" || hook.trustStatus == "modified" else { return .trusted }
+        guard !policyBlocks else { return .blockedByPolicy }
 
         let request: [String: Any] = [
             "method": "config/batchWrite",
@@ -89,7 +94,7 @@ public enum CodexHookTrust {
                 "reloadUserConfig": true
             ]
         ]
-        let response = try exchange(request: request, id: 3, executableURL: executableURL, codexHome: codexHome, timeout: timeout)
+        let response = try exchange(requests: [request], executableURL: executableURL, codexHome: codexHome, timeout: timeout)[3] ?? [:]
         if let error = response["error"] as? [String: Any] {
             throw Failure.rejected(error["message"] as? String ?? "unknown error")
         }
@@ -101,17 +106,33 @@ public enum CodexHookTrust {
         executableURL: URL,
         codexHome: URL,
         timeout: TimeInterval
-    ) throws -> Hook? {
-        let request: [String: Any] = [
-            "method": "hooks/list",
-            "id": 2,
-            "params": ["cwds": [FileManager.default.homeDirectoryForCurrentUser.path]]
+    ) throws -> (hook: Hook?, policyBlocks: Bool) {
+        let requests: [[String: Any]] = [
+            ["method": "configRequirements/read", "id": 4],
+            [
+                "method": "hooks/list",
+                "id": 2,
+                "params": ["cwds": [FileManager.default.homeDirectoryForCurrentUser.path]]
+            ]
         ]
-        let response = try exchange(request: request, id: 2, executableURL: executableURL, codexHome: codexHome, timeout: timeout)
-        if let error = response["error"] as? [String: Any] {
+        let responses = try exchange(requests: requests, executableURL: executableURL, codexHome: codexHome, timeout: timeout)
+        let list = responses[2] ?? [:]
+        if let error = list["error"] as? [String: Any] {
             throw Failure.rejected(error["message"] as? String ?? "unknown error")
         }
-        return hook(in: response, scriptFileName: scriptFileName)
+        return (hook(in: list, scriptFileName: scriptFileName), policyBlocks(responses[4]))
+    }
+
+    /// True when managed requirements pin the credential store (the `-c`
+    /// ephemeral override would lose to them) or allow managed hooks only.
+    static func policyBlocks(_ response: [String: Any]?) -> Bool {
+        guard let requirements = (response?["result"] as? [String: Any])?["requirements"] as? [String: Any] else {
+            return false
+        }
+        if let store = requirements["cliAuthCredentialsStore"] as? String, store.lowercased() != "ephemeral" {
+            return true
+        }
+        return requirements["allowManagedHooksOnly"] as? Bool == true
     }
 
     /// Picks our UserPromptSubmit command hook out of a `hooks/list` response.
@@ -119,7 +140,10 @@ public enum CodexHookTrust {
         let entries = (response["result"] as? [String: Any])?["data"] as? [[String: Any]] ?? []
         for entry in entries {
             for hook in entry["hooks"] as? [[String: Any]] ?? [] {
+                // Only the user-level hooks.json we installed into, never a
+                // project-level copy of the same command.
                 guard (hook["eventName"] as? String)?.lowercased() == "userpromptsubmit",
+                      (hook["source"] as? String ?? "user") == "user",
                       (hook["handlerType"] as? String) == "command",
                       let command = hook["command"] as? String, command.contains(scriptFileName),
                       let key = hook["key"] as? String,
@@ -132,21 +156,21 @@ public enum CodexHookTrust {
     }
 
     private static func exchange(
-        request: [String: Any],
-        id: Int,
+        requests: [[String: Any]],
         executableURL: URL,
         codexHome: URL,
         timeout: TimeInterval
-    ) throws -> [String: Any] {
+    ) throws -> [Int: [String: Any]] {
+        let ids = Set(requests.compactMap { $0["id"] as? Int })
         let lock = NSLock()
         var buffer = Data()
-        var answer: [String: Any]?
+        var answers: [Int: [String: Any]] = [:]
         let outcome = CodexAppServerSession.run(
             executableURL: executableURL,
             codexHome: codexHome,
             timeout: timeout,
             credentialStore: "ephemeral",
-            requests: [request]
+            requests: requests
         ) { chunk in
             lock.lock()
             defer { lock.unlock() }
@@ -155,16 +179,16 @@ public enum CodexHookTrust {
                 let line = buffer[buffer.startIndex..<newline]
                 buffer.removeSubrange(buffer.startIndex...newline)
                 if let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
-                   (object["id"] as? Int) == id {
-                    answer = object
-                    return true
+                   let id = object["id"] as? Int, ids.contains(id) {
+                    answers[id] = object
+                    if answers.count == ids.count { return true }
                 }
             }
             return false
         }
         lock.lock()
         defer { lock.unlock() }
-        if let answer { return answer }
+        if answers.count == ids.count { return answers }
         throw outcome == .launchFailed ? Failure.codexNotFound : Failure.appServerUnavailable
     }
 }

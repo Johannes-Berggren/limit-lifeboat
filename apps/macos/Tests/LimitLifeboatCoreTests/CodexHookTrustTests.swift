@@ -32,6 +32,22 @@ final class CodexHookTrustTests: XCTestCase {
         XCTAssertNil(CodexHookTrust.hook(in: ["id": 2, "result": ["data": []]], scriptFileName: MemoryGuardHookScript.fileName))
     }
 
+    func testSkipsProjectLevelCopies() {
+        let project: [String: Any] = [
+            "key": "p", "eventName": "userPromptSubmit", "handlerType": "command", "source": "project",
+            "command": "limit-lifeboat-memory-guard.sh", "currentHash": "h", "trustStatus": "untrusted",
+        ]
+        XCTAssertNil(CodexHookTrust.hook(in: response([project]), scriptFileName: MemoryGuardHookScript.fileName))
+    }
+
+    func testManagedPolicyBlocksWriting() {
+        XCTAssertFalse(CodexHookTrust.policyBlocks(["id": 4, "result": ["requirements": NSNull()]]))
+        XCTAssertFalse(CodexHookTrust.policyBlocks(nil))
+        XCTAssertTrue(CodexHookTrust.policyBlocks(["id": 4, "result": ["requirements": ["cliAuthCredentialsStore": "keyring"]]]))
+        XCTAssertTrue(CodexHookTrust.policyBlocks(["id": 4, "result": ["requirements": ["allowManagedHooksOnly": true]]]))
+        XCTAssertFalse(CodexHookTrust.policyBlocks(["id": 4, "result": ["requirements": ["allowManagedHooksOnly": false]]]))
+    }
+
     /// Talks to the real Codex in ~/.codex. Opt-in only:
     /// LIMIT_LIFEBOAT_CODEX_TRUST_LIVE=1 swift test --filter CodexHookTrustTests
     func testLiveApproveAgainstRealCodex() throws {
