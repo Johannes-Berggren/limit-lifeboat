@@ -66,6 +66,18 @@ final class CodexHookTrustTests: XCTestCase {
         XCTAssertFalse(CodexHookTrust.shouldReapprove(current: approved, lastApproved: nil))
     }
 
+    func testPriorStateMustStillHoldOurApprovalAndNotBeTurnedOff() {
+        let approval = CodexHookTrust.Approval(key: "/u/.codex/hooks.json:user_prompt_submit:0:0", hash: "sha256:ours")
+        func config(_ state: [String: Any]) -> [String: Any] {
+            ["id": 5, "result": ["config": ["hooks": ["state": [approval.key: state]]]]]
+        }
+        XCTAssertTrue(CodexHookTrust.priorStateConfirms(approval, in: config(["trusted_hash": "sha256:ours"])))
+        XCTAssertFalse(CodexHookTrust.priorStateConfirms(approval, in: config(["trusted_hash": "sha256:ours", "enabled": false])))
+        XCTAssertFalse(CodexHookTrust.priorStateConfirms(approval, in: config(["trusted_hash": "sha256:other"])))
+        XCTAssertFalse(CodexHookTrust.priorStateConfirms(approval, in: ["id": 5, "result": ["config": [:]]]))
+        XCTAssertFalse(CodexHookTrust.priorStateConfirms(approval, in: nil))
+    }
+
     /// Talks to the real Codex in ~/.codex. Opt-in only:
     /// LIMIT_LIFEBOAT_CODEX_TRUST_LIVE=1 swift test --filter CodexHookTrustTests
     func testLiveApproveAgainstRealCodex() throws {
@@ -115,13 +127,26 @@ final class CodexHookTrustTests: XCTestCase {
         XCTAssertEqual(relaunch.status, .trusted)
         XCTAssertNotEqual(relaunch.approval?.key, approval.key)
 
-        // A hook the user leaves untrusted at the same position stays so.
-        let declined = try CodexHookTrust.refresh(
+        // Turned off in Codex at the old position, then shifted again: the
+        // user's "off" must survive the move.
+        let shifted = try XCTUnwrap(relaunch.approval)
+        // Codex keeps one table per key; set enabled = false on it in place,
+        // as its /hooks "turn off" does.
+        var configText = try String(contentsOf: home.appendingPathComponent("config.toml"))
+        configText = configText.replacingOccurrences(
+            of: "trusted_hash = \"\(shifted.hash)\"",
+            with: "trusted_hash = \"\(shifted.hash)\"\nenabled = false"
+        )
+        try configText.write(to: home.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
+        let third: [String: Any] = ["hooks": [["type": "command", "command": "third-tool.sh"]]]
+        try JSONSerialization.data(withJSONObject: ["hooks": ["UserPromptSubmit": [third, theirs, ours]]]).write(to: hooksURL)
+        let afterOff = try CodexHookTrust.refresh(
             scriptFileName: MemoryGuardHookScript.fileName,
             executableURL: codex,
             codexHome: home,
-            lastApproved: nil
+            lastApproved: shifted
         )
-        XCTAssertEqual(declined.status, .trusted, "already trusted at the new key; nothing changes")
+        XCTAssertEqual(afterOff.status, .needsApproval, "a hook turned off before the shift is not re-approved")
+        XCTAssertNil(afterOff.approval)
     }
 }

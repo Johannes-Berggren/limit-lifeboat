@@ -68,10 +68,29 @@ public enum CodexHookTrust {
         if !hook.enabled { return (.disabledInCodex, nil) }
         if hook.trustStatus == "trusted" || hook.trustStatus == "managed" { return (.trusted, current) }
         if policyBlocks { return (.blockedByPolicy, nil) }
-        guard shouldReapprove(current: current, lastApproved: lastApproved) else { return (.needsApproval, nil) }
+        guard shouldReapprove(current: current, lastApproved: lastApproved), let lastApproved else { return (.needsApproval, nil) }
+        // The old position must still hold our approval and must not have been
+        // turned off: a user who switched the hook off in /hooks before the
+        // shift said no, and the move must not undo that.
+        let config = try exchange(
+            requests: [["method": "config/read", "id": 5, "params": [:] as [String: Any]]],
+            executableURL: executableURL,
+            codexHome: codexHome,
+            timeout: timeout
+        )[5]
+        guard priorStateConfirms(lastApproved, in: config) else { return (.needsApproval, nil) }
         try record(current, executableURL: executableURL, codexHome: codexHome, timeout: timeout)
         let after = try status(scriptFileName: scriptFileName, executableURL: executableURL, codexHome: codexHome, timeout: timeout)
         return (after, after == .trusted ? current : nil)
+    }
+
+    /// `hooks.state[<old key>]` from `config/read` still carries our hash
+    /// and no `enabled = false`.
+    static func priorStateConfirms(_ approval: Approval, in configResponse: [String: Any]?) -> Bool {
+        let config = (configResponse?["result"] as? [String: Any])?["config"] as? [String: Any]
+        let state = ((config?["hooks"] as? [String: Any])?["state"] as? [String: Any])?[approval.key] as? [String: Any]
+        guard let state, state["trusted_hash"] as? String == approval.hash else { return false }
+        return state["enabled"] as? Bool != false
     }
 
     static func shouldReapprove(current: Approval, lastApproved: Approval?) -> Bool {

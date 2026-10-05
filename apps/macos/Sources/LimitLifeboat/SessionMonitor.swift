@@ -403,6 +403,9 @@ final class SessionMonitor: ObservableObject {
             codexHookApproval = outcome.status
             if let approval = outcome.approval {
                 lastCodexHookApproval = approval
+            } else if outcome.status == .disabledInCodex {
+                // The user's "off" in Codex; never re-approve from this record.
+                lastCodexHookApproval = nil
             }
         case .failure(let error):
             codexHookApproval = .needsApproval
