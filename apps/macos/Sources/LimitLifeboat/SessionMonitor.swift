@@ -25,6 +25,10 @@ final class SessionMonitor: ObservableObject {
     @Published private(set) var isPromptHookInstalled = false
     @Published private(set) var isCodexPromptHookInstalled = false
     @Published private(set) var codexPromptHookError: String?
+    /// Whether Codex will actually run the installed hook; nil until checked.
+    @Published private(set) var codexHookApproval: CodexHookTrust.Status?
+    /// Drops results from an older check when the toggle flips mid-request.
+    private var codexHookApprovalGeneration = 0
     @Published private(set) var promptHookError: String?
     /// Sessions held at their next tool call, by pid.
     @Published private(set) var parked: [Int32: SessionParkState.Entry] = [:]
@@ -125,9 +129,12 @@ final class SessionMonitor: ObservableObject {
             break
         case .installed:
             try? writeHookScript()
+            // Only read the approval here: if the user declined it in Codex,
+            // a relaunch must not quietly approve it again.
+            updateCodexHookApproval(approving: false)
         case .needsRepair:
-            // Repairing changes the command, which Codex treats as a new hook
-            // to trust again in /hooks — still better than a failing one.
+            // Repairing changes the command, so Codex sees a new hook; the
+            // reinstall approves it again, as the user's original choice did.
             setCodexPromptHookInstalled(true)
         }
         refreshPromptHookStatus()
@@ -318,11 +325,55 @@ final class SessionMonitor: ObservableObject {
                 try codexHookInstaller.install(scriptPath: hookScriptURL.path)
             } else {
                 try codexHookInstaller.uninstall()
+                codexHookApproval = nil
+                codexHookApprovalGeneration += 1
             }
         } catch {
             codexPromptHookError = error.localizedDescription
         }
         refreshPromptHookStatus()
+        if installed, isCodexPromptHookInstalled {
+            // Turning the setting on is the user's approval; record it in
+            // Codex the way its /hooks screen would, for our hook only.
+            updateCodexHookApproval(approving: true)
+        }
+    }
+
+    /// For Settings' "Approve now" after an approval couldn't complete.
+    func approveCodexHookNow() {
+        codexPromptHookError = nil
+        updateCodexHookApproval(approving: true)
+    }
+
+    private func updateCodexHookApproval(approving: Bool) {
+        codexHookApprovalGeneration += 1
+        let generation = codexHookApprovalGeneration
+        let scriptFileName = MemoryGuardHookScript.fileName
+        let codexHome = ClaudeHookInstaller.Hook.codexHooksURL.deletingLastPathComponent()
+        Task.detached { [weak self] in
+            let result: Result<CodexHookTrust.Status, Error>
+            if let codex = CodexHookTrust.resolveCodexExecutable() {
+                result = Result {
+                    approving
+                        ? try CodexHookTrust.approve(scriptFileName: scriptFileName, executableURL: codex, codexHome: codexHome)
+                        : try CodexHookTrust.status(scriptFileName: scriptFileName, executableURL: codex, codexHome: codexHome)
+                }
+            } else {
+                result = .failure(CodexHookTrust.Failure.codexNotFound)
+            }
+            await self?.applyCodexHookApproval(result, approving: approving, generation: generation)
+        }
+    }
+
+    private func applyCodexHookApproval(_ result: Result<CodexHookTrust.Status, Error>, approving: Bool, generation: Int) {
+        guard generation == codexHookApprovalGeneration, isCodexPromptHookInstalled else { return }
+        switch result {
+        case .success(let status):
+            codexHookApproval = status
+        case .failure(let error):
+            codexHookApproval = .needsApproval
+            if approving { codexPromptHookError = error.localizedDescription }
+        }
     }
 
     /// Only an entry pointing at this build's script counts as installed, so

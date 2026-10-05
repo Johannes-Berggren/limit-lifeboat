@@ -273,12 +273,12 @@ struct SettingsView: View {
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        Toggle("Hold new Codex sessions too (approve once in Codex /hooks)", isOn: Binding(
+                        Toggle("Hold new Codex sessions too", isOn: Binding(
                             get: { sessionMonitor.isCodexPromptHookInstalled },
                             set: { sessionMonitor.setCodexPromptHookInstalled($0) }
                         ))
                         Label(
-                            "Adds the same hook to ~/.codex/hooks.json, leaving your other Codex hooks as they are. Codex runs it only after you approve it once: open Codex, run /hooks, and trust the Limit Lifeboat hook. Codex's /review starts like a new session, so it can be the one prompt held.",
+                            "Adds the same hook to ~/.codex/hooks.json and approves it in Codex for you, the way Codex's /hooks screen would. Only this hook is approved; your other Codex hooks are left as they are. Codex's /review starts like a new session, so it can be the one prompt held.",
                             systemImage: "info.circle"
                         )
                         .font(.caption)
@@ -290,6 +290,32 @@ struct SettingsView: View {
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        if sessionMonitor.isCodexPromptHookInstalled {
+                            switch sessionMonitor.codexHookApproval {
+                            case .trusted:
+                                Label("Approved in Codex.", systemImage: "checkmark.circle")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            case .needsApproval:
+                                HStack {
+                                    Label("Not approved in Codex yet. Codex asks about it when it next starts.", systemImage: "exclamationmark.circle")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Button("Approve now") { sessionMonitor.approveCodexHookNow() }
+                                        .controlSize(.small)
+                                }
+                            case .blockedByPolicy:
+                                Label("Your Codex setup is managed by a policy, so approve the hook in Codex with /hooks (or ask your admin).", systemImage: "lock")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            case .disabledInCodex:
+                                Label("Turned off in Codex's /hooks, so Codex won't run it.", systemImage: "minus.circle")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            case .notFound, nil:
+                                EmptyView()
+                            }
+                        }
                         if let error = sessionMonitor.codexPromptHookError {
                             StatusBanner(
                                 text: error,
