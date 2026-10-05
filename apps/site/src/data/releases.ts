@@ -15,6 +15,15 @@ export interface Release {
 
 export const releases: readonly Release[] = [
   {
+    version: "1.1.16",
+    date: "2026-10-05",
+    highlights: [
+      "Extended Memory Guard to hold new Codex sessions during critical memory pressure, with opt-in hook setup that preserves existing Codex hooks.",
+      "Enhanced the status line with prompt-cache state and Claude Code usage fallbacks when saved readings are stale.",
+      "Polished usage-credit wording, Codex balance formatting, and guidance about restarting Codex after switching accounts.",
+    ],
+  },
+  {
     version: "1.1.15",
     date: "2026-10-02",
     highlights: [
