@@ -52,13 +52,17 @@ enum CodexAppServerSession {
     /// for the reset flow, which drives a multi-turn conversation the
     /// fire-and-forget `run` shape cannot express but which must be
     /// configured identically.
-    static func configuredProcess(executableURL: URL, codexHome: URL) -> Process {
+    /// - Parameter credentialStore: `file` for the isolated usage homes;
+    ///   `ephemeral` when pointing at the user's real CODEX_HOME for config
+    ///   work, so the session never loads (and can never refresh and rotate)
+    ///   the real login.
+    static func configuredProcess(executableURL: URL, codexHome: URL, credentialStore: String = "file") -> Process {
         let process = Process()
         process.executableURL = executableURL
         process.arguments = [
             "app-server",
             "--stdio",
-            "-c", "cli_auth_credentials_store=\"file\"",
+            "-c", "cli_auth_credentials_store=\"\(credentialStore)\"",
             "-c", "analytics.enabled=false",
             "-c", "check_for_update_on_startup=false"
         ]
@@ -73,10 +77,11 @@ enum CodexAppServerSession {
         executableURL: URL,
         codexHome: URL,
         timeout: TimeInterval,
+        credentialStore: String = "file",
         requests: [[String: Any]],
         consume: @escaping (Data) -> Bool
     ) -> Outcome {
-        let process = configuredProcess(executableURL: executableURL, codexHome: codexHome)
+        let process = configuredProcess(executableURL: executableURL, codexHome: codexHome, credentialStore: credentialStore)
 
         let input = Pipe()
         let output = Pipe()
