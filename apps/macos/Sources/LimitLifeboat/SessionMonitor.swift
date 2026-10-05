@@ -129,8 +129,10 @@ final class SessionMonitor: ObservableObject {
             break
         case .installed:
             try? writeHookScript()
-            // Only read the approval here: if the user declined it in Codex,
-            // a relaunch must not quietly approve it again.
+            // Mostly a read: if the user declined it in Codex, a relaunch must
+            // not approve it again. The one exception is our unchanged hook
+            // moving to a new position (another tool rewrote hooks.json),
+            // which Codex treats as new; that is re-approved.
             updateCodexHookApproval(approving: false)
         case .needsRepair:
             // Repairing changes the command, so Codex sees a new hook; the
@@ -326,6 +328,7 @@ final class SessionMonitor: ObservableObject {
             } else {
                 try codexHookInstaller.uninstall()
                 codexHookApproval = nil
+                lastCodexHookApproval = nil
                 codexHookApprovalGeneration += 1
             }
         } catch {
@@ -345,18 +348,42 @@ final class SessionMonitor: ObservableObject {
         updateCodexHookApproval(approving: true)
     }
 
+    /// The hook entry the app last approved, so a launch can tell "another
+    /// tool moved it" (re-approve) from "the user declined it" (leave it).
+    private static let codexHookApprovalKey = "codexMemoryGuardHookApproval"
+
+    private var lastCodexHookApproval: CodexHookTrust.Approval? {
+        get {
+            UserDefaults.standard.data(forKey: Self.codexHookApprovalKey)
+                .flatMap { try? JSONDecoder().decode(CodexHookTrust.Approval.self, from: $0) }
+        }
+        set {
+            if let newValue, let data = try? JSONEncoder().encode(newValue) {
+                UserDefaults.standard.set(data, forKey: Self.codexHookApprovalKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: Self.codexHookApprovalKey)
+            }
+        }
+    }
+
     private func updateCodexHookApproval(approving: Bool) {
         codexHookApprovalGeneration += 1
         let generation = codexHookApprovalGeneration
         let scriptFileName = MemoryGuardHookScript.fileName
         let codexHome = ClaudeHookInstaller.Hook.codexHooksURL.deletingLastPathComponent()
+        let lastApproved = lastCodexHookApproval
         Task.detached { [weak self] in
-            let result: Result<CodexHookTrust.Status, Error>
+            let result: Result<(status: CodexHookTrust.Status, approval: CodexHookTrust.Approval?), Error>
             if let codex = CodexHookTrust.resolveCodexExecutable() {
                 result = Result {
                     approving
                         ? try CodexHookTrust.approve(scriptFileName: scriptFileName, executableURL: codex, codexHome: codexHome)
-                        : try CodexHookTrust.status(scriptFileName: scriptFileName, executableURL: codex, codexHome: codexHome)
+                        : try CodexHookTrust.refresh(
+                            scriptFileName: scriptFileName,
+                            executableURL: codex,
+                            codexHome: codexHome,
+                            lastApproved: lastApproved
+                        )
                 }
             } else {
                 result = .failure(CodexHookTrust.Failure.codexNotFound)
@@ -365,11 +392,21 @@ final class SessionMonitor: ObservableObject {
         }
     }
 
-    private func applyCodexHookApproval(_ result: Result<CodexHookTrust.Status, Error>, approving: Bool, generation: Int) {
+    private func applyCodexHookApproval(
+        _ result: Result<(status: CodexHookTrust.Status, approval: CodexHookTrust.Approval?), Error>,
+        approving: Bool,
+        generation: Int
+    ) {
         guard generation == codexHookApprovalGeneration, isCodexPromptHookInstalled else { return }
         switch result {
-        case .success(let status):
-            codexHookApproval = status
+        case .success(let outcome):
+            codexHookApproval = outcome.status
+            if let approval = outcome.approval {
+                lastCodexHookApproval = approval
+            } else if outcome.status == .disabledInCodex {
+                // The user's "off" in Codex; never re-approve from this record.
+                lastCodexHookApproval = nil
+            }
         case .failure(let error):
             codexHookApproval = .needsApproval
             if approving { codexPromptHookError = error.localizedDescription }

@@ -39,6 +39,65 @@ public enum CodexHookTrust {
         }
     }
 
+    /// What the app last approved: Codex's positional key and the hash it
+    /// computed. The hash covers the hook's config, not its position.
+    public struct Approval: Codable, Equatable, Sendable {
+        public var key: String
+        public var hash: String
+
+        public init(key: String, hash: String) {
+            self.key = key
+            self.hash = hash
+        }
+    }
+
+    /// Launch-time check. Re-approves only when our hook is unchanged (same
+    /// hash) but has moved to a new position — another tool rewrote
+    /// hooks.json, which resets trust by key. A hook at the same position
+    /// that is untrusted means the user's call in Codex, and is left alone.
+    public static func refresh(
+        scriptFileName: String,
+        executableURL: URL,
+        codexHome: URL,
+        lastApproved: Approval?,
+        timeout: TimeInterval = 20
+    ) throws -> (status: Status, approval: Approval?) {
+        let (hook, policyBlocks) = try ourHook(scriptFileName: scriptFileName, executableURL: executableURL, codexHome: codexHome, timeout: timeout)
+        guard let hook else { return (.notFound, nil) }
+        let current = Approval(key: hook.key, hash: hook.currentHash)
+        if !hook.enabled { return (.disabledInCodex, nil) }
+        if hook.trustStatus == "trusted" || hook.trustStatus == "managed" { return (.trusted, current) }
+        if policyBlocks { return (.blockedByPolicy, nil) }
+        guard shouldReapprove(current: current, lastApproved: lastApproved), let lastApproved else { return (.needsApproval, nil) }
+        // The old position must still hold our approval and must not have been
+        // turned off: a user who switched the hook off in /hooks before the
+        // shift said no, and the move must not undo that.
+        let config = try exchange(
+            requests: [["method": "config/read", "id": 5, "params": [:] as [String: Any]]],
+            executableURL: executableURL,
+            codexHome: codexHome,
+            timeout: timeout
+        )[5]
+        guard priorStateConfirms(lastApproved, in: config) else { return (.needsApproval, nil) }
+        try record(current, executableURL: executableURL, codexHome: codexHome, timeout: timeout)
+        let after = try status(scriptFileName: scriptFileName, executableURL: executableURL, codexHome: codexHome, timeout: timeout)
+        return (after, after == .trusted ? current : nil)
+    }
+
+    /// `hooks.state[<old key>]` from `config/read` still carries our hash
+    /// and no `enabled = false`.
+    static func priorStateConfirms(_ approval: Approval, in configResponse: [String: Any]?) -> Bool {
+        let config = (configResponse?["result"] as? [String: Any])?["config"] as? [String: Any]
+        let state = ((config?["hooks"] as? [String: Any])?["state"] as? [String: Any])?[approval.key] as? [String: Any]
+        guard let state, state["trusted_hash"] as? String == approval.hash else { return false }
+        return state["enabled"] as? Bool != false
+    }
+
+    static func shouldReapprove(current: Approval, lastApproved: Approval?) -> Bool {
+        guard let lastApproved else { return false }
+        return lastApproved.hash == current.hash && lastApproved.key != current.key
+    }
+
     struct Hook: Equatable {
         var key: String
         var currentHash: String
@@ -75,20 +134,28 @@ public enum CodexHookTrust {
         executableURL: URL,
         codexHome: URL,
         timeout: TimeInterval = 20
-    ) throws -> Status {
+    ) throws -> (status: Status, approval: Approval?) {
         let (hook, policyBlocks) = try ourHook(scriptFileName: scriptFileName, executableURL: executableURL, codexHome: codexHome, timeout: timeout)
-        guard let hook else { return .notFound }
-        guard hook.enabled else { return .disabledInCodex }
-        guard hook.trustStatus == "untrusted" || hook.trustStatus == "modified" else { return .trusted }
-        guard !policyBlocks else { return .blockedByPolicy }
+        guard let hook else { return (.notFound, nil) }
+        let current = Approval(key: hook.key, hash: hook.currentHash)
+        guard hook.enabled else { return (.disabledInCodex, nil) }
+        guard hook.trustStatus == "untrusted" || hook.trustStatus == "modified" else { return (.trusted, current) }
+        guard !policyBlocks else { return (.blockedByPolicy, nil) }
 
+        try record(current, executableURL: executableURL, codexHome: codexHome, timeout: timeout)
+        let after = try status(scriptFileName: scriptFileName, executableURL: executableURL, codexHome: codexHome, timeout: timeout)
+        return (after, after == .trusted ? current : nil)
+    }
+
+    /// Upserts `hooks.state.<key>.trusted_hash`, exactly as Codex's /hooks does.
+    private static func record(_ approval: Approval, executableURL: URL, codexHome: URL, timeout: TimeInterval) throws {
         let request: [String: Any] = [
             "method": "config/batchWrite",
             "id": 3,
             "params": [
                 "edits": [[
                     "keyPath": "hooks.state",
-                    "value": [hook.key: ["trusted_hash": hook.currentHash]],
+                    "value": [approval.key: ["trusted_hash": approval.hash]],
                     "mergeStrategy": "upsert"
                 ]],
                 "reloadUserConfig": true
@@ -98,7 +165,6 @@ public enum CodexHookTrust {
         if let error = response["error"] as? [String: Any] {
             throw Failure.rejected(error["message"] as? String ?? "unknown error")
         }
-        return try status(scriptFileName: scriptFileName, executableURL: executableURL, codexHome: codexHome, timeout: timeout)
     }
 
     private static func ourHook(
