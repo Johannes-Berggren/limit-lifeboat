@@ -24,6 +24,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var executableMonitor: RunningExecutableMonitor?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Keep an opted-in ~/.local/bin link pointing at this copy of the app.
+        if let bundledTool = CommandLineToolInstaller.bundledTool() {
+            CommandLineToolInstaller().repointIfMoved(bundledTool: bundledTool)
+        }
         // Registered before AppState exists so a notification click that
         // launches the app is still delivered to this delegate. Guarded like
         // every UNUserNotificationCenter touch: an unbundled `swift run` has

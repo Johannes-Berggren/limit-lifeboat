@@ -22,6 +22,12 @@ MACOS_DIR="$CONTENTS_DIR/MacOS"
 FRAMEWORKS_DIR="$CONTENTS_DIR/Frameworks"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 APP_EXECUTABLE="$MACOS_DIR/$EXECUTABLE_NAME"
+# The limit-lifeboat command-line tool ships inside the bundle so Settings can
+# link it into ~/.local/bin (and Claude Code's status line) without users
+# building it; Sparkle updates then carry it along.
+CLI_NAME="limit-lifeboat"
+HELPERS_DIR="$CONTENTS_DIR/Helpers"
+APP_CLI="$HELPERS_DIR/$CLI_NAME"
 SPARKLE_ARTIFACT_ROOT="$APP_ROOT/.build/artifacts/sparkle/Sparkle"
 SPARKLE_SOURCE="$SPARKLE_ARTIFACT_ROOT/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
 SPARKLE_FRAMEWORK="$FRAMEWORKS_DIR/Sparkle.framework"
@@ -89,9 +95,14 @@ plutil -lint "$ENTITLEMENTS" >/dev/null
 swift build --package-path "$APP_ROOT" --disable-keychain -c "$CONFIGURATION" --arch "$ARCHITECTURE"
 BUILD_DIR="$(swift build --package-path "$APP_ROOT" --disable-keychain -c "$CONFIGURATION" --arch "$ARCHITECTURE" --show-bin-path)"
 BUILD_BIN="$BUILD_DIR/$EXECUTABLE_NAME"
+BUILD_CLI="$BUILD_DIR/$CLI_NAME"
 
 if [[ ! -x "$BUILD_BIN" ]]; then
   echo "Expected executable was not produced at $BUILD_BIN" >&2
+  exit 1
+fi
+if [[ ! -x "$BUILD_CLI" ]]; then
+  echo "Expected command-line tool was not produced at $BUILD_CLI" >&2
   exit 1
 fi
 
@@ -104,8 +115,9 @@ fi
 # build cannot be orphaned by the rm below.
 "$PROCESS_HELPER" check "$APP_EXECUTABLE"
 rm -rf "$APP_DIR"
-mkdir -p "$MACOS_DIR" "$FRAMEWORKS_DIR" "$RESOURCES_DIR/ThirdPartyLicenses"
+mkdir -p "$MACOS_DIR" "$FRAMEWORKS_DIR" "$HELPERS_DIR" "$RESOURCES_DIR/ThirdPartyLicenses"
 cp "$BUILD_BIN" "$APP_EXECUTABLE"
+cp "$BUILD_CLI" "$APP_CLI"
 ditto "$SPARKLE_SOURCE" "$SPARKLE_FRAMEWORK"
 # Limit Lifeboat is not sandboxed, so Sparkle's sandbox-only XPC services are
 # unnecessary. Removing both the real directory and top-level symlink also
@@ -191,6 +203,11 @@ if [[ "$(lipo -archs "$APP_EXECUTABLE")" != "arm64" ]]; then
   exit 1
 fi
 
+if [[ "$(lipo -archs "$APP_CLI")" != "arm64" ]]; then
+  echo "Packaged command-line tool must contain only arm64 code: $(lipo -archs "$APP_CLI")" >&2
+  exit 1
+fi
+
 if ! otool -L "$APP_EXECUTABLE" | grep -Fq '@rpath/Sparkle.framework/Versions/B/Sparkle'; then
   echo "Packaged executable is not linked to Sparkle through @rpath." >&2
   exit 1
@@ -229,11 +246,13 @@ if [[ "${SKIP_ADHOC_SIGN:-0}" != "1" ]]; then
   codesign --force --sign "$RESOLVED_SIGN_IDENTITY" \
     "$SPARKLE_FRAMEWORK/Versions/B/Updater.app"
   codesign --force --sign "$RESOLVED_SIGN_IDENTITY" "$SPARKLE_FRAMEWORK"
+  codesign --force --sign "$RESOLVED_SIGN_IDENTITY" --identifier "$BUNDLE_ID.cli" "$APP_CLI"
   codesign --force --sign "$RESOLVED_SIGN_IDENTITY" \
     --entitlements "$ENTITLEMENTS" \
     "$APP_DIR"
   codesign --verify --all-architectures --strict --verbose=2 "$APP_DIR"
   codesign --verify --all-architectures --strict --verbose=2 "$SPARKLE_FRAMEWORK"
+  codesign --verify --all-architectures --strict --verbose=2 "$APP_CLI"
 
   if [[ "$APP_VARIANT" == "development" ]]; then
     SIGNING_DETAILS="$(codesign --display --verbose=4 "$APP_DIR" 2>&1)"

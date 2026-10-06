@@ -154,8 +154,10 @@ normal browser and use the app's browser-text import flow instead.
 
 ## Command-line companion
 
-The package also builds `limit-lifeboat`, a read-only CLI that prints what the
-app last recorded:
+The app ships `limit-lifeboat`, a read-only CLI that prints what the app last
+recorded. Turn on Settings → Command Line & Status Line → "Install the
+limit-lifeboat command" to link it into `~/.local/bin`; the link points into the
+app, so it updates with it. To build it yourself instead:
 
 ```bash
 swift build --package-path apps/macos -c release --product limit-lifeboat
@@ -171,7 +173,9 @@ useful next to how old it is.
 
 `statusline` prints one compact line — `claude 85%! · codex 6%` — where `!`
 means warning or depleted and `?` means the reading is over 30 minutes old.
-Wire it into Claude Code's own status line in `~/.claude/settings.json`:
+"Show usage in Claude Code's status line" in the same Settings section wires it
+into Claude Code for you (it never replaces a status line you already have). To
+do it by hand, in `~/.claude/settings.json`:
 
 ```json
 { "statusLine": { "type": "command", "command": "limit-lifeboat statusline" } }
