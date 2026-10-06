@@ -101,6 +101,7 @@ struct SettingsView: View {
     /// that predate this app session. Optional for the same preview/test reason.
     var applicationSupportDirectory: URL? = nil
 
+    @StateObject private var commandLine = CommandLineIntegrationModel()
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
     @State private var launchAtLoginMessage: String?
     @State private var diagnosticsMessage: String?
@@ -357,6 +358,52 @@ struct SettingsView: View {
                                 color: DS.danger
                             )
                         }
+                    }
+
+                    if commandLine.bundledTool != nil {
+                        Section("Command Line & Status Line") {
+                            Toggle("Install the limit-lifeboat command", isOn: Binding(
+                                get: { commandLine.toolStatus == .installed },
+                                set: { commandLine.setToolInstalled($0) }
+                            ))
+                            .disabled(commandLine.toolStatus == .occupied)
+                            Label(
+                                commandLine.toolStatus == .occupied
+                                    ? "\(commandLine.linkPath) already exists and isn't Limit Lifeboat's, so it's left alone."
+                                    : "Links the bundled command to \(commandLine.linkPath), for shell prompts, tmux and scripts. It updates with the app.",
+                                systemImage: "info.circle"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            Toggle("Show usage in Claude Code's status line", isOn: Binding(
+                                get: { commandLine.statusLineStatus == .installed },
+                                set: { commandLine.setStatusLineInstalled($0) }
+                            ))
+                            .disabled(commandLine.toolStatus == .occupied)
+                            if case .other(let command) = commandLine.statusLineStatus {
+                                Label(
+                                    "Claude Code already has a status line (\(command)), so it's left alone. Add `limit-lifeboat statusline` to it yourself to show usage there.",
+                                    systemImage: "info.circle"
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            } else {
+                                Label(
+                                    "Sets statusLine in ~/.claude/settings.json: active accounts' usage and, inside Claude Code, the session's prompt cache (\"cache 42m\" left). New Claude Code sessions pick it up.",
+                                    systemImage: "info.circle"
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            }
+                            if let error = commandLine.error {
+                                StatusBanner(
+                                    text: error,
+                                    systemImage: "exclamationmark.triangle.fill",
+                                    color: DS.danger
+                                )
+                            }
+                        }
+                        .onAppear { commandLine.refresh() }
                     }
 
                     Section("Updates") {

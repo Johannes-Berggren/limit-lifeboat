@@ -140,7 +140,7 @@ guard ["status", "list", "active", "statusline"].contains(command) else {
 
 let repository: ProfileRepository
 do {
-    repository = try ProfileRepository()
+    repository = try ProfileRepository(applicationSupportDirectoryName: enclosingAppStoreName() ?? "LimitLifeboat")
 } catch {
     fail("could not locate the account store: \(error.localizedDescription)", .unavailable)
 }
@@ -159,4 +159,16 @@ if command == "statusline" {
     let claude = StatusLineStdinReader.read(fd: STDIN_FILENO).flatMap(ClaudeStatusLineInput.parse)
     print(CLIStatusLine.text(for: report, claude: claude))
     exit(ExitCode.success.rawValue)
+}
+
+/// When run from inside an app bundle (directly or through the
+/// ~/.local/bin link), read that app's own store, so a development build's
+/// bundled tool reports the development app rather than the release one.
+func enclosingAppStoreName() -> String? {
+    // argv[0] is a bare name when run from PATH; the loader's path is not.
+    guard let executable = Bundle.main.executableURL?.resolvingSymlinksInPath() else { return nil }
+    let contents = executable.deletingLastPathComponent().deletingLastPathComponent()
+    guard contents.lastPathComponent == "Contents",
+          let info = NSDictionary(contentsOf: contents.appendingPathComponent("Info.plist")) else { return nil }
+    return info["LimitLifeboatApplicationSupportDirectoryName"] as? String
 }

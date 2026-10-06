@@ -39,6 +39,7 @@ SPARKLE_ACCOUNT="${SPARKLE_ACCOUNT:-limit-lifeboat}"
 EXPECTED_TAG="v$RELEASE_VERSION"
 APP_DIR="$APP_ROOT/dist/$PRODUCT_NAME.app"
 APP_EXECUTABLE="$APP_DIR/Contents/MacOS/$EXECUTABLE_NAME"
+APP_CLI="$APP_DIR/Contents/Helpers/limit-lifeboat"
 INFO_PLIST="$APP_DIR/Contents/Info.plist"
 APP_FRAMEWORK="$APP_DIR/Contents/Frameworks/Sparkle.framework"
 APP_AUTOUPDATE="$APP_FRAMEWORK/Versions/B/Autoupdate"
@@ -270,6 +271,9 @@ otool -l "$APP_EXECUTABLE" | grep -A2 LC_RPATH | grep -Fq '@executable_path/../F
   || fail "Packaged executable is not arm64-only: $(lipo -archs "$APP_EXECUTABLE")"
 [[ "$(xcrun vtool -show-build "$APP_EXECUTABLE" | awk '$1 == "minos" { print $2; exit }')" == "14.0" ]] \
   || fail "Packaged executable does not have a macOS 14.0 deployment target"
+[[ -x "$APP_CLI" ]] || fail "The app does not contain the limit-lifeboat command-line tool"
+[[ "$(lipo -archs "$APP_CLI")" == "$ARCHITECTURE" ]] \
+  || fail "Packaged command-line tool is not arm64-only: $(lipo -archs "$APP_CLI")"
 
 echo "==> Signing Sparkle inside-out with '$SIGN_IDENTITY'"
 codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP_AUTOUPDATE"
@@ -279,6 +283,10 @@ assert_developer_id_signature "$APP_AUTOUPDATE" "Sparkle Autoupdate"
 assert_developer_id_signature "$APP_UPDATER" "Sparkle Updater.app"
 assert_developer_id_signature "$APP_FRAMEWORK" "Sparkle.framework"
 
+echo "==> Signing the command-line tool with '$SIGN_IDENTITY'"
+codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP_CLI"
+assert_developer_id_signature "$APP_CLI" "limit-lifeboat command-line tool"
+
 echo "==> Signing app with '$SIGN_IDENTITY'"
 codesign --force --options runtime --timestamp \
   --entitlements "$ENTITLEMENTS" \
@@ -287,6 +295,7 @@ codesign --verify --all-architectures --strict --verbose=2 "$APP_DIR"
 assert_developer_id_signature "$APP_AUTOUPDATE" "Embedded Sparkle Autoupdate"
 assert_developer_id_signature "$APP_UPDATER" "Embedded Sparkle Updater.app"
 assert_developer_id_signature "$APP_FRAMEWORK" "Embedded Sparkle.framework"
+assert_developer_id_signature "$APP_CLI" "Embedded limit-lifeboat command-line tool"
 
 CODESIGN_DETAILS="$(codesign --display --verbose=4 "$APP_DIR" 2>&1)"
 grep -Fxq "Identifier=$BUNDLE_ID" <<< "$CODESIGN_DETAILS" \
@@ -396,6 +405,7 @@ codesign --verify --all-architectures --strict --verbose=2 "$MOUNTED_APP"
 assert_developer_id_signature "$MOUNTED_AUTOUPDATE" "DMG Sparkle Autoupdate"
 assert_developer_id_signature "$MOUNTED_UPDATER" "DMG Sparkle Updater.app"
 assert_developer_id_signature "$MOUNTED_FRAMEWORK" "DMG Sparkle.framework"
+assert_developer_id_signature "$MOUNTED_APP/Contents/Helpers/limit-lifeboat" "DMG limit-lifeboat command-line tool"
 MOUNTED_CODESIGN_DETAILS="$(codesign --display --verbose=4 "$MOUNTED_APP" 2>&1)"
 grep -Fxq "Identifier=$BUNDLE_ID" <<< "$MOUNTED_CODESIGN_DETAILS" \
   || fail "The app inside the DMG has the wrong signing identifier"
