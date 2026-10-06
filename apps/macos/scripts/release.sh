@@ -284,7 +284,7 @@ assert_developer_id_signature "$APP_UPDATER" "Sparkle Updater.app"
 assert_developer_id_signature "$APP_FRAMEWORK" "Sparkle.framework"
 
 echo "==> Signing the command-line tool with '$SIGN_IDENTITY'"
-codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP_CLI"
+codesign --force --options runtime --timestamp --identifier "$BUNDLE_ID.cli" --sign "$SIGN_IDENTITY" "$APP_CLI"
 assert_developer_id_signature "$APP_CLI" "limit-lifeboat command-line tool"
 
 echo "==> Signing app with '$SIGN_IDENTITY'"

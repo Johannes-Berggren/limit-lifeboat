@@ -49,9 +49,13 @@ final class CommandLineIntegrationModel: ObservableObject {
         guard let bundledTool else { return }
         do {
             if installed {
+                // Refuse before creating a link the user didn't ask for.
+                if case .other(let command) = statusLineInstaller.status() {
+                    throw ClaudeStatusLineInstaller.InstallerError.otherStatusLine(command)
+                }
                 try toolInstaller.install(bundledTool: bundledTool)
-                // The link path, not the bundle path: it keeps working if the
-                // app is moved and is re-linked.
+                // The link path, not the bundle path: the app re-points the
+                // link at launch if it is moved.
                 try statusLineInstaller.install(toolPath: toolInstaller.linkURL.path)
             } else {
                 try statusLineInstaller.uninstall()

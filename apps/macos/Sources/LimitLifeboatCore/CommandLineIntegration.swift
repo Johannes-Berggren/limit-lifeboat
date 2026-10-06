@@ -14,11 +14,14 @@ public struct CommandLineToolInstaller {
 
     public enum InstallerError: LocalizedError, Equatable {
         case occupied(String)
+        case temporaryLocation
 
         public var errorDescription: String? {
             switch self {
             case .occupied(let path):
                 return "\(path) already exists and wasn't installed by Limit Lifeboat, so it was left alone. Remove it to use the bundled command."
+            case .temporaryLocation:
+                return "Limit Lifeboat is running from a disk image or a temporary location, so a link to it would break. Move the app to Applications, open it from there, and try again."
             }
         }
     }
@@ -52,6 +55,7 @@ public struct CommandLineToolInstaller {
     }
 
     public func install(bundledTool: URL) throws {
+        guard !Self.isTemporaryLocation(bundledTool) else { throw InstallerError.temporaryLocation }
         switch status(bundledTool: bundledTool) {
         case .installed:
             return
@@ -70,6 +74,33 @@ public struct CommandLineToolInstaller {
     public func uninstall() throws {
         guard let destination = linkDestination(), isOurs(destination) else { return }
         try fileManager.removeItem(at: linkURL)
+    }
+
+    /// At launch: if our link points at another copy of the app (it was moved
+    /// or updated in place elsewhere), point it at this one. The user opted in
+    /// already; a stale link would leave Claude Code's status line blank.
+    /// Never creates a link that doesn't exist, never touches others' files.
+    @discardableResult
+    public func repointIfMoved(bundledTool: URL) -> Bool {
+        guard !Self.isTemporaryLocation(bundledTool),
+              let destination = linkDestination(),
+              isOurs(destination),
+              destination != bundledTool.standardizedFileURL.path else { return false }
+        do {
+            try fileManager.removeItem(at: linkURL)
+            try fileManager.createSymbolicLink(at: linkURL, withDestinationURL: bundledTool)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// A mounted disk image (read-only) or Gatekeeper's App Translocation:
+    /// both vanish. Apps kept on a writable external drive are fine.
+    static func isTemporaryLocation(_ url: URL) -> Bool {
+        if url.standardizedFileURL.path.contains("/AppTranslocation/") { return true }
+        let readOnly = (try? url.resourceValues(forKeys: [.volumeIsReadOnlyKey]))?.volumeIsReadOnly
+        return readOnly == true
     }
 
     /// The symlink's target, or nil when there is no symlink at the path.
@@ -148,7 +179,13 @@ public struct ClaudeStatusLineInstaller {
         try file.write(settings)
     }
 
+    /// Exactly what this installer writes, or the README's hand-written
+    /// form; never a longer command that merely mentions the tool.
     static func isOurs(_ command: String) -> Bool {
-        command.contains(CommandLineToolInstaller.commandName) && command.hasSuffix("statusline")
+        let trimmed = command.trimmingCharacters(in: .whitespaces)
+        if trimmed == "\(CommandLineToolInstaller.commandName) statusline" { return true }
+        guard trimmed.hasSuffix("' statusline"), trimmed.hasPrefix("'") else { return false }
+        let path = String(trimmed.dropFirst().dropLast("' statusline".count))
+        return !path.contains("'") && path.hasSuffix("/\(CommandLineToolInstaller.commandName)")
     }
 }

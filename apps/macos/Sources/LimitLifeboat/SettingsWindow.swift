@@ -379,7 +379,11 @@ struct SettingsView: View {
                                 get: { commandLine.statusLineStatus == .installed },
                                 set: { commandLine.setStatusLineInstalled($0) }
                             ))
-                            .disabled(commandLine.toolStatus == .occupied)
+                            .disabled({
+                                if commandLine.toolStatus == .occupied { return true }
+                                if case .other = commandLine.statusLineStatus { return true }
+                                return false
+                            }())
                             if case .other(let command) = commandLine.statusLineStatus {
                                 Label(
                                     "Claude Code already has a status line (\(command)), so it's left alone. Add `limit-lifeboat statusline` to it yourself to show usage there.",

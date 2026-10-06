@@ -246,7 +246,7 @@ if [[ "${SKIP_ADHOC_SIGN:-0}" != "1" ]]; then
   codesign --force --sign "$RESOLVED_SIGN_IDENTITY" \
     "$SPARKLE_FRAMEWORK/Versions/B/Updater.app"
   codesign --force --sign "$RESOLVED_SIGN_IDENTITY" "$SPARKLE_FRAMEWORK"
-  codesign --force --sign "$RESOLVED_SIGN_IDENTITY" "$APP_CLI"
+  codesign --force --sign "$RESOLVED_SIGN_IDENTITY" --identifier "$BUNDLE_ID.cli" "$APP_CLI"
   codesign --force --sign "$RESOLVED_SIGN_IDENTITY" \
     --entitlements "$ENTITLEMENTS" \
     "$APP_DIR"

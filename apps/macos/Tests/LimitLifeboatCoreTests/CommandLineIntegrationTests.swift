@@ -53,6 +53,27 @@ final class CommandLineToolInstallerTests: XCTestCase {
     }
 }
 
+extension CommandLineToolInstallerTests {
+    func testRepointsOnlyAnExistingLinkOfOursAfterTheAppMoved() throws {
+        let installer = CommandLineToolInstaller(linkURL: link)
+        XCTAssertFalse(installer.repointIfMoved(bundledTool: tool), "never creates a link")
+
+        let old = directory.appendingPathComponent("Old/Limit Lifeboat.app/Contents/Helpers/limit-lifeboat")
+        try FileManager.default.createDirectory(at: link.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: old)
+        XCTAssertTrue(installer.repointIfMoved(bundledTool: tool))
+        XCTAssertEqual(installer.status(bundledTool: tool), .installed)
+        XCTAssertFalse(installer.repointIfMoved(bundledTool: tool), "already current")
+    }
+
+    func testRefusesToLinkIntoADiskImageOrTranslocatedCopy() {
+        XCTAssertTrue(CommandLineToolInstaller.isTemporaryLocation(URL(fileURLWithPath: "/private/var/folders/x/AppTranslocation/ABC/d/Limit Lifeboat.app/Contents/Helpers/limit-lifeboat")))
+        XCTAssertFalse(CommandLineToolInstaller.isTemporaryLocation(tool))
+        let installer = CommandLineToolInstaller(linkURL: link)
+        XCTAssertThrowsError(try installer.install(bundledTool: URL(fileURLWithPath: "/private/var/folders/x/AppTranslocation/ABC/d/Limit Lifeboat.app/Contents/Helpers/limit-lifeboat")))
+    }
+}
+
 final class ClaudeStatusLineInstallerTests: XCTestCase {
     private var settingsURL: URL!
 
@@ -83,6 +104,14 @@ final class ClaudeStatusLineInstallerTests: XCTestCase {
         XCTAssertEqual(installer.status(), .notSet)
         XCTAssertEqual(try read()["model"] as? String, "opus")
         XCTAssertNotNil(try read()["hooks"])
+    }
+
+    func testOwnershipIsExact() {
+        XCTAssertTrue(ClaudeStatusLineInstaller.isOurs("'/Users/me/.local/bin/limit-lifeboat' statusline"))
+        XCTAssertTrue(ClaudeStatusLineInstaller.isOurs("limit-lifeboat statusline"))
+        XCTAssertFalse(ClaudeStatusLineInstaller.isOurs("foo && limit-lifeboat statusline"))
+        XCTAssertFalse(ClaudeStatusLineInstaller.isOurs("'/x/limit-lifeboat' statusline; rm -rf ~"))
+        XCTAssertFalse(ClaudeStatusLineInstaller.isOurs("~/my-line.sh"))
     }
 
     func testNeverOverwritesTheUsersOwnStatusLine() throws {
