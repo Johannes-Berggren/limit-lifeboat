@@ -282,6 +282,8 @@ final class AppState: ObservableObject {
         sessionMonitor.$rows
             .combineLatest(sessionMonitor.$parked, sessionMonitor.$starredProjects)
             .dropFirst()
+            // The recompute can itself touch `parked`; only real changes count.
+            .removeDuplicates(by: ==)
             .sink { [weak self] _ in
                 // Published values land after willSet; read them next turn.
                 Task { @MainActor [weak self] in self?.recomputeShortfall() }

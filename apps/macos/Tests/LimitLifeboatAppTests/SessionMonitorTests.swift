@@ -1,3 +1,4 @@
+import Combine
 import XCTest
 @testable import LimitLifeboat
 @testable import LimitLifeboatCore
@@ -57,5 +58,26 @@ final class SessionMonitorTests: XCTestCase {
 
         XCTAssertEqual(monitor.trend.samples.count, 1)
         XCTAssertEqual(monitor.trend.latestStatus, monitor.memory)
+    }
+
+    /// AppState recomputes the shortfall on every `$parked` emission and
+    /// calls `resumeAll` from there; a no-op that still published pinned the
+    /// main thread at full CPU.
+    func testResumeAllWithNothingToResumeDoesNotPublish() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "SessionMonitorTests-\(UUID().uuidString)"))
+        let monitor = SessionMonitor(
+            settings: SettingsStore(defaults: defaults),
+            stateDirectory: directory,
+            notify: { _ in },
+            notifyColdCache: { _ in }
+        )
+        var emissions = 0
+        let cancellable = monitor.$parked.dropFirst().sink { _ in emissions += 1 }
+        defer { cancellable.cancel() }
+
+        monitor.resumeAll()
+        monitor.resumeAll { _ in false }
+
+        XCTAssertEqual(emissions, 0)
     }
 }

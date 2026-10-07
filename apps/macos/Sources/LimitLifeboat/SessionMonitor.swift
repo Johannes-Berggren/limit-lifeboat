@@ -502,12 +502,14 @@ final class SessionMonitor: ObservableObject {
     }
 
     /// Resumes every park matching `predicate` (all of them by default).
+    /// Leaves `parked` untouched when nothing matches: AppState recomputes
+    /// the shortfall on every `$parked` emission and calls this from there,
+    /// so a no-op assignment would loop forever.
     func resumeAll(where predicate: (SessionParkState.Entry) -> Bool = { _ in true }) {
-        let before = parked.count
-        parked = parked.filter { !predicate($0.value) }
-        if parked.count != before {
-            writeParkState(now: Date())
-        }
+        let remaining = parked.filter { !predicate($0.value) }
+        guard remaining.count != parked.count else { return }
+        parked = remaining
+        writeParkState(now: Date())
     }
 
     /// Drops parks for sessions that exited (or whose pid was reused) and
@@ -515,11 +517,14 @@ final class SessionMonitor: ObservableObject {
     /// also the heartbeat that tells the hook the app is still running.
     private func refreshParks(rows: [AgentSessionRow], now: Date) {
         let live = Dictionary(rows.map { ($0.id, $0.session.startedAt) }, uniquingKeysWith: { first, _ in first })
-        parked = parked.filter { pid, entry in
+        let remaining = parked.filter { pid, entry in
             guard let startedAt = live[pid], abs(startedAt.timeIntervalSince(entry.startedAt)) < 1 else {
                 return false
             }
             return entry.releaseAt.map { $0 > now } ?? true
+        }
+        if remaining.count != parked.count {
+            parked = remaining
         }
         writeParkState(now: now)
     }
