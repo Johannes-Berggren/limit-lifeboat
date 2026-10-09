@@ -15,6 +15,14 @@ export interface Release {
 
 export const releases: readonly Release[] = [
   {
+    version: "1.1.18",
+    date: "2026-10-09",
+    highlights: [
+      "Fixed a loop that kept Limit Lifeboat near full CPU on one core while idle.",
+      "Bundled the limit-lifeboat command-line tool in the app, with one-click status line setup.",
+    ],
+  },
+  {
     version: "1.1.17",
     date: "2026-10-05",
     highlights: [
