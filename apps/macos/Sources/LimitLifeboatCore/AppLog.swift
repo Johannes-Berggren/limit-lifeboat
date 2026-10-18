@@ -23,4 +23,6 @@ public enum AppLog {
     public static let history = Logger(subsystem: subsystem, category: "history")
     /// Profile and snapshot persistence in Application Support.
     public static let persistence = Logger(subsystem: subsystem, category: "persistence")
+    /// The control socket that `limit-lifeboat refresh` and `switch` use.
+    public static let control = Logger(subsystem: subsystem, category: "control")
 }

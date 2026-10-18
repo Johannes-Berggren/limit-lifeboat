@@ -173,6 +173,9 @@ final class AppState: ObservableObject {
     /// switch onto a constrained account must not be immediately reverted.
     private var lastAutoSwitchAttempt: [Provider: Date] = [:]
     private var lastManualSwitchAt: [Provider: Date] = [:]
+    /// `account-issues.json`, the CLI's view of `refreshStates`.
+    private var accountIssueTracker = AccountIssueTracker()
+    private var lastPersistedIssues: [String: [AccountIssue]]?
     /// Whether the current active account was chosen by the user rather than
     /// an automatic switch. A manual park is only ever left via the early-limit
     /// escape path, never a priority rebalance.
@@ -287,6 +290,16 @@ final class AppState: ObservableObject {
             .sink { [weak self] _ in
                 // Published values land after willSet; read them next turn.
                 Task { @MainActor [weak self] in self?.recomputeShortfall() }
+            }
+            .store(in: &cancellables)
+
+        // Persist each account's refresh problems for `limit-lifeboat status
+        // --detail`. Debounced: a refresh pass flips many rows at once.
+        $refreshStates
+            .combineLatest($profiles.map { Set($0.map(\.id)) }.removeDuplicates())
+            .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
+            .sink { [weak self] states, accountIDs in
+                self?.persistAccountIssues(states: states, accountIDs: accountIDs)
             }
             .store(in: &cancellables)
     }
@@ -5362,6 +5375,9 @@ final class AppState: ObservableObject {
     private enum RetryRefreshSource: Equatable {
         case row
         case notification
+        /// `limit-lifeboat refresh <id>` over the control socket: an explicit
+        /// user intent like `row`, but with no window to put an alert in.
+        case control
         /// Policy-gated automatic recovery of an inactive Claude account,
         /// queued by the scheduled poll. Same workflow as a user Retry, but
         /// with the read-only-for-active rotation intent and no status text.
@@ -5377,6 +5393,7 @@ final class AppState: ObservableObject {
             switch self {
             case .row: return "row"
             case .notification: return "notification"
+            case .control: return "control_socket"
             case .scheduledRecovery: return "scheduled_recovery"
             }
         }
@@ -5433,7 +5450,7 @@ final class AppState: ObservableObject {
         guard var profile = profiles.first(where: { $0.id == profileID }) else {
             return .noLongerAvailable
         }
-        if source == .row {
+        if source == .row || source == .control {
             // An explicit user Retry re-arms automatic recovery for this row
             // even if this attempt fails again.
             scheduledClaudeRecoveryLedger[profileID] = nil
@@ -5464,7 +5481,7 @@ final class AppState: ObservableObject {
             if Task.isCancelled { return .deferred(reason: "Refresh was cancelled.") }
             try? await Task.sleep(nanoseconds: 100_000_000)
             switch source {
-            case .row, .scheduledRecovery:
+            case .row, .control, .scheduledRecovery:
                 guard let current = profiles.first(where: { $0.id == profileID }) else {
                     return .noLongerAvailable
                 }
@@ -5518,6 +5535,10 @@ final class AppState: ObservableObject {
              (.row, .rotationDeferred),
              (.row, .usagePaused),
              (.row, .credentialRepairRequired),
+             (.control, .readFailed),
+             (.control, .rotationDeferred),
+             (.control, .usagePaused),
+             (.control, .credentialRepairRequired),
              // Deliberately not `.readFailed`: automatic recovery heals only
              // the rotation deferrals its queueing policy admits.
              (.scheduledRecovery, .rotationDeferred),
@@ -7183,5 +7204,148 @@ final class AppState: ObservableObject {
             profiles: profiles,
             snapshots: snapshots
         )
+    }
+}
+
+// MARK: - Control socket
+
+/// `limit-lifeboat refresh` and `switch`, received over the control socket.
+///
+/// Both run through the app's existing workflows: `refreshAll()`, the
+/// explicit-Retry workflow (`retryRefresh`), and `switchCLI(to:)` with its
+/// provider gate, preflight and rollback. Nothing here reads or writes a
+/// credential directly. `interactive: false` matches the notification
+/// switch: there is no window to anchor a confirmation on, so problems come
+/// back as an error instead of a modal.
+extension AppState {
+    /// How long a request may wait for a refresh that was already running.
+    private static let controlJoinTimeout: TimeInterval = 150
+
+    func handleControl(_ intent: ControlIntent) async -> Result<ControlResult, ControlError> {
+        switch intent {
+        case .refresh(let accountID):
+            return await controlRefresh(accountID: accountID)
+        case .switchTo(let accountID):
+            return await controlSwitch(accountID: accountID)
+        }
+    }
+
+    private func controlRefresh(accountID: UUID?) async -> Result<ControlResult, ControlError> {
+        let command = ControlCommand.refresh.rawValue
+        guard let accountID else {
+            let coalesced = await controlRunFullRefresh()
+            return .success(ControlResult(
+                command: command,
+                accounts: profiles.map(controlOutcome),
+                coalesced: coalesced
+            ))
+        }
+        guard profiles.contains(where: { $0.id == accountID }) else {
+            return .failure(Self.accountNotFound)
+        }
+
+        // A row in a retryable problem state gets the same workflow as its
+        // Retry button; a healthy one is refreshed by a normal pass, which
+        // is the only way the app reads a healthy account.
+        var coalesced = false
+        switch refreshStates[accountID] {
+        case .readFailed, .rotationDeferred, .usagePaused, .credentialRepairRequired:
+            switch await retryRefresh(profileID: accountID, source: .control) {
+            case .completed, .noLongerAvailable:
+                break
+            case .needsLogin(let reason):
+                return .failure(ControlError(code: "needs_login", message: reason))
+            case .authorizationRequired(let reason):
+                return .failure(ControlError(code: "authorization_required", message: reason))
+            case .deferred(let reason):
+                return .failure(ControlError(code: "deferred", message: reason))
+            case .failed(let reason):
+                return .failure(ControlError(code: "refresh_failed", message: reason))
+            }
+        default:
+            coalesced = await controlRunFullRefresh()
+        }
+
+        guard let profile = profiles.first(where: { $0.id == accountID }) else {
+            return .failure(Self.accountNotFound)
+        }
+        let outcome = controlOutcome(profile)
+        if let blocking = outcome.issues.first(where: { $0.severity == .error }) {
+            return .failure(ControlError(code: blocking.code == "needs_login" ? "needs_login" : "refresh_failed", message: blocking.message))
+        }
+        return .success(ControlResult(command: command, accounts: [outcome], coalesced: coalesced))
+    }
+
+    /// Runs the scheduled refresh pass, or waits for the one already running.
+    /// Returns whether it joined an existing pass.
+    private func controlRunFullRefresh() async -> Bool {
+        let joined = isRefreshing
+        if !joined {
+            await refreshAll()
+        }
+        let deadline = Date().addingTimeInterval(Self.controlJoinTimeout)
+        while isRefreshing, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        return joined
+    }
+
+    private func controlSwitch(accountID: UUID) async -> Result<ControlResult, ControlError> {
+        let command = ControlCommand.switch.rawValue
+        guard let target = profiles.first(where: { $0.id == accountID }) else {
+            return .failure(Self.accountNotFound)
+        }
+        if target.isActiveCLI {
+            return .success(ControlResult(command: command, accounts: [controlOutcome(target)], alreadyActive: true))
+        }
+        let previous = activeProfile(for: target.provider)
+        guard await switchCLI(to: target, interactive: false) else {
+            return .failure(ControlError(
+                code: "switch_failed",
+                message: statusMessage.isEmpty
+                    ? "Could not switch to \(target.label). Open Limit Lifeboat for details."
+                    : statusMessage
+            ))
+        }
+        // A user chose this switch, so auto-switch honours it the same way
+        // it honours an in-app or notification switch.
+        lastManualSwitchAt[target.provider] = Date()
+        let current = profiles.first(where: { $0.id == accountID }) ?? target
+        return .success(ControlResult(
+            command: command,
+            accounts: [controlOutcome(current)],
+            previousAccountId: previous?.id.uuidString,
+            alreadyActive: false
+        ))
+    }
+
+    private static let accountNotFound = ControlError(
+        code: "account_not_found",
+        message: "No saved account has that id. List them with `limit-lifeboat list --json`."
+    )
+
+    private func controlOutcome(_ profile: AccountProfile) -> ControlAccountOutcome {
+        let snapshot = snapshots[profile.id]
+        return ControlAccountOutcome(
+            id: profile.id.uuidString,
+            provider: profile.provider.rawValue,
+            label: profile.label,
+            isActive: profile.isActiveCLI,
+            lastRefreshed: snapshot?.lastRefreshed,
+            ageSeconds: snapshot.map { max(0, Int(Date().timeIntervalSince($0.lastRefreshed))) },
+            issues: refreshStates[profile.id].flatMap { AccountIssue.from($0) }.map { [$0] } ?? []
+        )
+    }
+
+    /// Writes `account-issues.json` when the set of problems changes.
+    fileprivate func persistAccountIssues(states: [UUID: AccountRefreshState], accountIDs: Set<UUID>) {
+        let snapshot = accountIssueTracker.snapshot(states: states, knownAccounts: accountIDs)
+        guard snapshot.accounts != lastPersistedIssues else { return }
+        do {
+            try AccountIssueStore(applicationSupportDirectory: repository.applicationSupportDirectory).write(snapshot)
+            lastPersistedIssues = snapshot.accounts
+        } catch {
+            AppLog.persistence.error("Could not save account issues: \(error.localizedDescription, privacy: .public)")
+        }
     }
 }

@@ -204,8 +204,15 @@ final class CLIStatusReportTests: XCTestCase {
     // MARK: - Schema
 
     /// Third-party status lines parse this. A rename is a breaking change and
-    /// has to come with a schema bump, so pin the wire keys.
+    /// has to come with a schema bump, so pin the wire keys. Schema 2 added
+    /// fields only behind --detail: without it, and pinned to 1, the keys are
+    /// exactly schema 1's.
     func testJSONWireFormatIsStable() throws {
+        try assertWireFormat(pinnedTo: nil, expectedSchema: 2)
+        try assertWireFormat(pinnedTo: 1, expectedSchema: 1)
+    }
+
+    private func assertWireFormat(pinnedTo version: Int?, expectedSchema: Int) throws {
         let account = profile("Work", .claude, active: true, email: "dev@example.com")
         let report = CLIStatusReportBuilder.report(
             profiles: [account],
@@ -213,12 +220,13 @@ final class CLIStatusReportTests: XCTestCase {
             now: now
         )
 
-        let data = try JSONEncoder.appEncoder.encode(report)
+        let data = try JSONEncoder.appEncoder.encode(version.map { report.pinned(to: $0) } ?? report)
         let object = try XCTUnwrap(
             JSONSerialization.jsonObject(with: data) as? [String: Any]
         )
 
-        XCTAssertEqual(object["schema"] as? Int, 1)
+        XCTAssertEqual(object["schema"] as? Int, expectedSchema)
+        XCTAssertEqual(Set(object.keys), ["schema", "generatedAt", "accounts"])
         let accounts = try XCTUnwrap(object["accounts"] as? [[String: Any]])
         XCTAssertEqual(
             Set(accounts[0].keys),

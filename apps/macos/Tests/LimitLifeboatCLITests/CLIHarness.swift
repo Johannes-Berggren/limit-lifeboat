@@ -13,13 +13,17 @@ struct CLIHarness {
     let repository: ProfileRepository
 
     init() throws {
-        home = FileManager.default.temporaryDirectory
-            .appendingPathComponent("limit-lifeboat-cli-\(UUID().uuidString)", isDirectory: true)
+        // Short on purpose: the control socket lives under this home, and a
+        // Unix socket path must fit in 104 bytes.
+        home = URL(fileURLWithPath: "/tmp", isDirectory: true)
+            .appendingPathComponent("llc-\(UUID().uuidString.prefix(8))", isDirectory: true)
         store = home
             .appendingPathComponent("Library/Application Support/LimitLifeboat", isDirectory: true)
         try FileManager.default.createDirectory(at: store, withIntermediateDirectories: true)
         repository = try ProfileRepository(applicationSupportDirectory: store)
     }
+
+    var socketURL: URL { store.appendingPathComponent(ControlProtocol.socketFileName) }
 
     func cleanUp() {
         try? FileManager.default.removeItem(at: home)
