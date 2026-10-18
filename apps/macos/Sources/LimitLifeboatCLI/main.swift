@@ -161,6 +161,18 @@ if command == "statusline" {
     exit(ExitCode.success.rawValue)
 }
 
+// status, list and active. Every path out of here prints something: 1.1.18
+// lost this block and the three commands exited 0 with no output at all.
+guard let readCommand = CLIReadCommand(rawValue: command) else {
+    fail("unknown command '\(command)'. Run --help.", .usage)
+}
+do {
+    print(try CLIReadCommandOutput.render(readCommand, report: report, json: wantsJSON))
+} catch {
+    fail("could not encode the report.", .unavailable)
+}
+exit(ExitCode.success.rawValue)
+
 /// When run from inside an app bundle (directly or through the
 /// ~/.local/bin link), read that app's own store, so a development build's
 /// bundled tool reports the development app rather than the release one.

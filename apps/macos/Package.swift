@@ -51,6 +51,13 @@ let package = Package(
             name: "LimitLifeboatCoreTests",
             dependencies: ["LimitLifeboatCore"]
         ),
+        // Runs the built `limit-lifeboat` binary end to end against a fixture
+        // store. Depending on the executable target makes SwiftPM build it
+        // before the tests run.
+        .testTarget(
+            name: "LimitLifeboatCLITests",
+            dependencies: ["LimitLifeboatCore", "LimitLifeboatCLI"]
+        ),
         .testTarget(
             name: "LimitLifeboatAppTests",
             dependencies: [
