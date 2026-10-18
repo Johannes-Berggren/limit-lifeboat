@@ -7233,7 +7233,11 @@ extension AppState {
     private func controlRefresh(accountID: UUID?) async -> Result<ControlResult, ControlError> {
         let command = ControlCommand.refresh.rawValue
         guard let accountID else {
-            let coalesced = await controlRunFullRefresh()
+            let coalesced: Bool
+            switch await controlRunFullRefresh() {
+            case .success(let joined): coalesced = joined
+            case .failure(let error): return .failure(error)
+            }
             return .success(ControlResult(
                 command: command,
                 accounts: profiles.map(controlOutcome),
@@ -7263,7 +7267,10 @@ extension AppState {
                 return .failure(ControlError(code: "refresh_failed", message: reason))
             }
         default:
-            coalesced = await controlRunFullRefresh()
+            switch await controlRunFullRefresh() {
+            case .success(let joined): coalesced = joined
+            case .failure(let error): return .failure(error)
+            }
         }
 
         guard let profile = profiles.first(where: { $0.id == accountID }) else {
@@ -7278,16 +7285,28 @@ extension AppState {
 
     /// Runs the scheduled refresh pass, or waits for the one already running.
     /// Returns whether it joined an existing pass.
-    private func controlRunFullRefresh() async -> Bool {
+    ///
+    /// `refreshAll()` returns at once, without refreshing, while a switch,
+    /// login or Retry holds a provider's credential gate: it only marks the
+    /// pass deferred, and `finishCredentialMutation` starts it later. Wait for
+    /// that deferred pass too, so the answer never reports stale readings as
+    /// a completed refresh.
+    private func controlRunFullRefresh() async -> Result<Bool, ControlError> {
+        let deadline = Date().addingTimeInterval(Self.controlJoinTimeout)
         let joined = isRefreshing
         if !joined {
             await refreshAll()
         }
-        let deadline = Date().addingTimeInterval(Self.controlJoinTimeout)
-        while isRefreshing, Date() < deadline {
+        while isRefreshing || deferredFullRefresh, Date() < deadline {
             try? await Task.sleep(nanoseconds: 200_000_000)
         }
-        return joined
+        if isRefreshing || deferredFullRefresh {
+            return .failure(ControlError(
+                code: "deferred",
+                message: "Another credential operation is still running, so the refresh has not finished. It runs on its own afterwards; check `limit-lifeboat status`."
+            ))
+        }
+        return .success(joined)
     }
 
     private func controlSwitch(accountID: UUID) async -> Result<ControlResult, ControlError> {
