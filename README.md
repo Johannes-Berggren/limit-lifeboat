@@ -154,8 +154,8 @@ normal browser and use the app's browser-text import flow instead.
 
 ## Command-line companion
 
-The app ships `limit-lifeboat`, a read-only CLI that prints what the app last
-recorded. Turn on Settings → Command Line & Status Line → "Install the
+The app ships `limit-lifeboat`, a CLI that prints what the app last recorded
+and can ask the running app to refresh or switch. Turn on Settings → Command Line & Status Line → "Install the
 limit-lifeboat command" to link it into `~/.local/bin`; the link points into the
 app, so it updates with it. To build it yourself instead:
 
@@ -166,10 +166,21 @@ limit-lifeboat status --json | jq '.accounts[] | select(.isActive)'
 ```
 
 `status` lists every saved account with its windows, `list` omits usage,
-`active` shows only the account each provider's CLI is logged into, and
-`--json` emits a versioned schema meant for status lines, tmux, and bar
-widgets. Every reading carries `ageSeconds`, because a cached number is only
-useful next to how old it is.
+`active` shows only the account each provider's CLI is logged into, `history`
+prints saved usage history (`--days N`, default 7), and `sessions` lists the
+running Claude Code and Codex sessions. `--json` emits a versioned schema
+(currently 2, documented in [docs/cli.md](docs/cli.md)) meant for status
+lines, tmux, bar widgets and scripts. `status --json --detail` adds each
+account's issues; `--schema 1` prints the original schema 1 document. Every
+reading carries `ageSeconds`, because a cached number is only useful next to
+how old it is.
+
+`limit-lifeboat refresh [account-id]` and `limit-lifeboat switch <account-id>`
+ask the running app to do the work, over a private socket only your user can
+reach (see [SECURITY.md](SECURITY.md#app-control-socket)). The app runs them
+through the same refresh and switch workflows as its own buttons, including
+preflight and rollback. With the app closed they exit 4 with
+`app_not_running`. Capture, rename and remove stay in the app.
 
 `statusline` prints one compact line — `claude 85%! · codex 6%` — where `!`
 means warning or depleted and `?` means the reading is over 30 minutes old.
@@ -198,12 +209,14 @@ Sessions & Memory) — at most once an hour across the Mac, so a retry or the
 next session goes through. Set `LIMIT_LIFEBOAT_MEMORY_GUARD=off` in the
 environment of an orchestrator whose sessions should never be held.
 
-It never contacts a provider and never writes to the store: a status line
-redraws on every shell prompt, so it has to be cheap and incapable of spending
-quota to report on quota. It also does not switch accounts. Switching needs
-Claude Code's provider-owned Keychain item, whose access control trusts
-specific code signatures, and a second process writing credentials beside the
-app is the exact failure this project exists to prevent. Use the app to switch.
+The read commands never contact a provider and never write to the store: a
+status line redraws on every shell prompt, so it has to be cheap and incapable
+of spending quota to report on quota. The CLI never touches a credential
+either, not even for `switch`. Switching needs Claude Code's provider-owned
+Keychain item, whose access control trusts specific code signatures, and a
+second process writing credentials beside the app is the exact failure this
+project exists to prevent. So `switch` only asks the app, and the app does
+the switch.
 
 ## Privacy and security
 

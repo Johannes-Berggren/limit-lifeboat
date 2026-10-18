@@ -11,20 +11,57 @@ import Foundation
 /// looked in six hours".
 ///
 /// This is also the contract third-party status lines and bar widgets build
-/// against, so field names change only with the schema version.
+/// against, so field names change only with the schema version. The full
+/// schema is documented in docs/cli.md.
 public struct CLIStatusReport: Codable, Equatable, Sendable {
-    /// Bumped when a field is removed or its meaning changes; additive fields
-    /// do not bump it.
-    public static let schemaVersion = 1
+    /// The schema this build writes by default.
+    ///
+    /// - 1: `status`, `list`, `active`.
+    /// - 2: adds `issues` and `app` (with `--detail`), and the `history`,
+    ///   `sessions`, `refresh` and `switch` documents. Purely additive: every
+    ///   v1 field keeps its name and meaning, so a v1 reader that ignores
+    ///   unknown keys keeps working. A reader that insists on `schema == 1`
+    ///   can pass `--schema 1` and gets the exact v1 document.
+    public static let schemaVersion = 2
+    /// Every schema `--schema` accepts.
+    public static let supportedSchemaVersions = [1, 2]
 
     public var schema: Int
     public var generatedAt: Date
     public var accounts: [CLIAccountStatus]
+    /// v2, `--detail` only: what the CLI knows about the app itself.
+    public var app: CLIAppState?
 
-    public init(generatedAt: Date, accounts: [CLIAccountStatus]) {
+    public init(generatedAt: Date, accounts: [CLIAccountStatus], app: CLIAppState? = nil) {
         self.schema = Self.schemaVersion
         self.generatedAt = generatedAt
         self.accounts = accounts
+        self.app = app
+    }
+
+    /// The same report in an older schema: v1 drops every v2 field.
+    public func pinned(to version: Int) -> CLIStatusReport {
+        guard version < 2 else { return self }
+        var copy = self
+        copy.schema = version
+        copy.app = nil
+        copy.accounts = accounts.map { var account = $0; account.issues = nil; return account }
+        return copy
+    }
+}
+
+/// v2: whether the app is running, and how fresh its saved issue states are.
+public struct CLIAppState: Codable, Equatable, Sendable {
+    /// Whether the app's control socket accepted a connection just now.
+    public var running: Bool
+    /// When the app last wrote `account-issues.json`; nil when it never has
+    /// (an app build that predates schema 2, or one never launched).
+    /// App-sourced issues are as of this instant.
+    public var issuesUpdatedAt: Date?
+
+    public init(running: Bool, issuesUpdatedAt: Date?) {
+        self.running = running
+        self.issuesUpdatedAt = issuesUpdatedAt
     }
 }
 
@@ -45,6 +82,9 @@ public struct CLIAccountStatus: Codable, Equatable, Sendable {
     public var priority: Int
     /// nil when the app has never recorded a reading for this account.
     public var reading: CLIUsageReading?
+    /// v2, `--detail` only: everything currently wrong with the account,
+    /// most severe first. Empty when nothing is. Absent without `--detail`.
+    public var issues: [AccountIssue]?
 
     public init(
         id: String,
@@ -55,7 +95,8 @@ public struct CLIAccountStatus: Codable, Equatable, Sendable {
         plan: String? = nil,
         isActive: Bool,
         priority: Int,
-        reading: CLIUsageReading? = nil
+        reading: CLIUsageReading? = nil,
+        issues: [AccountIssue]? = nil
     ) {
         self.id = id
         self.provider = provider
@@ -66,6 +107,7 @@ public struct CLIAccountStatus: Codable, Equatable, Sendable {
         self.isActive = isActive
         self.priority = priority
         self.reading = reading
+        self.issues = issues
     }
 }
 
@@ -231,6 +273,33 @@ public enum CLIStatusReportBuilder {
         }
 
         return CLIStatusReport(generatedAt: now, accounts: accounts)
+    }
+
+    /// `--detail`: attaches every account's issues — the app's saved refresh
+    /// state plus what the store alone shows — and the app's own state.
+    public static func detailed(
+        _ report: CLIStatusReport,
+        issueSnapshot: AccountIssueSnapshot?,
+        appRunning: Bool
+    ) -> CLIStatusReport {
+        var copy = report
+        copy.app = CLIAppState(running: appRunning, issuesUpdatedAt: issueSnapshot?.updatedAt)
+        copy.accounts = report.accounts.map { account in
+            var account = account
+            let fromApp = issueSnapshot?.accounts[account.id] ?? []
+            let fromStore = AccountIssue.derived(from: account.reading)
+            account.issues = (fromApp + fromStore).sorted { rank($0.severity) > rank($1.severity) }
+            return account
+        }
+        return copy
+    }
+
+    private static func rank(_ severity: AccountIssue.Severity) -> Int {
+        switch severity {
+        case .error: return 2
+        case .warning: return 1
+        case .info: return 0
+        }
     }
 
     private static func reading(from snapshot: UsageSnapshot, now: Date) -> CLIUsageReading {

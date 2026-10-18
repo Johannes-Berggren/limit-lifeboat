@@ -26,17 +26,15 @@ public enum CLIReadCommandOutput {
         _ command: CLIReadCommand,
         report: CLIStatusReport,
         json: Bool,
+        schema: Int = CLIStatusReport.schemaVersion,
         now: Date = Date()
     ) throws -> String {
         let accounts = command == .active ? report.accounts.filter(\.isActive) : report.accounts
 
         if json {
-            let filtered = CLIStatusReport(generatedAt: report.generatedAt, accounts: accounts)
-            guard let data = try? JSONEncoder.appEncoder.encode(filtered),
-                  let text = String(data: data, encoding: .utf8) else {
-                throw RenderError.encodingFailed
-            }
-            return text
+            var filtered = report
+            filtered.accounts = accounts
+            return try encode(filtered.pinned(to: schema))
         }
 
         guard !accounts.isEmpty else {
@@ -53,6 +51,11 @@ public enum CLIReadCommandOutput {
             let identity = account.email ?? account.organization ?? account.plan ?? ""
             let name = identity.isEmpty ? account.label : "\(account.label) (\(identity))"
             lines.append("\(marker) [\(account.provider)] \(name)")
+            // --detail
+            for issue in account.issues ?? [] {
+                let mark = issue.severity == .error ? "!!" : (issue.severity == .warning ? "! " : "- ")
+                lines.append("    \(mark)\(issue.code): \(issue.message)")
+            }
 
             guard command != .list else { continue }
 
@@ -73,5 +76,15 @@ public enum CLIReadCommandOutput {
             lines.append("      updated \(DurationPhrase.short(TimeInterval(reading.ageSeconds))) ago via \(reading.source)")
         }
         return lines.joined(separator: "\n")
+    }
+
+    /// Pretty, key-sorted JSON in the app's date format: the one encoding
+    /// every `--json` document uses.
+    public static func encode<T: Encodable>(_ value: T) throws -> String {
+        guard let data = try? JSONEncoder.appEncoder.encode(value),
+              let text = String(data: data, encoding: .utf8) else {
+            throw RenderError.encodingFailed
+        }
+        return text
     }
 }

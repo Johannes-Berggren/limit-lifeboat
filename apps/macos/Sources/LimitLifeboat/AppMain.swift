@@ -22,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarController: MenuBarController?
     private var state: AppState?
     private var executableMonitor: RunningExecutableMonitor?
+    private var controlServer: ControlSocketServer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Keep an opted-in ~/.local/bin link pointing at this copy of the app.
@@ -103,6 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             self.state = state
             self.menuBarController = MenuBarController(state: state)
+            startControlSocket(state: state, directory: repository.applicationSupportDirectory)
             self.executableMonitor = try RunningExecutableMonitor(executableURL: executableURL) { [weak self] in
                 Task { @MainActor [weak self] in
                     self?.handleRunningExecutableInvalidation()
@@ -143,6 +145,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             alert.informativeText = error.localizedDescription
             alert.runModal()
             NSApplication.shared.terminate(nil)
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        controlServer?.stop()
+    }
+
+    /// `limit-lifeboat refresh` / `switch` reach the app here. The socket is
+    /// optional: if it cannot start (say another copy of the app owns it),
+    /// the app runs normally and the CLI reports the app as not running.
+    private func startControlSocket(state: AppState, directory: URL) {
+        let server = ControlSocketServer(
+            socketURL: ControlSocketClient.socketURL(applicationSupportDirectory: directory)
+        ) { [weak state] intent, requestID in
+            guard let state else {
+                return .failure(ControlError.appNotRunning, id: requestID)
+            }
+            switch await state.handleControl(intent) {
+            case .success(let result):
+                return .success(result, id: requestID)
+            case .failure(let error):
+                return .failure(error, id: requestID)
+            }
+        }
+        do {
+            try server.start()
+            controlServer = server
+        } catch {
+            AppLog.control.error("Control socket unavailable: \(String(describing: error), privacy: .public)")
         }
     }
 

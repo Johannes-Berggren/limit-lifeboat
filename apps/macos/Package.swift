@@ -35,8 +35,9 @@ let package = Package(
                 ])
             ]
         ),
-        // The read-only companion CLI. Depends on Core only — it must never
-        // pull in AppKit, Sparkle, or the switch path. The target is named
+        // The companion CLI. Depends on Core only — it must never pull in
+        // AppKit, Sparkle, or the switch path: `refresh` and `switch` only
+        // ask the running app over its control socket. The target is named
         // LimitLifeboatCLI, and the binary limit-lifeboat, because macOS
         // filesystems are case-insensitive by default: a Sources/limitlifeboat
         // directory silently resolves to Sources/LimitLifeboat and steals the
