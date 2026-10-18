@@ -15,6 +15,13 @@ export interface Release {
 
 export const releases: readonly Release[] = [
   {
+    version: "1.1.19",
+    date: "2026-10-18",
+    highlights: [
+      "Fixed the limit-lifeboat status, list and active commands, which printed nothing in 1.1.18, in both text and JSON output.",
+    ],
+  },
+  {
     version: "1.1.18",
     date: "2026-10-09",
     highlights: [
