@@ -15,10 +15,13 @@ export interface Release {
 
 export const releases: readonly Release[] = [
   {
-    version: "1.1.19",
+    version: "1.2.0",
     date: "2026-10-18",
     highlights: [
       "Fixed the limit-lifeboat status, list and active commands, which printed nothing in 1.1.18, in both text and JSON output.",
+      "Added account issues to status, list and active with --detail, plus usage history (history --json) and running sessions (sessions --json) to the command-line tool.",
+      "Added limit-lifeboat refresh and switch, which ask the running app to refresh usage or switch accounts through its existing workflows.",
+      "Changed the default JSON output to \"schema\": 2. Without --detail the keys are unchanged, but scripts that check for schema 1 must now pass --schema 1.",
     ],
   },
   {
