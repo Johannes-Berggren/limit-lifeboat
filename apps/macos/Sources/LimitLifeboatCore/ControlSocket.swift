@@ -288,11 +288,25 @@ public enum ControlSocketFile {
         return setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size)) == 0
     }
 
-    /// Reads up to the first newline, EOF, `limit` bytes, or the timeout.
-    static func readLine(_ fd: Int32, limit: Int) -> Data? {
+    /// Reads up to the first newline, EOF, `limit` bytes, or `timeout`.
+    ///
+    /// The timeout is a deadline for the whole line, not per read():
+    /// SO_RCVTIMEO alone restarts on every byte, so a peer trickling one byte
+    /// every few seconds could hold a connection (and one of the server's few
+    /// slots) for hours. On expiry errno is EAGAIN.
+    static func readLine(_ fd: Int32, limit: Int, timeout: TimeInterval) -> Data? {
+        let deadline = Date().addingTimeInterval(timeout)
+        errno = 0
         var data = Data()
         var buffer = [UInt8](repeating: 0, count: 4096)
         while data.count <= limit {
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else {
+                errno = EAGAIN
+                break
+            }
+            // Never 0: a zero SO_RCVTIMEO means "wait forever".
+            setTimeouts(fd, seconds: max(remaining, 0.001))
             let count = read(fd, &buffer, buffer.count)
             if count < 0, errno == EINTR { continue }
             guard count > 0 else { break }
@@ -339,8 +353,17 @@ public final class ControlSocketServer: @unchecked Sendable {
     private var activeConnections = 0
     private var stopped = false
 
-    public init(socketURL: URL, policy: ControlPeer.Policy = .sameUser, handler: @escaping Handler) {
+    /// The whole request must arrive within this; tests shorten it.
+    private let readTimeout: TimeInterval
+
+    public init(
+        socketURL: URL,
+        policy: ControlPeer.Policy = .sameUser,
+        readTimeout: TimeInterval = ControlSocketServer.readTimeout,
+        handler: @escaping Handler
+    ) {
         self.socketURL = socketURL
+        self.readTimeout = readTimeout
         self.policy = policy
         self.handler = handler
     }
@@ -489,9 +512,11 @@ public final class ControlSocketServer: @unchecked Sendable {
 
     private func serve(_ client: Int32) {
         let handler = self.handler
+        let readTimeout = self.readTimeout
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            ControlSocketFile.setTimeouts(client, seconds: Self.readTimeout)
-            let parsed = Self.parse(ControlSocketFile.readLine(client, limit: ControlProtocol.maxRequestBytes))
+            let parsed = Self.parse(ControlSocketFile.readLine(
+                client, limit: ControlProtocol.maxRequestBytes, timeout: readTimeout
+            ))
 
             let finish: (ControlResponse) -> Void = { response in
                 // A long refresh may outlive the read timeout; give the write
@@ -549,7 +574,7 @@ public enum ControlSocketClient {
             guard ControlSocketFile.writeAll(fd, ControlCoding.encodeLine(request)) else {
                 return .failure(ControlError(code: "protocol_error", message: "Could not send the request to Limit Lifeboat."))
             }
-            guard let line = ControlSocketFile.readLine(fd, limit: ControlProtocol.maxResponseBytes) else {
+            guard let line = ControlSocketFile.readLine(fd, limit: ControlProtocol.maxResponseBytes, timeout: timeout) else {
                 if errno == EAGAIN || errno == EWOULDBLOCK {
                     return .failure(ControlError(code: "timeout", message: "Limit Lifeboat did not answer within \(Int(timeout)) seconds. It may still finish; check `limit-lifeboat status`."))
                 }

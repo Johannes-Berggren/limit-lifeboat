@@ -69,7 +69,7 @@ final class ControlSocketTests: XCTestCase {
         XCTAssertEqual(ControlSocketFile.connect(fd, to: address), 0)
         ControlSocketFile.setTimeouts(fd, seconds: 5)
         _ = ControlSocketFile.writeAll(fd, bytes)
-        let line = ControlSocketFile.readLine(fd, limit: ControlProtocol.maxResponseBytes) ?? Data()
+        let line = ControlSocketFile.readLine(fd, limit: ControlProtocol.maxResponseBytes, timeout: 5) ?? Data()
         return String(decoding: line, as: UTF8.self)
     }
 
@@ -142,6 +142,33 @@ final class ControlSocketTests: XCTestCase {
         XCTAssertThrowsError(try server.start()) { error in
             XCTAssertEqual(error as? ControlSocketFile.Problem, .pathTooLong)
         }
+    }
+
+    func testSymlinkAtTheSocketPathIsNeitherFollowedNorDeleted() throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let target = directory.appendingPathComponent("target")
+        try Data("keep me".utf8).write(to: target)
+        try FileManager.default.createSymbolicLink(at: socketURL, withDestinationURL: target)
+
+        XCTAssertThrowsError(try startServer()) { error in
+            XCTAssertEqual(error as? ControlSocketFile.Problem, .notASocket)
+        }
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: socketURL.path), target.path)
+        XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), "keep me")
+        XCTAssertEqual(send(ControlRequest(command: "refresh")).failureCode, "insecure_socket")
+    }
+
+    func testSymlinkedFolderIsRefused() throws {
+        let real = URL(fileURLWithPath: "/tmp/llcr-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
+        defer { try? FileManager.default.removeItem(at: real) }
+        try FileManager.default.createSymbolicLink(at: directory, withDestinationURL: real)
+
+        XCTAssertThrowsError(try startServer()) { error in
+            XCTAssertEqual(error as? ControlSocketFile.Problem, .directoryNotOwned)
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: real.path), [], "nothing is bound through the link")
+        XCTAssertEqual(mode(real.path).permissions, 0o755, "the link target is not chmodded")
     }
 
     // MARK: - Peer check
@@ -283,6 +310,81 @@ final class ControlSocketTests: XCTestCase {
         XCTAssertEqual(object["ok"] as? Bool, true)
         XCTAssertEqual(object["id"] as? String, "x")
         XCTAssertEqual(object["v"] as? Int, 1)
+    }
+
+    func testTheReadTimeoutIsADeadlineForTheWholeRequest() throws {
+        // A peer trickling a byte at a time must not hold a slot past the
+        // deadline, even though each read() finishes well inside it.
+        let server = ControlSocketServer(socketURL: socketURL, policy: .sameUser, readTimeout: 0.5) { _, id in
+            .success(ControlResult(command: "refresh", accounts: []), id: id)
+        }
+        try server.start()
+        self.server = server
+
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        defer { close(fd) }
+        ControlSocketFile.disableSIGPIPE(fd)
+        XCTAssertEqual(ControlSocketFile.connect(fd, to: try XCTUnwrap(ControlSocketFile.makeAddress(socketURL.path))), 0)
+        let trickler = Thread {
+            for _ in 0..<30 {
+                guard write(fd, "{", 1) == 1 else { return }
+                Thread.sleep(forTimeInterval: 0.2)
+            }
+        }
+        let started = Date()
+        trickler.start()
+        let line = ControlSocketFile.readLine(fd, limit: ControlProtocol.maxResponseBytes, timeout: 10) ?? Data()
+        let elapsed = Date().timeIntervalSince(started)
+
+        XCTAssertLessThan(elapsed, 3, "the server waited \(elapsed)s for a trickled request")
+        XCTAssertTrue(String(decoding: line, as: UTF8.self).contains(#""code":"bad_request""#))
+    }
+
+    func testConnectionsBeyondTheLimitAreToldBusy() throws {
+        final class Gate: @unchecked Sendable {
+            private let lock = NSLock()
+            private var open = false
+            var isOpen: Bool { lock.lock(); defer { lock.unlock() }; return open }
+            func release() { lock.lock(); open = true; lock.unlock() }
+        }
+        let gate = Gate()
+        let recorder = Recorder()
+        let server = ControlSocketServer(socketURL: socketURL, policy: .sameUser) { intent, id in
+            recorder.record(intent)
+            while !gate.isOpen { try? await Task.sleep(nanoseconds: 20_000_000) }
+            return .success(ControlResult(command: "refresh", accounts: []), id: id)
+        }
+        try server.start()
+        self.server = server
+        defer { gate.release() }
+
+        let address = try XCTUnwrap(ControlSocketFile.makeAddress(socketURL.path))
+        var held: [Int32] = []
+        defer { held.forEach { close($0) } }
+        for _ in 0..<ControlSocketServer.maxConcurrentConnections {
+            let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+            ControlSocketFile.disableSIGPIPE(fd)
+            XCTAssertEqual(ControlSocketFile.connect(fd, to: address), 0)
+            XCTAssertTrue(ControlSocketFile.writeAll(fd, ControlCoding.encodeLine(ControlRequest(command: "refresh"))))
+            held.append(fd)
+        }
+        let deadline = Date().addingTimeInterval(5)
+        while recorder.intents.count < ControlSocketServer.maxConcurrentConnections, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        XCTAssertEqual(recorder.intents.count, ControlSocketServer.maxConcurrentConnections)
+
+        let response = try send(ControlRequest(command: "refresh")).get()
+        XCTAssertEqual(response.error?.code, "busy")
+        XCTAssertEqual(recorder.intents.count, ControlSocketServer.maxConcurrentConnections, "a busy request never reaches the handler")
+
+        gate.release()
+        for fd in held {
+            let line = ControlSocketFile.readLine(fd, limit: ControlProtocol.maxResponseBytes, timeout: 5) ?? Data()
+            XCTAssertTrue(String(decoding: line, as: UTF8.self).contains(#""ok":true"#))
+        }
+        // The slots are free again.
+        XCTAssertTrue(try send(ControlRequest(command: "refresh")).get().ok)
     }
 
     func testValidateMapsCommands() {
