@@ -38,9 +38,12 @@ Every `--json` document carries `schema`. The current version is **2**.
   (with `--detail`), and the `history`, `sessions`, `refresh` and `switch`
   documents. No schema 1 field was renamed, removed or given a new meaning.
 
-A schema 1 consumer that ignores unknown keys keeps working unchanged. One that
-insists on `schema == 1` can pass `--schema 1`, which prints the exact
-schema 1 document (no `issues`, no `app`, `"schema": 1`).
+**Upgrading from 1.1.x:** since Limit Lifeboat 1.2.0 the default `--json`
+output is `"schema": 2`. Without `--detail`, `status`, `list` and `active`
+print exactly the schema 1 keys, so a consumer that ignores unknown keys keeps
+working unchanged. A consumer that checks for `schema == 1` must pass
+`--schema 1`, which prints the exact schema 1 document (no `issues`, no `app`,
+`"schema": 1`).
 `limit-lifeboat version --json` prints
 `{"version": "…", "schema": 2, "supportedSchemas": [1, 2]}`.
 
