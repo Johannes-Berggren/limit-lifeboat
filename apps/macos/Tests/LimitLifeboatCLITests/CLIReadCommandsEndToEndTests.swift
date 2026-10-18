@@ -41,7 +41,10 @@ final class CLIReadCommandsEndToEndTests: XCTestCase {
             ],
             riskLevel: .healthy,
             source: "test source",
-            lastRefreshed: now.addingTimeInterval(-120)
+            // 90 s, not a whole minute: the store keeps whole seconds and
+            // DurationPhrase rounds up, so 120 s plus the run time could read
+            // "3m". Anything from 61 s to 120 s prints "2m".
+            lastRefreshed: now.addingTimeInterval(-90)
         )
         try harness.repository.saveUsageSnapshots([claudeActive.id: snapshot])
     }
