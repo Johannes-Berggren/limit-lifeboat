@@ -6,7 +6,7 @@
     "apps/site"
   ],
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=22.23.4"
   },
   "scripts": {
     "site:dev": "npm run dev --workspace=@limit-lifeboat/site",
