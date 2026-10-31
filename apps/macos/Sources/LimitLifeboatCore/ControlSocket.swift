@@ -570,23 +570,34 @@ public enum ControlSocketClient {
             return .failure(error)
         case .success(let fd):
             defer { close(fd) }
-            ControlSocketFile.setTimeouts(fd, seconds: timeout)
-            guard ControlSocketFile.writeAll(fd, ControlCoding.encodeLine(request)) else {
-                return .failure(ControlError(code: "protocol_error", message: "Could not send the request to Limit Lifeboat."))
-            }
-            guard let line = ControlSocketFile.readLine(fd, limit: ControlProtocol.maxResponseBytes, timeout: timeout) else {
-                if errno == EAGAIN || errno == EWOULDBLOCK {
-                    return .failure(ControlError(code: "timeout", message: "Limit Lifeboat did not answer within \(Int(timeout)) seconds. It may still finish; check `limit-lifeboat status`."))
-                }
-                return .failure(ControlError(code: "protocol_error", message: "Limit Lifeboat closed the connection without answering."))
-            }
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            guard let response = try? decoder.decode(ControlResponse.self, from: line) else {
-                return .failure(ControlError(code: "protocol_error", message: "Limit Lifeboat sent a response this CLI does not understand."))
-            }
-            return .success(response)
+            return exchange(request, on: fd, timeout: timeout)
         }
+    }
+
+    /// Exchanges one request on an already verified connection. The caller
+    /// owns the descriptor and must have checked the server's peer identity.
+    static func exchange(_ request: ControlRequest, on fd: Int32, timeout: TimeInterval) -> Result<ControlResponse, ControlError> {
+        ControlSocketFile.setTimeouts(fd, seconds: timeout)
+        let sent = ControlSocketFile.writeAll(fd, ControlCoding.encodeLine(request))
+        let sendFailure = ControlError(code: "protocol_error", message: "Could not send the request to Limit Lifeboat.")
+        // A full server can send `busy` and close before our write, making
+        // it fail with EPIPE while the rejection is still queued for us.
+        // Read that response without retrying a possibly mutating request.
+        guard let line = ControlSocketFile.readLine(fd, limit: ControlProtocol.maxResponseBytes, timeout: timeout) else {
+            guard sent else { return .failure(sendFailure) }
+            if errno == EAGAIN || errno == EWOULDBLOCK {
+                return .failure(ControlError(code: "timeout", message: "Limit Lifeboat did not answer within \(Int(timeout)) seconds. It may still finish; check `limit-lifeboat status`."))
+            }
+            return .failure(ControlError(code: "protocol_error", message: "Limit Lifeboat closed the connection without answering."))
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let response = try? decoder.decode(ControlResponse.self, from: line) else {
+            guard sent else { return .failure(sendFailure) }
+            return .failure(ControlError(code: "protocol_error", message: "Limit Lifeboat sent a response this CLI does not understand."))
+        }
+        guard sent || (!response.ok && response.error != nil) else { return .failure(sendFailure) }
+        return .success(response)
     }
 
     /// Whether the app is listening: connects, checks the peer, and hangs up
