@@ -1142,6 +1142,10 @@ public final class CLISwitcher {
         CLIProcessInspector().isCodexDaemonRunning()
     }
 
+    public func codexDaemonState() -> CodexDaemonState {
+        CLIProcessInspector().codexDaemonState()
+    }
+
     /// Claude Code falls back to a plaintext `~/.claude/.credentials.json`
     /// when a Keychain write fails. A leftover copy can shadow the Keychain
     /// login that a switch just restored (Claude Code 2.1.286 changelog).

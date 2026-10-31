@@ -14,6 +14,9 @@ final class AppState: ObservableObject {
     @Published private(set) var refreshStage: String?
     @Published var menuBarSummary: MenuBarSummary = .empty
     @Published var statusMessage = ""
+    @Published private(set) var connectionProgress: [Provider: AccountConnectionProgress] = [:]
+    @Published private(set) var switchReceipts: [Provider: AccountSwitchReceipt] = [:]
+    @Published private(set) var recheckingSwitchProviders: Set<Provider> = []
     /// Per-account, per-window burn-rate projections; only `.depletesAt`
     /// values render anything in the UI.
     @Published private(set) var burnRateEstimates: [UUID: [String: BurnRateEstimate]] = [:]
@@ -964,6 +967,7 @@ final class AppState: ObservableObject {
     /// accounting. Both providers share this shell; only the Claude preflight
     /// and the per-provider body differ.
     private func refreshUsage(provider: Provider) async {
+        defer { finishConnectionUsage(for: provider) }
         if provider == .claude, !validateClaudeNativeConfiguration() { return }
         let counter = CredentialKeychainIOCounter()
         await CredentialAccess.counting(counter) {
@@ -1662,6 +1666,11 @@ final class AppState: ObservableObject {
 
         if changed {
             persistProfiles()
+        }
+        if var receipt = switchReceipts[provider], active?.id != receipt.profileID {
+            receipt.loginVerification = .differentLogin
+            receipt.recheckMessage = "The CLI login changed after this switch. Check the active account before continuing."
+            switchReceipts[provider] = receipt
         }
         if let active,
            observation.isLoggedIn,
@@ -2567,6 +2576,7 @@ final class AppState: ObservableObject {
     private func applySnapshot(_ snapshot: UsageSnapshot, for profile: AccountProfile) {
         snapshots[profile.id] = snapshot
         refreshStates[profile.id] = .ok
+        connectionProgress[profile.provider]?.receivedUsage(snapshot)
         if profile.provider == .codex,
            snapshot.source == "Codex app server",
            codexResetStates[profile.id]?.isBusy != true {
@@ -2848,13 +2858,15 @@ final class AppState: ObservableObject {
 
     // MARK: - Account management
 
-    func addProfile(provider: Provider) {
+    @discardableResult
+    func addProfile(provider: Provider) -> AccountProfile {
         let count = profiles.filter { $0.provider == provider }.count
         let profile = AccountProfile(provider: provider, label: "\(provider.displayName) \(count + 1)")
         profiles.append(profile)
         storedSnapshotStatuses[profile.id] = .absent
         persistProfiles()
         statusMessage = "Added \(profile.label). Log into it in the terminal and it links automatically."
+        return profile
     }
 
     func renameProfile(_ profileID: UUID, to newLabel: String) {
@@ -3200,6 +3212,12 @@ final class AppState: ObservableObject {
             return
         }
         profiles.remove(at: index)
+        if connectionProgress[profile.provider]?.profileID == profileID {
+            connectionProgress[profile.provider] = nil
+        }
+        if switchReceipts[profile.provider]?.profileID == profileID {
+            switchReceipts[profile.provider] = nil
+        }
         snapshots[profile.id] = nil
         refreshStates[profile.id] = nil
         codexResetStates[profile.id] = nil
@@ -3300,6 +3318,7 @@ final class AppState: ObservableObject {
         }
 
         let flightID = UUID()
+        switchReceipts[profile.provider] = nil
         let task = Task { @MainActor [weak self] in
             guard let self else { return false }
             let counter = CredentialKeychainIOCounter()
@@ -4012,10 +4031,18 @@ final class AppState: ObservableObject {
             )
 
             statusMessage = "Switched \(profile.provider.displayName) CLI to \(profile.label)."
-            if profile.provider == .codex, cliSwitcher.isCodexDaemonRunning() {
+            let daemons = profile.provider == .codex ? cliSwitcher.codexDaemonState() : .notRunning
+            let hasPlaintextOverride = profile.provider == .claude && cliSwitcher.hasClaudePlaintextCredentialsFile()
+            switchReceipts[profile.provider] = AccountSwitchReceipt(
+                profile: profile,
+                daemons: daemons,
+                hasPlaintextOverride: hasPlaintextOverride
+            )
+            connectionProgress[profile.provider] = nil
+            if case .running = daemons {
                 statusMessage += " Codex's background server is running and keeps using the previous account until restarted: run `codex app-server daemon restart`."
             }
-            if profile.provider == .claude, cliSwitcher.hasClaudePlaintextCredentialsFile() {
+            if hasPlaintextOverride {
                 statusMessage += " A leftover ~/.claude/.credentials.json may override the switched login; if Claude Code shows the wrong account, move that file aside."
             }
             AppLog.switching.notice("Switched \(profile.provider.displayName, privacy: .public) CLI to account \(profile.id, privacy: .public) (interactive: \(interactive, privacy: .public))")
@@ -4739,6 +4766,7 @@ final class AppState: ObservableObject {
             pendingClaudeLoginCompletion = nil
         case .pending:
             statusMessage = "Keychain access is authorized. Waiting for Claude Code to finish writing the login."
+            setConnectionStage(for: .claude, stage: .waiting, detail: statusMessage)
             do {
                 let currentStamp = try loginCredentialMetadataStamp(provider: .claude)
                 watchForCompletedLogin(
@@ -4757,6 +4785,7 @@ final class AppState: ObservableObject {
                 } else {
                     pendingClaudeLoginCompletion = nil
                     statusMessage = "Could not resume the Claude login watcher: \(error.localizedDescription)"
+                    finishLoginProgress(provider: .claude, workflowStatus: "failed")
                 }
             }
         case .authorizationRequired(let source):
@@ -4765,8 +4794,10 @@ final class AppState: ObservableObject {
             } else {
                 pendingClaudeLoginCompletion = nil
             }
+            finishLoginProgress(provider: .claude, workflowStatus: "authorization_required")
         case .failed:
             pendingClaudeLoginCompletion = nil
+            finishLoginProgress(provider: .claude, workflowStatus: "failed")
         }
     }
 
@@ -5892,11 +5923,98 @@ final class AppState: ObservableObject {
         cliSwitcher.validateActiveLogin(provider: provider)
     }
 
-    func copyLoginCommand(for provider: Provider) {
+    func connectAccount(provider: Provider) {
+        let profile = profiles.first { $0.provider == provider && $0.identity == nil }
+            ?? addProfile(provider: provider)
+        beginCLILogin(for: profile)
+    }
+
+    private func setConnectionStage(for provider: Provider, stage: AccountConnectionProgress.Stage, detail: String) {
+        guard connectionProgress[provider] != nil else { return }
+        connectionProgress[provider]?.stage = stage
+        connectionProgress[provider]?.detail = detail
+    }
+
+    private func finishLoginProgress(provider: Provider, workflowStatus: String) {
+        switch workflowStatus {
+        case "completed": break // The resolved account is already waiting for fresh usage.
+        case "authorization_required":
+            if provider == .claude, pendingClaudeLoginCompletion != nil {
+                setConnectionStage(for: provider, stage: .authorizationRequired(.claudeCode), detail: "Login detected. Authorize Claude Keychain access to verify and save it.")
+            } else {
+                setConnectionStage(for: provider, stage: .failed, detail: "Login detected, but saved credential access needs authorization. Use Authorize on the account, then retry its usage refresh.")
+            }
+        case "timeout":
+            setConnectionStage(for: provider, stage: .timedOut, detail: "No completed login was confirmed within three minutes. If you are still signing in, finish in Terminal, then refresh usage. You can also try signing in again.")
+        case "cancelled":
+            setConnectionStage(for: provider, stage: .failed, detail: "Stopped waiting for login. The Terminal login was not cancelled.")
+        default:
+            setConnectionStage(for: provider, stage: .failed, detail: statusMessage.isEmpty ? "The login could not be verified safely. Try again from this account." : statusMessage)
+        }
+    }
+
+    private func finishConnectionUsage(for provider: Provider) {
+        guard let progress = connectionProgress[provider], progress.stage == .loadingUsage else { return }
+        let reason = refreshStates[progress.profileID].flatMap { AccountIssue.from($0) }?.message
+            ?? "No fresh usage reading is available yet."
+        connectionProgress[provider]?.usageUnavailable(reason: reason)
+    }
+
+    func dismissConnectionProgress(for provider: Provider) {
+        guard connectionProgress[provider]?.stage.isBusy != true else { return }
+        connectionProgress[provider] = nil
+    }
+
+    func dismissSwitchReceipt(for provider: Provider) {
+        switchReceipts[provider] = nil
+    }
+
+    /// Read-only and explicitly invoked. A successful usage probe uses a
+    /// private app-server, so it cannot verify the running daemon's login.
+    func recheckSwitchReceipt(for provider: Provider) async {
+        guard let receipt = switchReceipts[provider],
+              !recheckingSwitchProviders.contains(provider) else { return }
+        guard let owner = beginCredentialMutation(for: provider) else {
+            switchReceipts[provider]?.recheckMessage = "Another credential operation is in progress. Check again when it finishes."
+            return
+        }
+        recheckingSwitchProviders.insert(provider)
+        defer {
+            recheckingSwitchProviders.remove(provider)
+            finishCredentialMutation(for: provider, owner: owner)
+        }
+        var updated = receipt
+        await CredentialAccess.nonInteractive {
+            do {
+                let observation = try cliSwitcher.stableLiveObservation(provider: provider, accessMode: .nonInteractive)
+                let expectedIdentity = profiles.first { $0.id == receipt.profileID }?.identity
+                if let expectedIdentity, let observedIdentity = observation.identity {
+                    updated.loginVerification = observation.isLoggedIn && observedIdentity.matches(expectedIdentity)
+                        ? .verified : .differentLogin
+                    updated.recheckMessage = updated.loginVerification == .verified
+                        ? "The saved CLI login still matches \(receipt.label)."
+                        : "The CLI is no longer logged into the selected account. Refresh usage to update the active account."
+                } else {
+                    updated.loginVerification = .unavailable
+                    updated.recheckMessage = "The CLI account identity could not be confirmed. Refresh usage and check its active account."
+                }
+                if provider == .claude { recordSuccessfulClaudeKeychainRead(observation) }
+            } catch {
+                updated.loginVerification = .unavailable
+                updated.recheckMessage = "The CLI login could not be checked: \(error.localizedDescription)"
+                if provider == .claude { recordClaudeKeychainFailure(error) }
+            }
+        }
+        updated.currentDaemons = provider == .codex ? cliSwitcher.codexDaemonState() : .notRunning
+        updated.hasPlaintextOverride = provider == .claude && cliSwitcher.hasClaudePlaintextCredentialsFile()
+        // Dismissal or a newer operation wins over an old check result.
+        if switchReceipts[provider]?.id == receipt.id { switchReceipts[provider] = updated }
+    }
+
+    func copyCodexRestartCommand() {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(provider.loginCommand, forType: .string)
-        statusMessage = "Copied: \(provider.loginCommand)"
-        terminalLauncher.open()
+        NSPasteboard.general.setString("codex app-server daemon restart", forType: .string)
+        statusMessage = "Copied the Codex server restart command. Run it in Terminal when your running work can be interrupted."
     }
 
     func beginCLILogin(for profile: AccountProfile, activateAfterLogin: Bool = true) {
@@ -5912,6 +6030,12 @@ final class AppState: ObservableObject {
             pendingClaudeLoginCompletion = nil
             deferredClaudeLoginResume = false
         }
+        switchReceipts[profile.provider] = nil
+        connectionProgress[profile.provider] = AccountConnectionProgress(
+            profileID: profile.id,
+            detail: "Preparing a safe \(profile.provider.displayName) login in Terminal…",
+            activateAfterLogin: activateAfterLogin
+        )
 
         Task { [weak self] in
             guard let self else { return }
@@ -5939,6 +6063,11 @@ final class AppState: ObservableObject {
                 counts: counter.snapshot
             )
             if !started {
+                self.setConnectionStage(
+                    for: profile.provider,
+                    stage: .failed,
+                    detail: self.statusMessage.isEmpty ? "Login could not start. Try again from this account." : self.statusMessage
+                )
                 self.finishCredentialMutation(
                     for: profile.provider,
                     owner: mutationOwner
@@ -6177,6 +6306,7 @@ final class AppState: ObservableObject {
         let appleScriptError = terminalLauncher.runViaAutomation(launchedCommand)
         if appleScriptError == nil {
             statusMessage = "Started login for \(profile.label). \(linkNote)"
+            setConnectionStage(for: profile.provider, stage: .waiting, detail: "Finish signing in in Terminal or your browser. \(linkNote)")
             watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialBaseline: initialBaseline, initialMetadataStamp: initialMetadataStamp, activateAfterLogin: activate, previousActiveID: previousActiveID)
             return true
         }
@@ -6188,6 +6318,7 @@ final class AppState: ObservableObject {
         // Apple Events permission.
         if terminalLauncher.runViaCommandFile(launchedCommand) {
             statusMessage = "Opened Terminal to log in \(profile.label). \(linkNote)"
+            setConnectionStage(for: profile.provider, stage: .waiting, detail: "Finish signing in in Terminal or your browser. \(linkNote)")
             watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialBaseline: initialBaseline, initialMetadataStamp: initialMetadataStamp, activateAfterLogin: activate, previousActiveID: previousActiveID)
             return true
         }
@@ -6196,8 +6327,8 @@ final class AppState: ObservableObject {
         // to paste it into.
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(command, forType: .string)
-        statusMessage = appleScriptError
-            ?? "Copied the login command. Paste it into Terminal; \(linkNote.prefix(1).lowercased() + linkNote.dropFirst())"
+        statusMessage = "Copied the login command. Paste it into Terminal; \(linkNote.prefix(1).lowercased() + linkNote.dropFirst())"
+        setConnectionStage(for: profile.provider, stage: .waiting, detail: "The login command was copied. Paste it into Terminal and finish signing in. \(linkNote)")
         terminalLauncher.open()
         watchForCompletedLogin(profileID: profile.id, provider: profile.provider, initialBaseline: initialBaseline, initialMetadataStamp: initialMetadataStamp, activateAfterLogin: activate, previousActiveID: previousActiveID)
         return true
@@ -6314,6 +6445,7 @@ final class AppState: ObservableObject {
             let counter = CredentialKeychainIOCounter()
             var workflowStatus = "timeout"
             defer {
+                self.finishLoginProgress(provider: provider, workflowStatus: workflowStatus)
                 self.finishCredentialMutation(for: provider, owner: mutationOwner)
                 self.loginFollowUpTasks[provider] = nil
             }
@@ -6353,6 +6485,9 @@ final class AppState: ObservableObject {
                         workflowStatus = authorizationRequired
                             ? "authorization_required"
                             : "metadata_failed"
+                        if !authorizationRequired {
+                            self.statusMessage = "The login could not be checked safely: \(error.localizedDescription)"
+                        }
                         if provider == .claude {
                             if authorizationRequired {
                                 self.pendingClaudeLoginCompletion = PendingClaudeLoginCompletion(
@@ -6521,6 +6656,7 @@ final class AppState: ObservableObject {
                         observation: observation
                     )
                     guard LoginCompletionWatchDecision(outcome: result) == .stopPolling else {
+                        self.setConnectionStage(for: provider, stage: .waiting, detail: "Login detected. Waiting for the CLI state to settle before saving it…")
                         continue
                     }
                     switch result {
@@ -6634,6 +6770,7 @@ final class AppState: ObservableObject {
         if provider == .claude {
             recordSuccessfulClaudeKeychainRead(current)
         }
+        setConnectionStage(for: provider, stage: .verifying, detail: "Login detected. Verifying and saving the account…")
         guard activateAfterLogin else {
             let completion = await handleNonActivatingLoginCompletion(
                 current: current,
@@ -6668,8 +6805,10 @@ final class AppState: ObservableObject {
                 preferredLoginProfileID: profileID
             )
             guard let resolved else {
+                setConnectionStage(for: provider, stage: .waiting, detail: "Waiting for the CLI to finish writing its account identity…")
                 return .pending
             }
+            connectionProgress[provider]?.linked(profile: resolved, detail: "\(resolved.label) is verified and saved.")
             refreshStates[resolved.id] = .ok
             if provider == .claude {
                 await reconcileClaudeRecoveryAfterLogin(profileID: resolved.id)
@@ -6922,6 +7061,7 @@ final class AppState: ObservableObject {
                 )
             }
             statusMessage = "Logged into \(resolved.label). Could not restore the previous account because \(previousRestoreFailureReason), so \(resolved.label) is now active."
+            connectionProgress[provider]?.linked(profile: resolved, detail: statusMessage)
             if provider != .claude {
                 await CredentialAccess.nonInteractive { await refreshAll() }
             }
@@ -6946,6 +7086,7 @@ final class AppState: ObservableObject {
                 message += " The login matched an existing account."
             }
             statusMessage = message
+            connectionProgress[provider]?.linked(profile: resolved, detail: message)
             if provider != .claude {
                 await CredentialAccess.nonInteractive { await refreshAll() }
             }
@@ -6977,6 +7118,7 @@ final class AppState: ObservableObject {
                 details: "\(resolved.label) is now the active \(provider.displayName) account. \(restoreError.localizedDescription)"
             )
             statusMessage = deferredError.details
+            connectionProgress[provider]?.linked(profile: resolved, detail: deferredError.details)
             if provider != .claude {
                 await CredentialAccess.nonInteractive { await refreshAll() }
             }
