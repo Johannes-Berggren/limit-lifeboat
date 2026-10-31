@@ -148,6 +148,20 @@ configured separately on each Codex account's reset panel.
 Browser, Claude Desktop, ChatGPT Desktop, and CLI sessions are separate:
 switching affects only the corresponding CLI login.
 
+For a provider with no saved accounts, **Connect** launches its official login
+in Terminal. A connection card tracks sign-in, account verification, and the
+first fresh usage reading; authorization, timeout, and usage failures stay
+visible with recovery instructions. If Terminal cannot run the command, the
+card explicitly asks you to paste the copied command instead.
+
+During an app session, each successful account switch leaves a result card
+until you dismiss it or start another operation. For Codex, it flags a
+background server that still needs restarting and offers **Copy Restart
+Command** and **Check Again**.
+Rechecking reads the CLI login and compares server process generations; it
+does not restart anything or claim that a new server or already-running
+sessions have adopted the new account.
+
 Per-account web dashboards can be opened from the account menu in isolated web
 contexts. If a provider rejects an embedded login, open the dashboard in your
 normal browser and use the app's browser-text import flow instead.

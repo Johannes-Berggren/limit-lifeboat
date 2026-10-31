@@ -21,6 +21,36 @@ struct CLIProcessInspector {
         runPgrep(arguments: ["-f", "codex app-server .*--managed-daemon"])
     }
 
+    func codexDaemonState() -> CodexDaemonState {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        process.arguments = ["-u", String(getuid()), "-f", "codex app-server .*--managed-daemon"]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            if process.terminationStatus == 1 { return .notRunning }
+            guard process.terminationStatus == 0 else { return .unavailable }
+            let pids = String(decoding: data, as: UTF8.self)
+                .split(whereSeparator: \.isWhitespace).compactMap { Int32($0) }
+            let table = SystemProcessTable()
+            let generations = pids.compactMap { pid -> CodexDaemonProcess? in
+                guard let record = table.record(pid: pid),
+                      AgentProcessClassifier.provider(executablePath: record.executablePath, arguments: record.arguments) == .codex else { return nil }
+                return CodexDaemonProcess(pid: pid, startedAt: record.startedAt)
+            }
+            // A process disappearing during inspection is inconclusive, never
+            // evidence that the server has adopted the new login.
+            guard !pids.isEmpty, generations.count == pids.count else { return .unavailable }
+            return .running(Set(generations))
+        } catch {
+            return .unavailable
+        }
+    }
+
     private func runPgrep(arguments: [String]) -> Bool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")

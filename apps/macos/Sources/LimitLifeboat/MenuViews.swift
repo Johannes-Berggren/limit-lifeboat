@@ -1,4 +1,5 @@
 import LimitLifeboatCore
+import LimitLifeboatAppWorkflows
 import SwiftUI
 
 struct MenuRootView: View {
@@ -286,6 +287,30 @@ struct MenuRootView: View {
                 }
             }
 
+            if let progress = state.connectionProgress[provider] {
+                ConnectionProgressView(
+                    provider: provider,
+                    progress: progress,
+                    retryLogin: {
+                        guard let profile = state.profiles.first(where: { $0.id == progress.profileID }) else { return }
+                        state.beginCLILogin(for: profile, activateAfterLogin: progress.activateAfterLogin)
+                    },
+                    refresh: { Task { await state.refreshAll() } },
+                    authorize: { Task { await state.authorizeClaudeKeychainAccess() } },
+                    dismiss: { state.dismissConnectionProgress(for: provider) }
+                )
+            }
+            if let receipt = state.switchReceipts[provider] {
+                SwitchReceiptView(
+                    receipt: receipt,
+                    isChecking: state.recheckingSwitchProviders.contains(provider),
+                    copyRestartCommand: { state.copyCodexRestartCommand() },
+                    recheck: { Task { await state.recheckSwitchReceipt(for: provider) } },
+                    dismiss: { state.dismissSwitchReceipt(for: provider) }
+                )
+                .id(receipt.id)
+            }
+
             if profiles.isEmpty {
                 emptyProviderCard(provider)
             } else {
@@ -382,7 +407,7 @@ struct MenuRootView: View {
             Spacer()
 
             Button {
-                state.copyLoginCommand(for: provider)
+                state.connectAccount(provider: provider)
             } label: {
                 Text("Connect")
             }
