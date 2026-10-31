@@ -3,6 +3,22 @@ import XCTest
 @testable import LimitLifeboatCore
 
 final class CodexAccountUsageServiceTests: XCTestCase {
+    func testModelSpecificCompatibilityBucketIsNotAnAccountQuota() {
+        XCTAssertNil(CodexUsageAppServerResponseAccumulator.parseRateLimits([
+            "rateLimits": [
+                "limitId": "codex_other",
+                "primary": ["usedPercent": 100, "windowDurationMins": 300]
+            ]
+        ]))
+    }
+
+    func testLegacyCompatibilityBucketWithoutIDStillReads() {
+        let reading = CodexUsageAppServerResponseAccumulator.parseRateLimits([
+            "rateLimits": ["primary": ["usedPercent": 23, "windowDurationMins": 300]]
+        ])
+        XCTAssertEqual(reading?.windows.first?.usedPercent, 23)
+    }
+
     func testSuccessfulFetchBuildsSnapshotReturnsRotatedAuthAndCleansTemporaryHome() async throws {
         let initial = try authJSON(accountID: "acct-1", accessToken: "old", refreshToken: "refresh-1")
         let updated = try authJSON(accountID: "acct-1", accessToken: "new", refreshToken: "refresh-2")

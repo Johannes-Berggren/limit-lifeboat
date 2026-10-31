@@ -2,6 +2,54 @@ import XCTest
 @testable import LimitLifeboatCore
 
 final class CodexLocalUsageReaderTests: XCTestCase {
+    func testModelSpecificBucketDoesNotReplaceMainCodexQuota() throws {
+        let fixture = try TemporaryCodexUsageFixture()
+        defer { fixture.cleanup() }
+        try fixture.writeSession(name: "buckets.jsonl", lines: [
+            #"{"timestamp":"2026-10-31T12:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":23,"window_minutes":10080}}}}"#,
+            #"{"timestamp":"2026-10-31T12:01:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex_other","primary":{"used_percent":100,"window_minutes":10080},"rate_limit_reached_type":"rate_limit_reached"}}}"#
+        ])
+
+        let snapshot = try XCTUnwrap(CodexLocalUsageReader(homeDirectory: fixture.home).readUsage(
+            for: AccountProfile(provider: .codex, label: "Codex")
+        ))
+        XCTAssertEqual(snapshot.windows.map(\.id), ["codex-10080"])
+        XCTAssertEqual(snapshot.windows.first?.usedPercent, 23)
+        XCTAssertEqual(snapshot.riskLevel, .healthy)
+        XCTAssertNil(snapshot.codexRateLimitReachedType)
+        // Filtering must not evade the account activation freshness gate.
+        XCTAssertNil(CodexLocalUsageReader(homeDirectory: fixture.home).readUsage(
+            for: AccountProfile(provider: .codex, label: "Codex"),
+            producedAfter: Date(timeIntervalSince1970: 1_793_448_030)
+        ))
+    }
+
+    func testOnlyModelSpecificBucketProvidesNoAccountReading() throws {
+        let fixture = try TemporaryCodexUsageFixture()
+        defer { fixture.cleanup() }
+        try fixture.writeSession(name: "other.jsonl", lines: [
+            #"{"timestamp":"2026-10-31T12:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex_other","primary":{"used_percent":100,"window_minutes":300}}}}"#
+        ])
+        XCTAssertNil(CodexLocalUsageReader(homeDirectory: fixture.home).readUsage(
+            for: AccountProfile(provider: .codex, label: "Codex")
+        ))
+    }
+
+    func testLegacyBucketWithoutIDStillReadsAndInvalidNumbersDoNotCrash() throws {
+        let fixture = try TemporaryCodexUsageFixture()
+        defer { fixture.cleanup() }
+        try fixture.writeSession(name: "legacy.jsonl", lines: [
+            #"{"timestamp":"2026-10-31T12:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":"42","window_minutes":"1e300","resets_at":"inf"},"secondary":{"used_percent":"nan"}}}}"#
+        ])
+        let snapshot = try XCTUnwrap(CodexLocalUsageReader(homeDirectory: fixture.home).readUsage(
+            for: AccountProfile(provider: .codex, label: "Codex")
+        ))
+        XCTAssertEqual(snapshot.windows.count, 1)
+        XCTAssertEqual(snapshot.windows[0].usedPercent, 42)
+        XCTAssertNil(snapshot.windows[0].windowMinutes)
+        XCTAssertNil(snapshot.windows[0].resetDate)
+    }
+
     func testReadsMostConstrainedCodexRateLimitFromLocalSessionLogs() throws {
         let fixture = try TemporaryCodexUsageFixture()
         defer { fixture.cleanup() }

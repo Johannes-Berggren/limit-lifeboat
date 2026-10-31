@@ -125,7 +125,13 @@ final class SessionInsightAggregatorTests: XCTestCase {
     func testModelNamingShortensIDs() {
         XCTAssertEqual(ModelNaming.short("claude-opus-5"), "Opus 5")
         XCTAssertEqual(ModelNaming.short("claude-haiku-4-5-20251001"), "Haiku 4.5")
+        XCTAssertEqual(ModelNaming.short("claude-opus-5-5"), "Opus 5.5")
+        XCTAssertEqual(ModelNaming.short("claude-sonnet-5.5"), "Sonnet 5.5")
+        XCTAssertEqual(ModelNaming.short("claude-haiku-5.5-20261001"), "Haiku 5.5")
+        XCTAssertEqual(ModelNaming.short("claude-fable-5.1"), "Fable 5.1")
+        XCTAssertEqual(ModelNaming.short("claude-3-5-haiku-20241022"), "Haiku 3.5")
         XCTAssertEqual(ModelNaming.short("gpt-6-astra"), "gpt-6-astra")
+        XCTAssertEqual(ModelNaming.short("gpt-6.1-terra"), "gpt-6.1-terra")
     }
 
     private func period() -> DateInterval {

@@ -124,8 +124,17 @@ public struct CodexLocalUsageReader {
     private func parseRateLimitEvent(from line: String) -> RateLimitEvent? {
         guard let data = line.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["type"] as? String == "event_msg",
               let payload = object["payload"] as? [String: Any],
+              payload["type"] as? String == "token_count",
               let rateLimits = payload["rate_limits"] as? [String: Any] else {
+            return nil
+        }
+
+        // Model-specific buckets can appear between main Codex readings.
+        // They must not replace the account quota or trigger a switch. Older
+        // Codex builds omit the id, so keep accepting their single bucket.
+        if let limitID = rateLimits["limit_id"] as? String, limitID != "codex" {
             return nil
         }
 
@@ -140,7 +149,7 @@ public struct CodexLocalUsageReader {
                 CodexRateLimit(
                     name: name,
                     usedPercent: usedPercent,
-                    windowMinutes: number(value["window_minutes"]).map(Int.init),
+                    windowMinutes: number(value["window_minutes"]).flatMap(Int.init(exactly:)),
                     resetsAt: number(value["resets_at"]).map(Date.init(timeIntervalSince1970:))
                 )
             )
@@ -164,16 +173,15 @@ public struct CodexLocalUsageReader {
     }
 
     private func number(_ value: Any?) -> Double? {
+        let parsed: Double?
         if let value = value as? Double {
-            return value
+            parsed = value
+        } else if let value = value as? String {
+            parsed = Double(value)
+        } else {
+            parsed = nil
         }
-        if let value = value as? Int {
-            return Double(value)
-        }
-        if let value = value as? String {
-            return Double(value)
-        }
-        return nil
+        return parsed.flatMap { $0.isFinite ? $0 : nil }
     }
 
     private func resetDescription(for date: Date?, now: Date) -> String? {

@@ -198,6 +198,41 @@ final class ControlSocketTests: XCTestCase {
 
     // MARK: - Client checks
 
+    func testClientReadsBusyRejectionSentBeforeItsRequest() throws {
+        let rejection = ControlResponse.failure(ControlError(code: "busy", message: "Try again shortly."), id: nil)
+        let response = try exchangeAfterPeerClosed(response: ControlCoding.encodeLine(rejection)).get()
+        XCTAssertEqual(response, rejection)
+    }
+
+    func testClientPreservesSendFailureWithoutAValidRejection() throws {
+        let unexpectedSuccess = ControlResponse.success(ControlResult(command: "switch", accounts: []), id: nil)
+        for response in [Data(), Data("not JSON\n".utf8), ControlCoding.encodeLine(unexpectedSuccess)] {
+            let result = try exchangeAfterPeerClosed(response: response)
+            XCTAssertEqual(result.failureCode, "protocol_error")
+            XCTAssertEqual(result.failure?.message, "Could not send the request to Limit Lifeboat.")
+        }
+    }
+
+    /// Deterministically reproduces the early-close ordering using real
+    /// sockets: the peer has sent its answer and closed before exchange()
+    /// writes, so no scheduler delay or race is needed to exercise EPIPE.
+    private func exchangeAfterPeerClosed(response: Data) throws -> Result<ControlResponse, ControlError> {
+        var sockets: [Int32] = [-1, -1]
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        defer { close(sockets[0]) }
+        ControlSocketFile.disableSIGPIPE(sockets[0])
+        ControlSocketFile.disableSIGPIPE(sockets[1])
+        let sent = ControlSocketFile.writeAll(sockets[1], response)
+        close(sockets[1])
+        XCTAssertTrue(sent)
+        XCTAssertFalse(ControlSocketFile.writeAll(sockets[0], Data("probe".utf8)), "the peer must have closed before the client writes")
+        return ControlSocketClient.exchange(
+            ControlRequest(command: "switch", accountId: UUID().uuidString), on: sockets[0], timeout: 1
+        )
+    }
+
     func testClientReportsAppNotRunningWithoutASocket() {
         let result = send(ControlRequest(command: "refresh"))
         XCTAssertEqual(result.failureCode, "app_not_running")

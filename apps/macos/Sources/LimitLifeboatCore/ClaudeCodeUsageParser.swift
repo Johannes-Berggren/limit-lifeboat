@@ -197,6 +197,11 @@ public struct ClaudeCodeUsageOutputParser: Sendable {
     }
 
     private func usageSectionName(in line: String) -> String? {
+        // Claude Code 2.1.312 calls this the "5-hour limit". Normalize the
+        // new heading to the old name so history and alert ids stay stable.
+        if firstMatch(#"(?i)\b5-hour limit\b"#, in: line) != nil {
+            return "Current session"
+        }
         if let name = firstMatch(#"(?i)\bCurrent session\b"#, in: line) {
             return canonicalize(name)
         }
@@ -222,6 +227,7 @@ public struct ClaudeCodeUsageOutputParser: Sendable {
     private func cleanResetDescription(_ value: String) -> String {
         var value = value.trimmingCharacters(in: .whitespacesAndNewlines)
         let stopPatterns = [
+            #"(?i)\b5-hour limit\b"#,
             #"(?i)\bCurrent session\b"#,
             #"(?i)\bCurrent week\b"#,
             #"(?i)\bApproximate\b"#,
