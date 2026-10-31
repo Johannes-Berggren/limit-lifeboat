@@ -636,6 +636,12 @@ final class CodexUsageAppServerResponseAccumulator: @unchecked Sendable {
             selected = result["rateLimits"] as? [String: Any]
         }
         guard let selected else { return nil }
+        // The backward-compatible view can describe a model-specific bucket
+        // when no main Codex bucket was returned. Do not label it as the
+        // account's subscription quota. Older servers may omit limitId.
+        if let limitID = selected["limitId"] as? String, limitID != "codex" {
+            return nil
+        }
 
         var windows: [CodexRateLimitWindowReading] = []
         for name in ["primary", "secondary"] {

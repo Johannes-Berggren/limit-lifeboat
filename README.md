@@ -308,6 +308,9 @@ and may need to be configured again.
 
 ## Development
 
+See the [provider compatibility review](docs/provider-compatibility.md) for the
+latest reviewed Claude Code and Codex contracts and regression coverage.
+
 Run the native tests and create a local app bundle from the repository root:
 
 ```bash

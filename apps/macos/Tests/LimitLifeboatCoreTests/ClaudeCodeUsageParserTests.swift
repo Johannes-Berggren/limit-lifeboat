@@ -4,6 +4,42 @@ import XCTest
 final class ClaudeCodeUsageParserTests: XCTestCase {
     private let parser = ClaudeCodeUsageOutputParser()
 
+    func testParsesFiveHourHeadingAndClockResetWithoutChangingWindowIdentity() throws {
+        let now = Date(timeIntervalSince1970: 1_793_448_000) // 2026-10-31 12:00 UTC
+        let report = try XCTUnwrap(parser.parse(text: """
+        5-hour limit
+        92% used
+        Resets at 3:10 PM (UTC)
+
+        Current week (all models)
+        41% used
+        Resets Nov 2 at 6am (UTC)
+        """, now: now))
+
+        let snapshot = report.makeSnapshot(for: AccountProfile(provider: .claude, label: "Claude"), now: now)
+        XCTAssertEqual(report.limits.map(\.name), ["Current session", "Current week (all models)"])
+        XCTAssertEqual(snapshot.windows.map(\.id), ["session", "weekly-all"])
+        XCTAssertEqual(snapshot.windows.map(\.kind), [.session, .weekly])
+        XCTAssertEqual(snapshot.windows.map(\.usedPercent), [92, 41])
+        XCTAssertEqual(snapshot.windows[0].resetDate, now.addingTimeInterval(3 * 3_600 + 10 * 60))
+        XCTAssertEqual(snapshot.riskLevel, .warning)
+    }
+
+    func testOldAndNewFiveHourHeadingsDedupeAcrossFrames() throws {
+        let report = try XCTUnwrap(parser.parse(text: """
+        Current session
+        70% used
+        Resets at 3:10 PM (UTC) 5-hour limit
+        72% used
+        Resets at 3:10 PM (UTC)
+        """))
+
+        XCTAssertEqual(report.limits.count, 1)
+        XCTAssertEqual(report.limits[0].name, "Current session")
+        XCTAssertEqual(report.limits[0].usedPercent, 72)
+        XCTAssertEqual(report.limits[0].resetDescription, "at 3:10 PM (UTC)")
+    }
+
     func testParsesClaudeCodeUsageOutput() throws {
         let output = """
         \u{001B}[2mWelcome to Claude Code\u{001B}[0m
