@@ -102,6 +102,7 @@ struct SettingsView: View {
     var applicationSupportDirectory: URL? = nil
 
     @StateObject private var commandLine = CommandLineIntegrationModel()
+    @StateObject private var browserConnection = ClaudeBrowserConnectionModel()
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
     @State private var launchAtLoginMessage: String?
     @State private var diagnosticsMessage: String?
@@ -190,6 +191,90 @@ struct SettingsView: View {
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    }
+
+                    Section("Claude in Chrome") {
+                        LabeledContent("Browser login") {
+                            HStack {
+                                Text(browserConnection.signedInAs ?? "Not signed in")
+                                    .foregroundStyle(.secondary)
+                                Button(browserConnection.signedInAs == nil ? "Sign In…" : "Sign In Again…") {
+                                    browserConnection.signIn()
+                                }
+                            }
+                        }
+                        Toggle("Stay connected when switching Claude accounts", isOn: Binding(
+                            get: { browserConnection.status == .installed },
+                            set: { browserConnection.setEnabled($0) }
+                        ))
+                        .disabled({
+                            if browserConnection.isWorking { return true }
+                            if case .other = browserConnection.status { return true }
+                            return browserConnection.signedInAs == nil && browserConnection.status != .installed
+                        }())
+                        Label(
+                            "Gives the Chrome connection its own login, so switching the CLI's account doesn't disconnect the extension. Sign in with the account and organization the extension uses.",
+                            systemImage: "info.circle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        Label(
+                            "Adds a \"\(ClaudeBrowserConnection.serverName)\" MCP server and turns off the built-in connection, so tools become mcp__browser__*; update any rules or instructions that name mcp__claude-in-chrome. The extension can ask you to allow a site even in bypass-permissions mode. This uses an undocumented Claude Code option, so a Claude Code update can break it. New sessions pick this up.",
+                            systemImage: "info.circle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        if browserConnection.status == .installed {
+                            HStack {
+                                Button("Check Connection") { browserConnection.checkConnection() }
+                                    .disabled(browserConnection.isWorking)
+                                if browserConnection.isWorking {
+                                    ProgressView().controlSize(.small)
+                                }
+                            }
+                        }
+                        if let health = browserConnection.health {
+                            switch health {
+                            case .connected(let browsers):
+                                Label(
+                                    browsers == 1 ? "Connected to 1 browser." : "Connected to \(browsers) browsers.",
+                                    systemImage: "checkmark.circle"
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            case .noBrowser:
+                                StatusBanner(
+                                    text: "No browser found. Open Chrome and check that the extension is signed in to the same account and organization as the browser login.",
+                                    systemImage: "exclamationmark.triangle.fill",
+                                    color: DS.danger
+                                )
+                            case .unavailable:
+                                StatusBanner(
+                                    text: "The connection didn't start. A Claude Code update may have changed it; turn this off to go back to the built-in connection.",
+                                    systemImage: "exclamationmark.triangle.fill",
+                                    color: DS.danger
+                                )
+                            }
+                        }
+                        if case .other(let command) = browserConnection.status {
+                            Label(
+                                "Claude Code already has an MCP server named \"\(ClaudeBrowserConnection.serverName)\" (\(command)), so it's left alone.",
+                                systemImage: "info.circle"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        }
+                        if let error = browserConnection.error {
+                            StatusBanner(
+                                text: error,
+                                systemImage: "exclamationmark.triangle.fill",
+                                color: DS.danger
+                            )
+                        }
+                    }
+                    .onAppear { browserConnection.refresh() }
+                    .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                        browserConnection.refresh()
                     }
 
                     Section("Budget Mode") {

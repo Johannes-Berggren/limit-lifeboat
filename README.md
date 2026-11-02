@@ -13,9 +13,10 @@ possible it keeps a protected recovery directory and says so, instead of
 guessing.
 
 Switching never touches `settings.json`, MCP server definitions, hooks,
-permissions, or local history. Three optional features write to Claude Code's
-settings, all off until you use them: the Memory Guard hook and the session
-park hook, which each change only their own entry, and budget modes, which set
+permissions, or local history. Four optional features write to Claude Code's
+settings, all off until you use them: the Memory Guard hook, the session
+park hook and the [Claude in Chrome connection](#claude-in-chrome-across-account-switches),
+which each change only their own entries, and budget modes, which set
 a few model and effort keys and restore your previous values when you switch
 back to Quality.
 
@@ -165,6 +166,41 @@ sessions have adopted the new account.
 Per-account web dashboards can be opened from the account menu in isolated web
 contexts. If a provider rejects an embedded login, open the dashboard in your
 normal browser and use the app's browser-text import flow instead.
+
+## Claude in Chrome across account switches
+
+Claude Code finds the Chrome extension through the account it is logged in as,
+and the extension can only be signed in to one account. So switching the CLI to
+another account disconnects Claude in Chrome until you sign the extension in
+again.
+
+Settings > Claude in Chrome can give the connection its own login, which stays
+put when the CLI switches:
+
+1. **Sign in.** This runs `CLAUDE_CONFIG_DIR="$HOME/.claude-browser" claude auth login`
+   in Terminal. Use the account and organization the extension is signed in to.
+2. **Turn on "Stay connected when switching Claude accounts".** This adds a
+   user-scope `browser` MCP server that runs the connection under
+   `~/.claude-browser`, and adds `claude-in-chrome` to `deniedMcpServers` in
+   `~/.claude/settings.json` to turn off the built-in connection. It refuses to
+   replace an existing `browser` server.
+3. **Start new sessions.** "Check Connection" confirms the connection reaches
+   your browser. If you have several, the first browser tool call asks which to
+   use.
+
+What changes:
+
+- Browser tools are named `mcp__browser__*` instead of
+  `mcp__claude-in-chrome__*`, because Claude Code reserves the original name.
+  Update any permission rules, skills or instructions that use the old name.
+  Lifeboat doesn't edit your permission rules.
+- The extension can ask you to allow a site even in bypass-permissions mode,
+  which the built-in connection skips.
+- The connection relies on `--claude-in-chrome-mcp`, an undocumented Claude Code
+  option, so a Claude Code update can break it. Turning the setting off removes
+  the server and the rule and brings the built-in connection back. The login
+  stays for next time; `CLAUDE_CONFIG_DIR="$HOME/.claude-browser" claude auth logout`
+  removes it.
 
 ## Command-line companion
 
