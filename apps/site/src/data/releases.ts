@@ -15,6 +15,17 @@ export interface Release {
 
 export const releases: readonly Release[] = [
   {
+    version: "1.2.1",
+    date: "2026-11-02",
+    highlights: [
+      "Added connection progress and persistent account-switch results, with clearer guidance when a running Codex daemon needs to restart.",
+      "Updated Claude Code usage parsing for 5-hour limit wording and preserved version numbers in dotted model names.",
+      "Kept model-specific Codex rate limits separate from the main account quota and hardened local log parsing against malformed numbers.",
+      "Fixed a command-line socket race that hid the app's busy response behind a generic connection error.",
+      "Updated the website's Astro dependency with the latest security fix.",
+    ],
+  },
+  {
     version: "1.2.0",
     date: "2026-10-18",
     highlights: [
