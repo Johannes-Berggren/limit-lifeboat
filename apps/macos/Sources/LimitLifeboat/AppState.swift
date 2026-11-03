@@ -3383,6 +3383,7 @@ final class AppState: ObservableObject {
         storedCredentialWorkflow: SwitchStoredCredentialWorkflow?,
         claudeLeaseAcquired: Bool = false,
         allowUnverifiedTarget: Bool = false,
+        targetVerifiedBeforeLease: Bool = false,
         preLeaseLiveGeneration: ClaudeLiveGenerationBaseline? = nil
     ) async -> Bool {
         // Refuse before any preflight work (which may refresh tokens) when
@@ -3651,38 +3652,31 @@ final class AppState: ObservableObject {
             // recovery journal may have appeared after that decision, so
             // local transaction state must still be resolved before restoring
             // this snapshot into Claude Code.
-            do {
-                let pendingRecovery = try claudeRotationRecoveryStore.loadAll(
-                    accessMode: .nonInteractive
-                ).contains { !$0.pendingDestinations.isEmpty }
-                if pendingRecovery {
-                    refreshClaudeRecoveryStates()
-                    preflightResult = .repairRequired(
-                        reason: "A fresh Claude credential generation is waiting for local reconciliation. Retry the affected account before switching."
-                    )
-                } else {
-                    preflightResult = .ready
-                }
-            } catch {
-                if let credentialError = error as? CredentialStoreError,
-                   credentialError.isKeychainAccessDenied {
-                    preflightResult = .authorizationRequired(
-                        source: .savedAccount,
-                        reason: "Authorize access to the encrypted Claude recovery journal before switching."
-                    )
-                } else {
-                    preflightResult = .repairRequired(
-                        reason: "Claude credential recovery could not be inspected safely: \(error.localizedDescription)"
-                    )
-                }
-            }
+            preflightResult = claudeRecoveryJournalGate()
         } else {
-            preflightResult = await preflightSwitchTarget(
+            let result = await preflightSwitchTarget(
                 profile,
                 storedRecord: targetStoredRecord,
                 storedCredentialWorkflow: storedCredentialWorkflow,
                 rotationIntent: preflightIntent
             )
+            if claudeLeaseAcquired,
+               case .rateLimited = result,
+               SwitchFinalCheckPolicy.mayContinueAfterRateLimit(
+                targetVerifiedBeforeLease: targetVerifiedBeforeLease,
+                fingerprintBeforeLease: preLeaseTargetFingerprint,
+                currentFingerprint: storedCredentialWorkflow.record(for: profile.id)?.summary.fingerprint
+               ) {
+                // A throttled re-read says nothing new about the login the
+                // first check verified, but local repair state still decides.
+                preflightResult = claudeUsageService.hasPendingCredentialRepair
+                    ? .repairRequired(
+                        reason: "A fresh Claude credential generation still needs local repair. Retry the affected account before switching."
+                    )
+                    : claudeRecoveryJournalGate()
+            } else {
+                preflightResult = result
+            }
         }
         switch preflightResult {
         case .ready:
@@ -3696,7 +3690,7 @@ final class AppState: ObservableObject {
             }
             updateSwitchAdvice()
             return false
-        case .temporarilyUnavailable(let reason):
+        case .temporarilyUnavailable(let reason), .rateLimited(let reason):
             refreshStates[profile.id] = .readFailed(reason: reason)
             updateSwitchAdvice()
             if claudeLeaseAcquired {
@@ -3834,6 +3828,12 @@ final class AppState: ObservableObject {
         // lease. Re-entering with the workflow avoids another Keychain prompt.
         if profile.provider == .claude, !claudeLeaseAcquired {
             let acceptedUnverifiedTarget = allowUnverifiedTarget
+            let targetVerified: Bool
+            if case .ready = preflightResult {
+                targetVerified = true
+            } else {
+                targetVerified = false
+            }
             let liveGenerationBaseline: ClaudeLiveGenerationBaseline
             do {
                 liveGenerationBaseline = ClaudeLiveGenerationBaseline(
@@ -3861,6 +3861,7 @@ final class AppState: ObservableObject {
                         storedCredentialWorkflow: storedCredentialWorkflow,
                         claudeLeaseAcquired: true,
                         allowUnverifiedTarget: acceptedUnverifiedTarget,
+                        targetVerifiedBeforeLease: targetVerified,
                         preLeaseLiveGeneration: liveGenerationBaseline
                     )
                 }
@@ -4134,6 +4135,9 @@ final class AppState: ObservableObject {
         case ready
         case requiresLogin(reason: String)
         case temporarilyUnavailable(reason: String)
+        /// Unavailable because the usage API throttled the check, which says
+        /// nothing about the login itself.
+        case rateLimited(reason: String)
         case forbidden(reason: String)
         case repairRequired(reason: String)
         case authorizationRequired(
@@ -4146,6 +4150,30 @@ final class AppState: ObservableObject {
             reason: String
         )
         case rotationRequired(reason: String)
+    }
+
+    private func claudeRecoveryJournalGate() -> SwitchPreflightResult {
+        do {
+            let pendingRecovery = try claudeRotationRecoveryStore.loadAll(
+                accessMode: .nonInteractive
+            ).contains { !$0.pendingDestinations.isEmpty }
+            guard pendingRecovery else { return .ready }
+            refreshClaudeRecoveryStates()
+            return .repairRequired(
+                reason: "A fresh Claude credential generation is waiting for local reconciliation. Retry the affected account before switching."
+            )
+        } catch {
+            if let credentialError = error as? CredentialStoreError,
+               credentialError.isKeychainAccessDenied {
+                return .authorizationRequired(
+                    source: .savedAccount,
+                    reason: "Authorize access to the encrypted Claude recovery journal before switching."
+                )
+            }
+            return .repairRequired(
+                reason: "Claude credential recovery could not be inspected safely: \(error.localizedDescription)"
+            )
+        }
     }
 
     private func preflightSwitchTarget(
@@ -4265,6 +4293,7 @@ final class AppState: ObservableObject {
                     // The switch can't verify usage right now, but the throttle
                     // it just observed is the same one the poll must respect.
                     armClaudeUsageBackoff(retryAfter: retryAfter)
+                    return .rateLimited(reason: error.localizedDescription)
                 }
                 return .temporarilyUnavailable(reason: error.localizedDescription)
             }
