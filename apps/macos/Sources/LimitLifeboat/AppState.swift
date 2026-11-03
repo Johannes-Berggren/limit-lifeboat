@@ -3700,7 +3700,7 @@ final class AppState: ObservableObject {
             refreshStates[profile.id] = .readFailed(reason: reason)
             updateSwitchAdvice()
             if claudeLeaseAcquired {
-                statusMessage = "Switch stopped after the target changed during final verification: \(reason)"
+                statusMessage = "Couldn't re-check \(profile.label) just before switching, so nothing was changed. \(reason) Try again in a moment."
                 return false
             }
             if !interactive {
