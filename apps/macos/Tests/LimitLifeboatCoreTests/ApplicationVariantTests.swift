@@ -26,6 +26,11 @@ final class ApplicationVariantTests: XCTestCase {
         XCTAssertTrue(variant.allowsLegacyMigration)
     }
 
+    func testOnlyTheInstalledAppRepairsProviderHooksAtLaunch() {
+        XCTAssertFalse(ApplicationVariant.development.repairsProviderHooksAtLaunch)
+        XCTAssertTrue(ApplicationVariant.distribution.repairsProviderHooksAtLaunch)
+    }
+
     func testUnbundledProcessDefaultsToDevelopment() throws {
         XCTAssertEqual(
             try ApplicationVariant.resolve(declaredVariant: nil, bundleIdentifier: nil),

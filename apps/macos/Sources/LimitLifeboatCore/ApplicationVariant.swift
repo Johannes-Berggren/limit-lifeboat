@@ -66,6 +66,13 @@ public enum ApplicationVariant: String, CaseIterable, Sendable {
         self == .distribution
     }
 
+    /// Claude Code and Codex hooks live in the providers' shared config, so a
+    /// hook pointing elsewhere may belong to the installed app. A development
+    /// build must not take it over just by launching.
+    public var repairsProviderHooksAtLaunch: Bool {
+        self == .distribution
+    }
+
     public var allowsLegacyMigration: Bool {
         self == .distribution
     }

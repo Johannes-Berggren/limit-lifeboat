@@ -64,7 +64,7 @@ final class ClaudeBrowserConnectionTests: XCTestCase {
         try writeSettings(["model": "opus"])
         XCTAssertEqual(connection.status(), .notSet)
 
-        XCTAssertTrue(try connection.install())
+        try connection.install()
         XCTAssertEqual(connection.status(), .installed)
         let denied = try settings()["deniedMcpServers"] as? [[String: String]]
         XCTAssertEqual(denied, [["serverName": "claude-in-chrome"]])
@@ -75,7 +75,7 @@ final class ClaudeBrowserConnectionTests: XCTestCase {
         XCTAssertEqual(server?["args"] as? [String], ["--claude-in-chrome-mcp"])
         XCTAssertEqual(server?["env"] as? [String: String], ["CLAUDE_CONFIG_DIR": connection.configDirectory.path])
 
-        try connection.uninstall(removeBuiltInDenial: true)
+        try connection.uninstall()
         XCTAssertEqual(connection.status(), .notSet)
         XCTAssertNil(try settings()["deniedMcpServers"])
         XCTAssertEqual(try settings()["model"] as? String, "opus")
@@ -93,19 +93,32 @@ final class ClaudeBrowserConnectionTests: XCTestCase {
         try installFakeClaude()
         try writeSettings(["deniedMcpServers": [["serverName": "claude-in-chrome"], ["serverName": "other"]]])
 
-        XCTAssertFalse(try connection.install())
-        try connection.uninstall(removeBuiltInDenial: false)
+        try connection.install()
+        try connection.uninstall()
 
         let denied = try settings()["deniedMcpServers"] as? [[String: String]]
         XCTAssertEqual(denied?.count, 2)
+    }
+
+    func testAnotherCopyOfTheAppCanUndoTheDenial() throws {
+        try installFakeClaude()
+        try connection.install()
+
+        let otherCopy = ClaudeBrowserConnection(homeDirectory: home, processEnvironment: ["PATH": "/usr/bin:/bin"])
+        try otherCopy.uninstall()
+
+        XCTAssertNil(try settings()["deniedMcpServers"])
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: connection.configDirectory.appendingPathComponent(ClaudeBrowserConnection.addedDenialMarkerName).path
+        ))
     }
 
     func testUninstallLeavesOtherDenialsInPlace() throws {
         try installFakeClaude()
         try writeSettings(["deniedMcpServers": [["serverName": "other"]]])
 
-        XCTAssertTrue(try connection.install())
-        try connection.uninstall(removeBuiltInDenial: true)
+        try connection.install()
+        try connection.uninstall()
 
         let denied = try settings()["deniedMcpServers"] as? [[String: String]]
         XCTAssertEqual(denied, [["serverName": "other"]])
@@ -120,7 +133,7 @@ final class ClaudeBrowserConnectionTests: XCTestCase {
         XCTAssertThrowsError(try connection.install()) { error in
             XCTAssertEqual(error as? ClaudeBrowserConnection.ConnectionError, .otherServer("/usr/local/bin/playwright"))
         }
-        try connection.uninstall(removeBuiltInDenial: false)
+        try connection.uninstall()
         XCTAssertEqual(try String(contentsOf: configURL), theirs)
         XCTAssertFalse(FileManager.default.fileExists(atPath: log.path))
     }
