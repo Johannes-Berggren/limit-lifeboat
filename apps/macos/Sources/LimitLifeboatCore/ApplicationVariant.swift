@@ -73,6 +73,12 @@ public enum ApplicationVariant: String, CaseIterable, Sendable {
         self == .distribution
     }
 
+    /// The ~/.local/bin link is shared too, and may belong to the installed
+    /// app. A development build only ever changes it from Settings.
+    public var repointsCommandLinkAtLaunch: Bool {
+        self == .distribution
+    }
+
     public var allowsLegacyMigration: Bool {
         self == .distribution
     }
