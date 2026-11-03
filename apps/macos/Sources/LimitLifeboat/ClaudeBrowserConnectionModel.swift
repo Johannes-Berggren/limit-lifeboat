@@ -13,11 +13,8 @@ final class ClaudeBrowserConnectionModel: ObservableObject {
 
     private let connection = ClaudeBrowserConnection()
     private let terminalLauncher = TerminalCommandLauncher()
-    private let defaults: UserDefaults
-    private static let addedBuiltInDenialKey = "browserConnectionAddedBuiltInDenial"
 
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
+    init() {
         refresh()
     }
 
@@ -42,17 +39,12 @@ final class ClaudeBrowserConnectionModel: ObservableObject {
         error = nil
         health = nil
         isWorking = true
-        let removeDenial = defaults.bool(forKey: Self.addedBuiltInDenialKey)
         Task {
             do {
                 if enabled {
-                    let added = try await Task.detached { try ClaudeBrowserConnection().install() }.value
-                    if added { defaults.set(true, forKey: Self.addedBuiltInDenialKey) }
+                    try await Task.detached { try ClaudeBrowserConnection().install() }.value
                 } else {
-                    try await Task.detached {
-                        try ClaudeBrowserConnection().uninstall(removeBuiltInDenial: removeDenial)
-                    }.value
-                    defaults.removeObject(forKey: Self.addedBuiltInDenialKey)
+                    try await Task.detached { try ClaudeBrowserConnection().uninstall() }.value
                 }
             } catch {
                 self.error = error.localizedDescription

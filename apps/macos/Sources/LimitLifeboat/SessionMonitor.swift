@@ -113,6 +113,7 @@ final class SessionMonitor: ObservableObject {
         guard scanTask == nil else { return }
         // Load past samples so the weekly digest sees more than this launch.
         try? insightStore.load()
+        let repairsHooks = ApplicationVariant.current.repairsProviderHooksAtLaunch
         switch hookInstaller.status(expectedScriptPath: hookScriptURL.path) {
         case .notInstalled:
             break
@@ -122,7 +123,7 @@ final class SessionMonitor: ObservableObject {
         case .needsRepair:
             // The hook points at a script path that is no longer ours; left
             // alone it would fail on every prompt. Reinstall at today's path.
-            setPromptHookInstalled(true)
+            if repairsHooks { setPromptHookInstalled(true) }
         }
         switch codexHookInstaller.status(expectedScriptPath: hookScriptURL.path) {
         case .notInstalled:
@@ -137,14 +138,19 @@ final class SessionMonitor: ObservableObject {
         case .needsRepair:
             // Repairing changes the command, so Codex sees a new hook; the
             // reinstall approves it again, as the user's original choice did.
-            setCodexPromptHookInstalled(true)
+            if repairsHooks { setCodexPromptHookInstalled(true) }
         }
         refreshPromptHookStatus()
         // A previous launch may have left sessions parked; this one starts
         // with none, and says so before the hook's staleness check would.
         writeParkState(now: Date())
-        if parkHookInstaller.status(expectedScriptPath: parkHookScriptURL.path) != .notInstalled {
+        switch parkHookInstaller.status(expectedScriptPath: parkHookScriptURL.path) {
+        case .notInstalled:
+            break
+        case .installed:
             try? installParkHook()
+        case .needsRepair:
+            if repairsHooks { try? installParkHook() }
         }
         isParkHookInstalled = parkHookInstaller.status(expectedScriptPath: parkHookScriptURL.path) == .installed
         scanTask = Task { [weak self] in

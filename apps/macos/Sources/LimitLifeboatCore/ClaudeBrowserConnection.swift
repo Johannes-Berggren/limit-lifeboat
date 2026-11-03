@@ -14,6 +14,10 @@ public struct ClaudeBrowserConnection {
     public static let serverFlag = "--claude-in-chrome-mcp"
     public static let configDirectoryName = ".claude-browser"
     public static let configDirectoryKey = "CLAUDE_CONFIG_DIR"
+    /// Records that `install` added the rule turning off the built-in
+    /// connection. Kept beside the login rather than in preferences, so any
+    /// copy of the app can undo it.
+    static let addedDenialMarkerName = ".limit-lifeboat-added-built-in-denial"
     /// A constant, as `TerminalCommandLauncher` requires. Never add `--chrome`
     /// to anything run under this directory: it would repoint Chrome's native
     /// host manifest at it.
@@ -60,6 +64,10 @@ public struct ClaudeBrowserConnection {
         homeDirectory.appendingPathComponent(Self.configDirectoryName)
     }
 
+    private var addedDenialMarker: URL {
+        configDirectory.appendingPathComponent(Self.addedDenialMarkerName)
+    }
+
     public init(
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         processEnvironment: [String: String] = ProcessInfo.processInfo.environment,
@@ -97,10 +105,7 @@ public struct ClaudeBrowserConnection {
 
     /// Goes through `claude mcp`, not a direct write: running sessions rewrite
     /// `~/.claude.json` all the time and Claude Code owns its locking.
-    /// Returns whether this call added the rule turning off the built-in
-    /// connection, so `uninstall` can leave one the user set themselves.
-    @discardableResult
-    public func install() throws -> Bool {
+    public func install() throws {
         var settings = try settingsFile.read()
         switch status() {
         case .other(let command):
@@ -120,32 +125,37 @@ public struct ClaudeBrowserConnection {
         }
 
         var denied = settings["deniedMcpServers"] as? [[String: Any]] ?? []
-        guard !denied.contains(where: Self.isBuiltInDenial) else { return false }
+        // A rule the user set themselves gets no marker, so `uninstall` keeps it.
+        guard !denied.contains(where: Self.isBuiltInDenial) else { return }
         denied.append(["serverName": Self.builtInServerName])
         settings["deniedMcpServers"] = denied
         do {
+            try fileManager.createDirectory(at: configDirectory, withIntermediateDirectories: true)
+            try Data().write(to: addedDenialMarker)
             try settingsFile.write(settings)
         } catch {
             // Half installed would leave two Chrome connections in every session.
+            try? fileManager.removeItem(at: addedDenialMarker)
             try? runClaude(claudeExecutable(), ["mcp", "remove", Self.serverName, "--scope", "user"])
             throw error
         }
-        return true
     }
 
     /// Removes only what `install` added. The login itself stays, so turning
     /// this back on doesn't need another sign-in.
-    public func uninstall(removeBuiltInDenial: Bool) throws {
+    public func uninstall() throws {
         var settings = try settingsFile.read()
         if status() == .installed {
             try runClaude(claudeExecutable(), ["mcp", "remove", Self.serverName, "--scope", "user"])
         }
-        guard removeBuiltInDenial,
-              var denied = settings["deniedMcpServers"] as? [[String: Any]],
-              denied.contains(where: Self.isBuiltInDenial) else { return }
-        denied.removeAll(where: Self.isBuiltInDenial)
-        settings["deniedMcpServers"] = denied.isEmpty ? nil : denied
-        try settingsFile.write(settings)
+        guard fileManager.fileExists(atPath: addedDenialMarker.path) else { return }
+        if var denied = settings["deniedMcpServers"] as? [[String: Any]],
+           denied.contains(where: Self.isBuiltInDenial) {
+            denied.removeAll(where: Self.isBuiltInDenial)
+            settings["deniedMcpServers"] = denied.isEmpty ? nil : denied
+            try settingsFile.write(settings)
+        }
+        try? fileManager.removeItem(at: addedDenialMarker)
     }
 
     /// Starts the server the way a session would and asks it for its browsers.
