@@ -31,6 +31,11 @@ final class ApplicationVariantTests: XCTestCase {
         XCTAssertTrue(ApplicationVariant.distribution.repairsProviderHooksAtLaunch)
     }
 
+    func testOnlyTheInstalledAppRepointsTheCommandLinkAtLaunch() {
+        XCTAssertFalse(ApplicationVariant.development.repointsCommandLinkAtLaunch)
+        XCTAssertTrue(ApplicationVariant.distribution.repointsCommandLinkAtLaunch)
+    }
+
     func testUnbundledProcessDefaultsToDevelopment() throws {
         XCTAssertEqual(
             try ApplicationVariant.resolve(declaredVariant: nil, bundleIdentifier: nil),

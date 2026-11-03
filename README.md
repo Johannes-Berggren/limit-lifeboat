@@ -375,7 +375,8 @@ Development identity when available and otherwise falls back to ad-hoc
 signing. It defaults to the visibly named **Limit Lifeboat Dev** variant, whose
 bundle ID, preferences, Application Support folder, and app-owned Keychain
 items are isolated from the installed release; updates and launch at login are
-disabled, and it leaves hooks pointing at the installed app alone when it starts.
+disabled, and it leaves hooks and the `limit-lifeboat` link pointing at the installed app
+alone when it starts.
 Claude Code's own config is still shared, so its settings toggles change the real
 files. Quit the copy in `apps/macos/dist` before rebuilding it.
 

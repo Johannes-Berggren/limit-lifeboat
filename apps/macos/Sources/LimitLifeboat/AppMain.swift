@@ -26,7 +26,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Keep an opted-in ~/.local/bin link pointing at this copy of the app.
-        if let bundledTool = CommandLineToolInstaller.bundledTool() {
+        if ApplicationVariant.current.repointsCommandLinkAtLaunch,
+           let bundledTool = CommandLineToolInstaller.bundledTool() {
             CommandLineToolInstaller().repointIfMoved(bundledTool: bundledTool)
         }
         // Registered before AppState exists so a notification click that
