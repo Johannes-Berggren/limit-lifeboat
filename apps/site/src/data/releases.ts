@@ -15,6 +15,16 @@ export interface Release {
 
 export const releases: readonly Release[] = [
   {
+    version: "1.3.0",
+    date: "2026-11-04",
+    highlights: [
+      "Added an optional setting that keeps Claude in Chrome connected when you switch Claude accounts, by giving the Chrome connection its own login. Browser tools become mcp__browser__* while it's on.",
+      "Claude account switches no longer stop when the usage API rate limits the final check, as long as the saved login hasn't changed since it was verified.",
+      "Replaced a misleading switch error that blamed a changed account when the final check simply couldn't run.",
+      "Development builds no longer take over the installed app's hooks or limit-lifeboat command link when they launch.",
+    ],
+  },
+  {
     version: "1.2.1",
     date: "2026-11-02",
     highlights: [
