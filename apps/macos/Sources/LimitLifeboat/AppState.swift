@@ -1019,10 +1019,10 @@ final class AppState: ObservableObject {
             let liveContext: AutomaticClaudeUsageLiveContext?
             if profile.isActiveCLI {
                 guard let resolved = automaticClaudeUsageLiveContext() else {
-                    refreshStates[profile.id] = .readFailed(
-                        reason: claudeKeychainAuthorizationDiagnostic
-                            ?? "The shared Claude credential is unavailable."
-                    )
+                    let reason = claudeKeychainAuthorizationDiagnostic
+                        ?? "The shared Claude credential is unavailable."
+                    AppLog.usage.error("Usage fetch skipped for active account \(profile.id, privacy: .public): \(reason, privacy: .public)")
+                    refreshStates[profile.id] = .readFailed(reason: reason)
                     continue
                 }
                 liveContext = resolved
@@ -2073,9 +2073,14 @@ final class AppState: ObservableObject {
                 }
                 return .unavailable
             }
-        case .authorizing, .failed:
+        case .authorizing:
             return .unavailable
-        case .unknown, .ready, .keychainLocked, .notFound:
+        case .unknown, .ready, .keychainLocked, .notFound, .failed:
+            // `.failed` is an inconclusive read, not an ACL denial, so it must
+            // not be sticky: the read below is prompt-free (the ACL preflight
+            // is metadata-only), and a successful one marks the item ready.
+            // Treating it as unavailable froze the active account's usage
+            // until the next switch rewrote the item.
             return .read(pinnedItem: nil)
         }
     }
@@ -4861,6 +4866,7 @@ final class AppState: ObservableObject {
             if case .needsAuthorization = claudeKeychainAuthorizationState {
                 return
             }
+            AppLog.credentials.error("Claude credential read failed: \(error.localizedDescription, privacy: .public)")
             claudeKeychainAuthorizationState = .failed(message: error.localizedDescription)
             return
         }
@@ -4891,6 +4897,7 @@ final class AppState: ObservableObject {
             if case .needsAuthorization = claudeKeychainAuthorizationState {
                 return
             }
+            AppLog.credentials.error("Claude credential access unavailable: \(failureMessage, privacy: .public)")
             claudeKeychainAuthorizationState = .failed(message: failureMessage)
         }
     }
