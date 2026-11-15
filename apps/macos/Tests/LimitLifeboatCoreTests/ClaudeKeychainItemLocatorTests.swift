@@ -452,7 +452,7 @@ final class ClaudeKeychainItemLocatorTests: XCTestCase {
         XCTAssertEqual(client.updateCalls.count, 1)
     }
 
-    func testUnanchoredDenialAndFailedStateAreFailClosed() {
+    func testUnanchoredDenialIsFailClosedButFailedReadRetries() {
         let current = makeLocation()
 
         XCTAssertTrue(
@@ -462,6 +462,12 @@ final class ClaudeKeychainItemLocatorTests: XCTestCase {
             ).suppressesAutomaticDataRead(currentItem: current)
         )
         XCTAssertTrue(
+            ClaudeKeychainAuthorizationState.authorizing(current)
+                .suppressesAutomaticDataRead(currentItem: current)
+        )
+        // An inconclusive read is not a denial: the next prompt-free cycle
+        // must try again, or the active account's usage freezes.
+        XCTAssertFalse(
             ClaudeKeychainAuthorizationState.failed(message: "ambiguous")
                 .suppressesAutomaticDataRead(currentItem: current)
         )
