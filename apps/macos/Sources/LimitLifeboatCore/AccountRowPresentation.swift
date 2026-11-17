@@ -1,6 +1,6 @@
 import Foundation
 
-public enum PresentationTone: Equatable, Sendable {
+public enum PresentationTone: String, Codable, Equatable, Sendable {
     case secondary
     case warning
     case stale

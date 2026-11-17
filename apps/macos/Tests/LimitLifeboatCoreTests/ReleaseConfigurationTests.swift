@@ -122,6 +122,31 @@ final class ReleaseConfigurationTests: XCTestCase {
         }
     }
 
+    func testPackagingEmbedsSandboxedWidgetThatOnlyReadsItsSnapshotDirectory() throws {
+        let packaging = try contents("scripts/package-app.sh")
+        let release = try contents("scripts/release.sh")
+        let template = try contents("Packaging/LimitLifeboatWidget.entitlements")
+
+        XCTAssertTrue(packaging.contains("WIDGET_DIR=\"$CONTENTS_DIR/PlugIns/$WIDGET_NAME.appex\""))
+        XCTAssertTrue(packaging.contains("<string>com.apple.widgetkit-extension</string>"))
+        XCTAssertTrue(packaging.contains("<string>$BUNDLE_ID.widget</string>"))
+        XCTAssertTrue(packaging.contains("<key>LimitLifeboatApplicationSupportDirectoryName</key>\n  <string>$APPLICATION_SUPPORT_NAME</string>"))
+        XCTAssertTrue(template.contains("<key>com.apple.security.app-sandbox</key>\n  <true/>"))
+        XCTAssertTrue(template.contains("<string>/Library/Application Support/__APPLICATION_SUPPORT_NAME__/Widget/</string>"))
+        XCTAssertTrue(template.contains("home-relative-path.read-only"))
+        XCTAssertFalse(template.contains("read-write"))
+        XCTAssertTrue(release.contains("assert_widget_entitlements \"$SIGNED_WIDGET_ENTITLEMENTS\""))
+        XCTAssertTrue(release.contains("assert_developer_id_signature \"$APP_WIDGET\" \"Embedded desktop widget extension\""))
+    }
+
+    func testWidgetTargetDependsOnCoreOnly() throws {
+        let manifest = try contents("Package.swift")
+        XCTAssertTrue(manifest.contains("""
+                    name: "LimitLifeboatWidget",
+                    dependencies: ["LimitLifeboatCore"],
+        """))
+    }
+
     func testReleaseGeneratesOneFullSignedUpdateWithoutDeltas() throws {
         let release = try contents("scripts/release.sh")
         XCTAssertTrue(release.contains("--maximum-versions 1"))

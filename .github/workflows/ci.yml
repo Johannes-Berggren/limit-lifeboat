@@ -154,7 +154,7 @@ jobs:
           sparkle_framework="$app/Contents/Frameworks/Sparkle.framework"
           source_entitlements="apps/macos/Packaging/LimitLifeboat.entitlements"
           signed_entitlements="$(mktemp)"
-          trap 'rm -f "$signed_entitlements"' EXIT
+          trap 'rm -f "$signed_entitlements" "${widget_entitlements:-}"' EXIT
           expected_entitlements='{"com.apple.security.automation.apple-events":true}'
 
           test -x "$executable"
@@ -204,6 +204,33 @@ jobs:
           codesign --display --entitlements - --xml "$app" > "$signed_entitlements"
           plutil -lint "$signed_entitlements"
           test "$(plutil -convert json -o - "$signed_entitlements")" = "$expected_entitlements"
+          widget="$app/Contents/PlugIns/LimitLifeboatWidget.appex"
+          widget_info="$widget/Contents/Info.plist"
+          widget_entitlements="$(mktemp)"
+          widget_exception="com.apple.security.temporary-exception.files.home-relative-path.read-only"
+          test -x "$widget/Contents/MacOS/LimitLifeboatWidget"
+          test "$(lipo -archs "$widget/Contents/MacOS/LimitLifeboatWidget")" = "arm64"
+          test "$(plutil -extract CFBundleIdentifier raw -o - "$widget_info")" = "com.limitlifeboat.app.widget"
+          test "$(plutil -extract CFBundlePackageType raw -o - "$widget_info")" = "XPC!"
+          test "$(plutil -extract NSExtension.NSExtensionPointIdentifier raw -o - "$widget_info")" = \
+            "com.apple.widgetkit-extension"
+          test "$(plutil -extract LimitLifeboatApplicationSupportDirectoryName raw -o - "$widget_info")" = "LimitLifeboat"
+          test "$(plutil -extract CFBundleVersion raw -o - "$widget_info")" = "$(git rev-list --count HEAD)"
+          otool -L "$widget/Contents/MacOS/LimitLifeboatWidget" | grep -Fq WidgetKit.framework
+          if otool -L "$widget/Contents/MacOS/LimitLifeboatWidget" | grep -Fq Sparkle; then
+            echo "The widget extension must not link Sparkle" >&2
+            exit 1
+          fi
+          codesign --verify --all-architectures --strict --verbose=2 "$widget"
+          codesign --display --entitlements - --xml "$widget" > "$widget_entitlements"
+          test "$(plutil -convert xml1 -o - "$widget_entitlements" | grep -c '<key>')" = "2"
+          test "$(/usr/libexec/PlistBuddy -c "Print :com.apple.security.app-sandbox" "$widget_entitlements")" = "true"
+          test "$(/usr/libexec/PlistBuddy -c "Print :$widget_exception:0" "$widget_entitlements")" = \
+            "/Library/Application Support/LimitLifeboat/Widget/"
+          if /usr/libexec/PlistBuddy -c "Print :$widget_exception:1" "$widget_entitlements" >/dev/null 2>&1; then
+            echo "The widget may only read its own Widget directory" >&2
+            exit 1
+          fi
       - name: Validate stable distribution signing policy
         run: |
           set -euo pipefail

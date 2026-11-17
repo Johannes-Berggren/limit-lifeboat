@@ -28,6 +28,14 @@ APP_EXECUTABLE="$MACOS_DIR/$EXECUTABLE_NAME"
 CLI_NAME="limit-lifeboat"
 HELPERS_DIR="$CONTENTS_DIR/Helpers"
 APP_CLI="$HELPERS_DIR/$CLI_NAME"
+# The desktop widget: a sandboxed WidgetKit extension that only reads the
+# snapshot the app writes to Application Support/<name>/Widget/.
+WIDGET_NAME="LimitLifeboatWidget"
+WIDGET_DIR="$CONTENTS_DIR/PlugIns/$WIDGET_NAME.appex"
+WIDGET_EXECUTABLE="$WIDGET_DIR/Contents/MacOS/$WIDGET_NAME"
+WIDGET_ENTITLEMENTS_TEMPLATE="$APP_ROOT/Packaging/LimitLifeboatWidget.entitlements"
+# Generated per variant; release.sh signs with this same file.
+WIDGET_ENTITLEMENTS="$APP_ROOT/dist/$WIDGET_NAME.entitlements"
 SPARKLE_ARTIFACT_ROOT="$APP_ROOT/.build/artifacts/sparkle/Sparkle"
 SPARKLE_SOURCE="$SPARKLE_ARTIFACT_ROOT/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
 SPARKLE_FRAMEWORK="$FRAMEWORKS_DIR/Sparkle.framework"
@@ -82,6 +90,7 @@ if [[ ! "$BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
 fi
 
 plutil -lint "$ENTITLEMENTS" >/dev/null
+plutil -lint "$WIDGET_ENTITLEMENTS_TEMPLATE" >/dev/null
 [[ -s "$LICENSE_FILE" ]] || {
   echo "Expected the repository license at $LICENSE_FILE" >&2
   exit 1
@@ -96,6 +105,7 @@ swift build --package-path "$APP_ROOT" --disable-keychain -c "$CONFIGURATION" --
 BUILD_DIR="$(swift build --package-path "$APP_ROOT" --disable-keychain -c "$CONFIGURATION" --arch "$ARCHITECTURE" --show-bin-path)"
 BUILD_BIN="$BUILD_DIR/$EXECUTABLE_NAME"
 BUILD_CLI="$BUILD_DIR/$CLI_NAME"
+BUILD_WIDGET="$BUILD_DIR/$WIDGET_NAME"
 
 if [[ ! -x "$BUILD_BIN" ]]; then
   echo "Expected executable was not produced at $BUILD_BIN" >&2
@@ -103,6 +113,11 @@ if [[ ! -x "$BUILD_BIN" ]]; then
 fi
 if [[ ! -x "$BUILD_CLI" ]]; then
   echo "Expected command-line tool was not produced at $BUILD_CLI" >&2
+  exit 1
+fi
+
+if [[ ! -x "$BUILD_WIDGET" ]]; then
+  echo "Expected widget extension was not produced at $BUILD_WIDGET" >&2
   exit 1
 fi
 
@@ -115,9 +130,14 @@ fi
 # build cannot be orphaned by the rm below.
 "$PROCESS_HELPER" check "$APP_EXECUTABLE"
 rm -rf "$APP_DIR"
-mkdir -p "$MACOS_DIR" "$FRAMEWORKS_DIR" "$HELPERS_DIR" "$RESOURCES_DIR/ThirdPartyLicenses"
+mkdir -p "$MACOS_DIR" "$FRAMEWORKS_DIR" "$HELPERS_DIR" "$RESOURCES_DIR/ThirdPartyLicenses" \
+  "$(dirname "$WIDGET_EXECUTABLE")"
 cp "$BUILD_BIN" "$APP_EXECUTABLE"
 cp "$BUILD_CLI" "$APP_CLI"
+cp "$BUILD_WIDGET" "$WIDGET_EXECUTABLE"
+sed "s|__APPLICATION_SUPPORT_NAME__|$APPLICATION_SUPPORT_NAME|g" \
+  "$WIDGET_ENTITLEMENTS_TEMPLATE" > "$WIDGET_ENTITLEMENTS"
+plutil -lint "$WIDGET_ENTITLEMENTS" >/dev/null
 ditto "$SPARKLE_SOURCE" "$SPARKLE_FRAMEWORK"
 # Limit Lifeboat is not sandboxed, so Sparkle's sandbox-only XPC services are
 # unnecessary. Removing both the real directory and top-level symlink also
@@ -198,6 +218,44 @@ PLIST
 
 plutil -lint "$CONTENTS_DIR/Info.plist" >/dev/null
 
+cat > "$WIDGET_DIR/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleDisplayName</key>
+  <string>$DISPLAY_NAME</string>
+  <key>CFBundleExecutable</key>
+  <string>$WIDGET_NAME</string>
+  <key>CFBundleIdentifier</key>
+  <string>$BUNDLE_ID.widget</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>$WIDGET_NAME</string>
+  <key>CFBundlePackageType</key>
+  <string>XPC!</string>
+  <key>CFBundleShortVersionString</key>
+  <string>$VERSION</string>
+  <key>CFBundleVersion</key>
+  <string>$BUILD_NUMBER</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>14.0</string>
+  <key>LimitLifeboatApplicationSupportDirectoryName</key>
+  <string>$APPLICATION_SUPPORT_NAME</string>
+  <key>NSExtension</key>
+  <dict>
+    <key>NSExtensionPointIdentifier</key>
+    <string>com.apple.widgetkit-extension</string>
+  </dict>
+</dict>
+</plist>
+PLIST
+
+plutil -lint "$WIDGET_DIR/Contents/Info.plist" >/dev/null
+
 if [[ "$(lipo -archs "$APP_EXECUTABLE")" != "arm64" ]]; then
   echo "Packaged executable must contain only arm64 code: $(lipo -archs "$APP_EXECUTABLE")" >&2
   exit 1
@@ -205,6 +263,11 @@ fi
 
 if [[ "$(lipo -archs "$APP_CLI")" != "arm64" ]]; then
   echo "Packaged command-line tool must contain only arm64 code: $(lipo -archs "$APP_CLI")" >&2
+  exit 1
+fi
+
+if [[ "$(lipo -archs "$WIDGET_EXECUTABLE")" != "arm64" ]]; then
+  echo "Packaged widget extension must contain only arm64 code: $(lipo -archs "$WIDGET_EXECUTABLE")" >&2
   exit 1
 fi
 
@@ -248,11 +311,15 @@ if [[ "${SKIP_ADHOC_SIGN:-0}" != "1" ]]; then
   codesign --force --sign "$RESOLVED_SIGN_IDENTITY" "$SPARKLE_FRAMEWORK"
   codesign --force --sign "$RESOLVED_SIGN_IDENTITY" --identifier "$BUNDLE_ID.cli" "$APP_CLI"
   codesign --force --sign "$RESOLVED_SIGN_IDENTITY" \
+    --entitlements "$WIDGET_ENTITLEMENTS" \
+    "$WIDGET_DIR"
+  codesign --force --sign "$RESOLVED_SIGN_IDENTITY" \
     --entitlements "$ENTITLEMENTS" \
     "$APP_DIR"
   codesign --verify --all-architectures --strict --verbose=2 "$APP_DIR"
   codesign --verify --all-architectures --strict --verbose=2 "$SPARKLE_FRAMEWORK"
   codesign --verify --all-architectures --strict --verbose=2 "$APP_CLI"
+  codesign --verify --all-architectures --strict --verbose=2 "$WIDGET_DIR"
 
   if [[ "$APP_VARIANT" == "development" ]]; then
     SIGNING_DETAILS="$(codesign --display --verbose=4 "$APP_DIR" 2>&1)"
