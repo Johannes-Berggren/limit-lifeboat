@@ -48,6 +48,23 @@ public struct WidgetSnapshot: Codable, Equatable, Sendable {
             ?? accounts.first
     }
 
+    /// The accounts a widget with room for `limit` rows shows, in display
+    /// order, plus how many it leaves out. When some are left out, one row
+    /// goes to the "+N more" line, and every provider's active account is
+    /// kept before the rest fill the remaining rows.
+    public func accountsForDisplay(limit: Int) -> (shown: [WidgetAccount], hiddenCount: Int) {
+        guard accounts.count > limit else {
+            return (accounts, 0)
+        }
+        let rows = max(1, limit - 1)
+        var keep = Set(accounts.filter(\.isActive).prefix(rows).map(\.id))
+        for account in accounts where keep.count < rows {
+            keep.insert(account.id)
+        }
+        let shown = accounts.filter { keep.contains($0.id) }
+        return (shown, accounts.count - shown.count)
+    }
+
     /// The advised switch target for the headline account's provider.
     public func bestNext(for provider: Provider) -> WidgetAccount? {
         accounts.first { $0.provider == provider && $0.isBestNext && !$0.isActive }
@@ -97,15 +114,29 @@ public struct WidgetAccount: Codable, Equatable, Sendable, Identifiable {
     }
 
     /// The all-models weekly window, or the first model-scoped one.
-    public var weeklyWindow: WidgetWindow? {
+    public var primaryWeeklyWindow: WidgetWindow? {
         windows.first { $0.kind == .weekly } ?? windows.first { $0.kind == .weeklyScoped }
+    }
+
+    /// The window for the widget's Week column: the all-models weekly, unless
+    /// a model-scoped weekly (e.g. Opus) has less left, so a depleted model
+    /// limit is never hidden behind a healthy all-models number.
+    public var weeklyWindow: WidgetWindow? {
+        let weekly = windows.filter { $0.kind == .weekly || $0.kind == .weeklyScoped }
+        guard let primary = primaryWeeklyWindow else { return nil }
+        // Ties keep the all-models window.
+        return weekly.reduce(primary) { tightest, window in
+            window.usedPercent > tightest.usedPercent ? window : tightest
+        }
     }
 
     /// The window that best answers "how much can I use right now": the
     /// tighter of session and weekly once either is in the warning band,
     /// otherwise the session window.
     public var headlineWindow: WidgetWindow? {
-        let primary = [sessionWindow, weeklyWindow].compactMap { $0 }
+        // Like the menu bar, a model-scoped limit doesn't take over the
+        // headline; it stays visible in the Week column.
+        let primary = [sessionWindow, primaryWeeklyWindow].compactMap { $0 }
         let urgent = primary.filter { $0.usedPercent >= UsageThresholds.standard.warningUsedFraction * 100 }
         if let tightest = urgent.max(by: { $0.usedPercent < $1.usedPercent }) {
             return tightest

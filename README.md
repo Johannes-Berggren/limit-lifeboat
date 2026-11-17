@@ -215,6 +215,10 @@ desktop or in Notification Center. To add it, right-click the desktop, choose
 - **Large** groups accounts by provider, draws the same runway curves as the
   menu (when Usage curves are on), and repeats the suggested switch target.
 
+When a model-specific weekly limit (such as Opus) has less left than the
+all-models week, it takes the Week column and is named there, so an empty
+model limit is never hidden.
+
 Each limit also shows the time until it resets, in hours and minutes
 (`2h 30m`), or days and hours for weekly windows more than a day out
 (`3d 4h`). The countdown ticks every minute.

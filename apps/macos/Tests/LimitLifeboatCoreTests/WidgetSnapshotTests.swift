@@ -262,3 +262,68 @@ final class WidgetResetCountdownTests: XCTestCase {
         XCTAssertNil(text(-60))
     }
 }
+
+final class WidgetLayoutSelectionTests: XCTestCase {
+    private let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+    private func window(_ id: String, _ kind: UsageWindowKind, _ label: String, used: Double) -> WidgetWindow {
+        WidgetWindow(id: id, kind: kind, label: label, usedPercent: used, resetDate: now.addingTimeInterval(3600), riskLevel: .healthy)
+    }
+
+    private func account(_ label: String, _ provider: Provider = .claude, active: Bool = false) -> WidgetAccount {
+        WidgetAccount(id: UUID(), provider: provider, label: label, isActive: active, lastRefreshed: now)
+    }
+
+    func testWeekColumnShowsAModelLimitWithLessLeftThanTheAllModelsWeek() {
+        var account = account("Work", active: true)
+        account.windows = [
+            window("session", .session, "Session", used: 20),
+            window("weekly-all", .weekly, "Week", used: 85),
+            window("weekly-opus", .weeklyScoped, "Opus", used: 100)
+        ]
+        XCTAssertEqual(account.weeklyWindow?.id, "weekly-opus")
+        XCTAssertEqual(account.primaryWeeklyWindow?.id, "weekly-all")
+        // A model limit stays out of the headline, as in the menu bar: the
+        // urgent all-models week leads, not the emptier Opus limit.
+        XCTAssertEqual(account.headlineWindow?.id, "weekly-all")
+    }
+
+    func testWeekColumnKeepsTheAllModelsWeekWhenItIsTighterOrTied() {
+        var account = account("Work")
+        account.windows = [
+            window("weekly-all", .weekly, "Week", used: 60),
+            window("weekly-opus", .weeklyScoped, "Opus", used: 60)
+        ]
+        XCTAssertEqual(account.weeklyWindow?.id, "weekly-all")
+        account.windows[1].usedPercent = 10
+        XCTAssertEqual(account.weeklyWindow?.id, "weekly-all")
+    }
+
+    func testEveryAccountFitsWithoutAMoreLine() {
+        let snapshot = WidgetSnapshot(generatedAt: now, accounts: (1...4).map { account("A\($0)") })
+        let (shown, hidden) = snapshot.accountsForDisplay(limit: 4)
+        XCTAssertEqual(shown.count, 4)
+        XCTAssertEqual(hidden, 0)
+    }
+
+    func testOverflowGivesOneRowToTheMoreLine() {
+        let snapshot = WidgetSnapshot(generatedAt: now, accounts: (1...5).map { account("A\($0)") })
+        let (shown, hidden) = snapshot.accountsForDisplay(limit: 4)
+        XCTAssertEqual(shown.map(\.label), ["A1", "A2", "A3"])
+        XCTAssertEqual(hidden, 2)
+    }
+
+    func testOverflowKeepsEveryProvidersActiveAccountInOrder() {
+        let snapshot = WidgetSnapshot(generatedAt: now, accounts: [
+            account("Claude active", active: true),
+            account("Claude 2"),
+            account("Claude 3"),
+            account("Claude 4"),
+            account("Codex active", .codex, active: true),
+            account("Codex 2", .codex)
+        ])
+        let (shown, hidden) = snapshot.accountsForDisplay(limit: 4)
+        XCTAssertEqual(shown.map(\.label), ["Claude active", "Claude 2", "Codex active"])
+        XCTAssertEqual(hidden, 3)
+    }
+}

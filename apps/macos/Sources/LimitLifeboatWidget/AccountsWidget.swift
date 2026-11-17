@@ -242,8 +242,7 @@ struct ListAccountsView: View {
     private var maxRows: Int { isLarge ? 7 : 4 }
 
     var body: some View {
-        let shown = Array(snapshot.accounts.prefix(maxRows))
-        let hidden = snapshot.accounts.count - shown.count
+        let (shown, hidden) = snapshot.accountsForDisplay(limit: maxRows)
         VStack(alignment: .leading, spacing: 0) {
             ListHeader(snapshot: snapshot, now: now)
                 .padding(.bottom, isLarge ? 6 : 5)
@@ -365,21 +364,31 @@ private struct WindowGauge: View {
         VStack(alignment: .leading, spacing: 3) {
             if let window {
                 let state = GaugeState(window: window, account: account, now: now)
-                HStack(alignment: .firstTextBaseline, spacing: 3) {
+                HStack(alignment: .firstTextBaseline, spacing: 2) {
+                    if window.kind == .weeklyScoped {
+                        // The Week column fell back to a model limit; name it.
+                        Text(window.label)
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(state.isMuted ? Color.secondary : state.color)
+                            .lineLimit(1)
+                            .layoutPriority(1)
+                    }
                     if let countdown = state.countdown {
+                        // Beside a model name there is no room for the reset
+                        // arrow; the countdown alone still reads as a reset.
                         Label(countdown, systemImage: "arrow.clockwise")
-                            .labelStyle(CountdownLabelStyle())
+                            .labelStyle(CountdownLabelStyle(showsIcon: window.kind != .weeklyScoped))
                             .font(.system(size: 9, weight: .medium))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
-                            .minimumScaleFactor(0.8)
+                            .minimumScaleFactor(0.7)
                             .accessibilityLabel("Resets in \(countdown)")
                     }
-                    Spacer(minLength: 2)
+                    Spacer(minLength: 1)
                     Text(state.valueText)
                         .font(.system(size: 11.5, weight: .semibold, design: .rounded))
                         .monospacedDigit()
-                        .foregroundStyle(state.isMuted ? .secondary : .primary)
+                        .foregroundStyle(state.valueColor)
                 }
                 if showsRunway, let runway = window.runway, !state.isMuted {
                     RunwayShape(runway: runway, color: state.color)
@@ -411,6 +420,14 @@ private struct GaugeState {
     /// or once it has passed.
     var countdown: String?
 
+    /// The percentage takes the risk colour once a window is in the warning
+    /// band or empty, where the bar alone is too short to carry it.
+    var valueColor: Color {
+        if isMuted { return .secondary }
+        return risk == .warning || risk == .depleted ? color : .primary
+    }
+    private var risk: RiskLevel = .unknown
+
     init(window: WidgetWindow, account: WidgetAccount, now: Date) {
         countdown = WidgetResetCountdown.text(until: window.resetDate, now: now)
         if window.resetHasElapsed(asOf: now) {
@@ -423,6 +440,7 @@ private struct GaugeState {
             return
         }
         let remaining = window.remainingPercent
+        risk = window.riskLevel
         valueText = "\(Int(remaining.rounded()))%"
         fillFraction = remaining / 100
         if account.isStale(asOf: now) {
@@ -437,11 +455,15 @@ private struct GaugeState {
 
 /// A small reset arrow tight against the countdown text.
 private struct CountdownLabelStyle: LabelStyle {
+    var showsIcon = true
+
     func makeBody(configuration: Configuration) -> some View {
         HStack(spacing: 2) {
-            configuration.icon
-                .imageScale(.small)
-                .font(.system(size: 7, weight: .bold))
+            if showsIcon {
+                configuration.icon
+                    .imageScale(.small)
+                    .font(.system(size: 7, weight: .bold))
+            }
             configuration.title
                 .monospacedDigit()
         }
