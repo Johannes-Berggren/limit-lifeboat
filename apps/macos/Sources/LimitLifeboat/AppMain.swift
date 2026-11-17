@@ -149,6 +149,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Clicking the desktop widget (or opening the app again from Finder)
+    /// reopens the running app; show the accounts instead of nothing.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        menuBarController?.showPopover()
+        return false
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         controlServer?.stop()
     }

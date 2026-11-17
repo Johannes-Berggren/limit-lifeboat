@@ -4,8 +4,8 @@ import Foundation
 /// timeline: x runs from the window's start (0) to its reset (1), y from 0%
 /// (0) to 100% used (1). Pure geometry in a unit square so the gauge can
 /// scale it to any size and tests can pin it down without SwiftUI.
-public struct UsageRunway: Equatable, Sendable {
-    public struct Point: Equatable, Sendable {
+public struct UsageRunway: Codable, Equatable, Sendable {
+    public struct Point: Codable, Equatable, Sendable {
         public var x: Double
         public var y: Double
 

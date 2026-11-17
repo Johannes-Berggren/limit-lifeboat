@@ -10,7 +10,8 @@ let package = Package(
         .library(name: "LimitLifeboatCore", targets: ["LimitLifeboatCore"]),
         .library(name: "LimitLifeboatAppWorkflows", targets: ["LimitLifeboatAppWorkflows"]),
         .executable(name: "LimitLifeboat", targets: ["LimitLifeboat"]),
-        .executable(name: "limit-lifeboat", targets: ["LimitLifeboatCLI"])
+        .executable(name: "limit-lifeboat", targets: ["LimitLifeboatCLI"]),
+        .executable(name: "LimitLifeboatWidget", targets: ["LimitLifeboatWidget"])
     ],
     dependencies: [
         .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.4")
@@ -47,6 +48,18 @@ let package = Package(
         .executableTarget(
             name: "LimitLifeboatCLI",
             dependencies: ["LimitLifeboatCore"]
+        ),
+        // The desktop widget extension. Core only: it reads the snapshot the
+        // app writes and must never link the switch path or Sparkle.
+        // scripts/package-app.sh wraps the binary in PlugIns/*.appex.
+        .executableTarget(
+            name: "LimitLifeboatWidget",
+            dependencies: ["LimitLifeboatCore"],
+            swiftSettings: [.unsafeFlags(["-application-extension"])],
+            linkerSettings: [
+                .linkedFramework("WidgetKit"),
+                .unsafeFlags(["-Xlinker", "-application_extension"])
+            ]
         ),
         .testTarget(
             name: "LimitLifeboatCoreTests",

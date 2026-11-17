@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    The desktop widget extension. WidgetKit only loads sandboxed extensions.
+
+    Its one exception is read-only access to the app's Widget/ directory,
+    where the app writes widget-snapshot.json (display data only: labels,
+    percentages, reset times; no credentials). It cannot read profiles.json,
+    backups, history or anything else in Application Support. The app is not
+    sandboxed and has no App Group, so a home-relative exception is the only
+    shared location that works for both Developer ID and development builds.
+
+    scripts/package-app.sh replaces __APPLICATION_SUPPORT_NAME__ with the
+    variant's directory (LimitLifeboat or LimitLifeboat-Dev).
+  -->
+  <key>com.apple.security.app-sandbox</key>
+  <true/>
+  <key>com.apple.security.temporary-exception.files.home-relative-path.read-only</key>
+  <array>
+    <string>/Library/Application Support/__APPLICATION_SUPPORT_NAME__/Widget/</string>
+  </array>
+</dict>
+</plist>
