@@ -316,6 +316,29 @@ public enum WidgetSnapshotBuilder {
     }
 }
 
+/// The widget's reset countdown: hours and minutes ("2h 30m", "45m") up to a
+/// day, then days and hours ("3d 4h") so a weekly reset stays readable.
+/// Rounds up to the minute, so it never promises a reset early. Nil once
+/// the reset has passed.
+public enum WidgetResetCountdown {
+    public static func text(until resetDate: Date?, now: Date) -> String? {
+        guard let resetDate else { return nil }
+        let seconds = resetDate.timeIntervalSince(now)
+        guard seconds > 0 else { return nil }
+        let totalMinutes = Int((seconds / 60).rounded(.up))
+        let days = totalMinutes / (24 * 60)
+        let hours = (totalMinutes % (24 * 60)) / 60
+        let minutes = totalMinutes % 60
+        if days > 0 {
+            return hours > 0 ? "\(days)d \(hours)h" : "\(days)d"
+        }
+        if hours > 0 {
+            return minutes > 0 ? "\(hours)h \(minutes)m" : "\(hours)h"
+        }
+        return "\(minutes)m"
+    }
+}
+
 /// Reads and writes `Widget/widget-snapshot.json` under the app variant's
 /// Application Support directory.
 public struct WidgetSnapshotStore: Sendable {

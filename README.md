@@ -215,6 +215,10 @@ desktop or in Notification Center. To add it, right-click the desktop, choose
 - **Large** groups accounts by provider, draws the same runway curves as the
   menu (when Usage curves are on), and repeats the suggested switch target.
 
+Each limit also shows the time until it resets, in hours and minutes
+(`2h 30m`), or days and hours for weekly windows more than a day out
+(`3d 4h`). The countdown ticks every minute.
+
 The widget only displays usage. It cannot switch accounts, and clicking it
 opens the app's menu. While the app runs, the widget updates when the numbers
 change; otherwise macOS refreshes it about every 15 minutes. Readings older

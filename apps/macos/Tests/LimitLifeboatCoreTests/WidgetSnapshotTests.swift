@@ -230,3 +230,35 @@ final class WidgetSnapshotTests: XCTestCase {
         XCTAssertFalse(url.path.contains("/Containers/"))
     }
 }
+
+final class WidgetResetCountdownTests: XCTestCase {
+    private let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+    private func text(_ seconds: TimeInterval) -> String? {
+        WidgetResetCountdown.text(until: now.addingTimeInterval(seconds), now: now)
+    }
+
+    func testShowsHoursAndMinutesWithinADay() {
+        XCTAssertEqual(text(2 * 3600 + 30 * 60), "2h 30m")
+        XCTAssertEqual(text(4 * 3600), "4h")
+        XCTAssertEqual(text(45 * 60), "45m")
+        XCTAssertEqual(text(23 * 3600 + 59 * 60), "23h 59m")
+    }
+
+    func testRoundsUpSoTheResetIsNeverPromisedEarly() {
+        XCTAssertEqual(text(1), "1m")
+        XCTAssertEqual(text(2 * 3600 + 29 * 60 + 1), "2h 30m")
+        XCTAssertEqual(text(59 * 60 + 30), "1h")
+    }
+
+    func testSwitchesToDaysAndHoursBeyondADay() {
+        XCTAssertEqual(text(3 * 86_400 + 4 * 3600), "3d 4h")
+        XCTAssertEqual(text(2 * 86_400), "2d")
+    }
+
+    func testNilWithoutAFutureReset() {
+        XCTAssertNil(WidgetResetCountdown.text(until: nil, now: now))
+        XCTAssertNil(text(0))
+        XCTAssertNil(text(-60))
+    }
+}

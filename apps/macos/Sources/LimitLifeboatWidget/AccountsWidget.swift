@@ -48,9 +48,10 @@ struct AccountsTimelineProvider: TimelineProvider {
         let now = Date()
         let snapshot = Self.load()
         // The app asks for a reload whenever the numbers change. These extra
-        // entries only move staleness and "reset passed" on while it is
-        // quiet (or not running); the reload after them re-reads the file.
-        let entries = stride(from: 0, through: 15, by: 5).map { minutes in
+        // entries tick the reset countdowns each minute and move staleness and
+        // "reset passed" on while it is quiet (or not running); the reload
+        // after them re-reads the file.
+        let entries = (0...15).map { minutes in
             AccountsEntry(date: now.addingTimeInterval(TimeInterval(minutes * 60)), snapshot: snapshot)
         }
         completion(Timeline(entries: entries, policy: .atEnd))
@@ -132,6 +133,37 @@ private struct WidgetHeader: View {
     }
 }
 
+/// The medium and large header: the app name and data age on the left, and
+/// the two column titles over the gauges so each row can use its label slot
+/// for the reset countdown.
+private struct ListHeader: View {
+    let snapshot: WidgetSnapshot
+    let now: Date
+
+    var body: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 4) {
+                Image(systemName: "lifepreserver.fill")
+                    .imageScale(.small)
+                Text("Limit Lifeboat")
+                    .lineLimit(1)
+                Text(WidgetHeader.ageText(since: snapshot.generatedAt, now: now))
+                    .lineLimit(1)
+                    .foregroundStyle(.tertiary)
+            }
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Text("Session left")
+                .frame(width: ColumnMetrics.width, alignment: .leading)
+            Text("Week left")
+                .frame(width: ColumnMetrics.width, alignment: .leading)
+        }
+        .font(.system(size: 9.5, weight: .semibold))
+        .foregroundStyle(.secondary)
+    }
+}
+
 // MARK: Small
 
 struct SmallAccountsView: View {
@@ -143,7 +175,17 @@ struct SmallAccountsView: View {
             let window = account.headlineWindow
             let state = window.map { GaugeState(window: $0, account: account, now: now) }
             VStack(spacing: 6) {
-                WidgetHeader(title: account.isActive ? "Active" : account.provider.displayName, snapshot: snapshot, now: now, trailing: false)
+                HStack(spacing: 4) {
+                    WidgetHeader(title: account.isActive ? "Active" : account.provider.displayName, snapshot: snapshot, now: now, trailing: false)
+                    if let window, !window.resetHasElapsed(asOf: now),
+                       let countdown = WidgetResetCountdown.text(until: window.resetDate, now: now) {
+                        Label(countdown, systemImage: "arrow.clockwise")
+                            .labelStyle(CountdownLabelStyle())
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .layoutPriority(1)
+                    }
+                }
                 ZStack {
                     Circle()
                         .stroke(.quaternary, lineWidth: 7)
@@ -186,9 +228,6 @@ struct SmallAccountsView: View {
         if let note = account.note {
             return Text(note.text)
         }
-        if let reset = window?.resetDate, reset > now {
-            return Text("Resets in \(DurationPhrase.short(reset.timeIntervalSince(now)))")
-        }
         return Text(account.provider.displayName)
     }
 }
@@ -206,8 +245,8 @@ struct ListAccountsView: View {
         let shown = Array(snapshot.accounts.prefix(maxRows))
         let hidden = snapshot.accounts.count - shown.count
         VStack(alignment: .leading, spacing: 0) {
-            WidgetHeader(title: "Limit Lifeboat · % left", snapshot: snapshot, now: now)
-            .padding(.bottom, isLarge ? 6 : 5)
+            ListHeader(snapshot: snapshot, now: now)
+                .padding(.bottom, isLarge ? 6 : 5)
 
             ForEach(Array(shown.enumerated()), id: \.element.id) { index, account in
                 if isLarge, index == 0 || shown[index - 1].provider != account.provider {
@@ -327,11 +366,15 @@ private struct WindowGauge: View {
             if let window {
                 let state = GaugeState(window: window, account: account, now: now)
                 HStack(alignment: .firstTextBaseline, spacing: 3) {
-                    Text(window.label)
-                        .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
+                    if let countdown = state.countdown {
+                        Label(countdown, systemImage: "arrow.clockwise")
+                            .labelStyle(CountdownLabelStyle())
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            .accessibilityLabel("Resets in \(countdown)")
+                    }
                     Spacer(minLength: 2)
                     Text(state.valueText)
                         .font(.system(size: 11.5, weight: .semibold, design: .rounded))
@@ -364,8 +407,12 @@ private struct GaugeState {
     var fillFraction: Double
     var color: Color
     var isMuted: Bool
+    /// Time until the window resets ("2h 30m"); nil without a reset date
+    /// or once it has passed.
+    var countdown: String?
 
     init(window: WidgetWindow, account: WidgetAccount, now: Date) {
+        countdown = WidgetResetCountdown.text(until: window.resetDate, now: now)
         if window.resetHasElapsed(asOf: now) {
             // The provider has most likely refilled it; say so instead of
             // showing pre-reset numbers as current.
@@ -384,6 +431,19 @@ private struct GaugeState {
         } else {
             color = window.riskLevel.color
             isMuted = false
+        }
+    }
+}
+
+/// A small reset arrow tight against the countdown text.
+private struct CountdownLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 2) {
+            configuration.icon
+                .imageScale(.small)
+                .font(.system(size: 7, weight: .bold))
+            configuration.title
+                .monospacedDigit()
         }
     }
 }
