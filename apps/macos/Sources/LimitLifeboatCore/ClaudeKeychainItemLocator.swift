@@ -107,12 +107,14 @@ public enum ClaudeKeychainAuthorizationState: Equatable, Sendable {
                 return true
             }
             return deniedItem.modificationStamp == currentItem.modificationStamp
-        case .authorizing, .failed:
+        case .authorizing:
             return true
-        case .keychainLocked:
-            // Locking is transient (not an ACL denial). Metadata and the ACL
-            // gate remain prompt-free, so a later cycle may retry after wake
-            // or after the user unlocks the login Keychain.
+        case .keychainLocked, .failed:
+            // Neither is an ACL denial. Locking is transient, and a failed
+            // read (an ambiguous item, a race with Claude rewriting it) is
+            // inconclusive. Metadata and the ACL gate remain prompt-free, so
+            // a later cycle may retry; a sticky `.failed` used to freeze the
+            // active account's usage until the next switch.
             return false
         case .notFound:
             return currentItem == nil
