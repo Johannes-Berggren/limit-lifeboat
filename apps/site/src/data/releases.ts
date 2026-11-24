@@ -15,6 +15,13 @@ export interface Release {
 
 export const releases: readonly Release[] = [
   {
+    version: "1.3.1",
+    date: "2026-11-24",
+    highlights: [
+      "The active Claude account's usage no longer freezes after a failed Keychain read. The next refresh retries the read, so the numbers stay current without switching accounts.",
+    ],
+  },
+  {
     version: "1.3.0",
     date: "2026-11-04",
     highlights: [
