@@ -36,6 +36,7 @@ final class ClaudeBrowserConnectionModel: ObservableObject {
     }
 
     func setEnabled(_ enabled: Bool) {
+        guard !isWorking else { return }
         error = nil
         health = nil
         isWorking = true

@@ -213,11 +213,19 @@ struct SettingsView: View {
                             return browserConnection.signedInAs == nil && browserConnection.status != .installed
                         }())
                         Label(
-                            "Gives the Chrome connection its own login, so switching the CLI's account doesn't disconnect the extension. Sign in with the account and organization the extension uses.",
+                            "Keeps the connection signed in to the account and organization you use in the Chrome extension while you switch Claude Code accounts.",
                             systemImage: "info.circle"
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        if browserConnection.status == .needsRepair {
+                            Label(
+                                "Turn this on to repair the existing browser server and reconnect it to your saved browser login.",
+                                systemImage: "wrench"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        }
                         Label(
                             "Adds a \"\(ClaudeBrowserConnection.serverName)\" MCP server and turns off the built-in connection, so tools become mcp__browser__*; update any rules or instructions that name mcp__claude-in-chrome. The extension can ask you to allow a site even in bypass-permissions mode. This uses an undocumented Claude Code option, so a Claude Code update can break it. New sessions pick this up.",
                             systemImage: "info.circle"
@@ -244,7 +252,7 @@ struct SettingsView: View {
                                 .foregroundStyle(.secondary)
                             case .noBrowser:
                                 StatusBanner(
-                                    text: "No browser found. Open Chrome and check that the extension is signed in to the same account and organization as the browser login.",
+                                    text: "No browser found. Open the Claude extension in Chrome and check that its account and organization match the Browser login above.",
                                     systemImage: "exclamationmark.triangle.fill",
                                     color: DS.danger
                                 )
@@ -258,7 +266,7 @@ struct SettingsView: View {
                         }
                         if case .other(let command) = browserConnection.status {
                             Label(
-                                "Claude Code already has an MCP server named \"\(ClaudeBrowserConnection.serverName)\" (\(command)), so it's left alone.",
+                                "The name \"\(ClaudeBrowserConnection.serverName)\" is already in use (\(command)). Rename that server to enable this setting.",
                                 systemImage: "info.circle"
                             )
                             .font(.caption)

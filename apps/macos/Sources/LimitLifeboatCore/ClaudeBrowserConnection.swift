@@ -25,6 +25,7 @@ public struct ClaudeBrowserConnection {
 
     public enum Status: Equatable {
         case notSet
+        case needsRepair
         case installed
         /// Someone else's `browser` server; never replaced.
         case other(String)
@@ -89,16 +90,37 @@ public struct ClaudeBrowserConnection {
     }
 
     public func status() -> Status {
+        status(of: registeredServer())
+    }
+
+    private func registeredServer() -> [String: Any]? {
         guard let data = try? Data(contentsOf: homeDirectory.appendingPathComponent(".claude.json")),
               let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let servers = config["mcpServers"] as? [String: Any],
-              let server = servers[Self.serverName] as? [String: Any] else {
+              let servers = config["mcpServers"] as? [String: Any] else {
+            return nil
+        }
+        return servers[Self.serverName] as? [String: Any]
+    }
+
+    private func status(of server: [String: Any]?) -> Status {
+        guard let server else {
             return .notSet
         }
         let args = server["args"] as? [String] ?? []
         let env = server["env"] as? [String: String] ?? [:]
         if args.contains(Self.serverFlag), env[Self.configDirectoryKey] == configDirectory.path {
             return .installed
+        }
+        // The earlier installer recorded ownership of the built-in denial.
+        // Only repair its exact server shape with the isolation setting missing.
+        if fileManager.fileExists(atPath: addedDenialMarker.path),
+           Set(server.keys).isSubset(of: ["type", "command", "args", "env"]),
+           server["type"] as? String == "stdio",
+           let command = server["command"] as? String,
+           command == (try? claudeExecutable().path),
+           args == [Self.serverFlag],
+           server["env"] == nil || (server["env"] as? [String: String])?.isEmpty == true {
+            return .needsRepair
         }
         return .other(server["command"] as? String ?? server["url"] as? String ?? "unknown")
     }
@@ -107,12 +129,14 @@ public struct ClaudeBrowserConnection {
     /// `~/.claude.json` all the time and Claude Code owns its locking.
     public func install() throws {
         var settings = try settingsFile.read()
-        switch status() {
+        let previousServer = registeredServer()
+        let previousStatus = status(of: previousServer)
+        switch previousStatus {
         case .other(let command):
             throw ConnectionError.otherServer(command)
         case .installed:
             break
-        case .notSet:
+        case .notSet, .needsRepair:
             let claude = try claudeExecutable()
             let server: [String: Any] = [
                 "type": "stdio",
@@ -120,8 +144,15 @@ public struct ClaudeBrowserConnection {
                 "args": [Self.serverFlag],
                 "env": [Self.configDirectoryKey: configDirectory.path]
             ]
-            let json = try JSONSerialization.data(withJSONObject: server, options: [.sortedKeys, .withoutEscapingSlashes])
-            try runClaude(claude, ["mcp", "add-json", Self.serverName, String(decoding: json, as: UTF8.self), "--scope", "user"])
+            if previousStatus == .needsRepair { try removeServer(using: claude) }
+            do {
+                try addServer(server, using: claude)
+            } catch {
+                if let previousServer {
+                    try rollBackToServer(previousServer, using: claude, after: error)
+                }
+                throw error
+            }
         }
 
         var denied = settings["deniedMcpServers"] as? [[String: Any]] ?? []
@@ -129,14 +160,19 @@ public struct ClaudeBrowserConnection {
         guard !denied.contains(where: Self.isBuiltInDenial) else { return }
         denied.append(["serverName": Self.builtInServerName])
         settings["deniedMcpServers"] = denied
+        let hadDenialMarker = fileManager.fileExists(atPath: addedDenialMarker.path)
         do {
             try fileManager.createDirectory(at: configDirectory, withIntermediateDirectories: true)
-            try Data().write(to: addedDenialMarker)
+            if !hadDenialMarker { try Data().write(to: addedDenialMarker) }
             try settingsFile.write(settings)
         } catch {
-            // Half installed would leave two Chrome connections in every session.
-            try? fileManager.removeItem(at: addedDenialMarker)
-            try? runClaude(claudeExecutable(), ["mcp", "remove", Self.serverName, "--scope", "user"])
+            if !hadDenialMarker { try? fileManager.removeItem(at: addedDenialMarker) }
+            if previousStatus != .installed, let claude = try? claudeExecutable(), status() == .installed {
+                try removeServer(using: claude)
+                if let previousServer {
+                    try rollBackToServer(previousServer, using: claude, after: error)
+                }
+            }
             throw error
         }
     }
@@ -146,7 +182,7 @@ public struct ClaudeBrowserConnection {
     public func uninstall() throws {
         var settings = try settingsFile.read()
         if status() == .installed {
-            try runClaude(claudeExecutable(), ["mcp", "remove", Self.serverName, "--scope", "user"])
+            try removeServer(using: claudeExecutable())
         }
         guard fileManager.fileExists(atPath: addedDenialMarker.path) else { return }
         if var denied = settings["deniedMcpServers"] as? [[String: Any]],
@@ -245,6 +281,25 @@ public struct ClaudeBrowserConnection {
             throw ConnectionError.claudeNotFound
         }
         return claude
+    }
+
+    private func addServer(_ server: [String: Any], using claude: URL) throws {
+        let json = try JSONSerialization.data(withJSONObject: server, options: [.sortedKeys, .withoutEscapingSlashes])
+        try runClaude(claude, ["mcp", "add-json", Self.serverName, String(decoding: json, as: UTF8.self), "--scope", "user"])
+    }
+
+    private func removeServer(using claude: URL) throws {
+        try runClaude(claude, ["mcp", "remove", Self.serverName, "--scope", "user"])
+    }
+
+    private func rollBackToServer(_ server: [String: Any], using claude: URL, after installError: Error) throws {
+        do {
+            try addServer(server, using: claude)
+        } catch {
+            throw ConnectionError.commandFailed(
+                "\(installError.localizedDescription) Restoring the previous browser server also failed. \(error.localizedDescription)"
+            )
+        }
     }
 
     private func runClaude(_ claude: URL, _ arguments: [String]) throws {
