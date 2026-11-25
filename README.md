@@ -182,8 +182,9 @@ put when the CLI switches:
 2. **Turn on "Stay connected when switching Claude accounts".** This adds a
    user-scope `browser` MCP server that runs the connection under
    `~/.claude-browser`, and adds `claude-in-chrome` to `deniedMcpServers` in
-   `~/.claude/settings.json` to turn off the built-in connection. It refuses to
-   replace an existing `browser` server.
+   `~/.claude/settings.json` to turn off the built-in connection. If Lifeboat's
+   existing server lost its browser login setting, turning this on repairs it.
+   If another server uses the name `browser`, rename it first.
 3. **Start new sessions.** "Check Connection" confirms the connection reaches
    your browser. If you have several, the first browser tool call asks which to
    use.

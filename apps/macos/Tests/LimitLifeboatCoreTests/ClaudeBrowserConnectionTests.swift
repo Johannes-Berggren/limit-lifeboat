@@ -26,7 +26,9 @@ final class ClaudeBrowserConnectionTests: XCTestCase {
 
     /// A stand-in `claude`: `mcp` edits `.claude.json` and the server flag
     /// answers two JSON-RPC requests.
-    private func installFakeClaude(toolText: String = "[]", exitStatus: Int = 0) throws {
+    private func installFakeClaude(
+        toolText: String = "[]", exitStatus: Int = 0, rejectIsolatedAdd: Bool = false
+    ) throws {
         let bin = home.appendingPathComponent(".local/bin")
         try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
         let script = bin.appendingPathComponent("claude")
@@ -36,7 +38,11 @@ final class ClaudeBrowserConnectionTests: XCTestCase {
         echo "$* CONFIG=$CLAUDE_CONFIG_DIR" >> '\(log.path)'
         [ \(exitStatus) -eq 0 ] || { echo 'mcp failed'; exit \(exitStatus); }
         case "$1 $2" in
-          "mcp add-json") printf '{"mcpServers":{"%s":%s}}' "$3" "$4" > '\(configURL.path)' ;;
+          "mcp add-json")
+            case "$4" in
+              *CLAUDE_CONFIG_DIR*) [ \(rejectIsolatedAdd ? 1 : 0) -eq 0 ] || { echo 'isolated add failed'; exit 1; } ;;
+            esac
+            printf '{"mcpServers":{"%s":%s}}' "$3" "$4" > '\(configURL.path)' ;;
           "mcp remove") printf '{"mcpServers":{}}' > '\(configURL.path)' ;;
           "--claude-in-chrome-mcp "*)
             while read -r line; do
@@ -57,6 +63,16 @@ final class ClaudeBrowserConnectionTests: XCTestCase {
     private func writeSettings(_ settings: [String: Any]) throws {
         try FileManager.default.createDirectory(at: settingsURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try JSONSerialization.data(withJSONObject: settings).write(to: settingsURL)
+    }
+
+    private func writeExistingBrowserServer(environment: [String: String] = [:]) throws {
+        let server: [String: Any] = [
+            "type": "stdio",
+            "command": home.appendingPathComponent(".local/bin/claude").path,
+            "args": ["--claude-in-chrome-mcp"],
+            "env": environment
+        ]
+        try JSONSerialization.data(withJSONObject: ["mcpServers": ["browser": server]]).write(to: configURL)
     }
 
     func testInstallAddsTheServerAndDenialThenUninstallRemovesBoth() throws {
@@ -136,6 +152,53 @@ final class ClaudeBrowserConnectionTests: XCTestCase {
         try connection.uninstall()
         XCTAssertEqual(try String(contentsOf: configURL), theirs)
         XCTAssertFalse(FileManager.default.fileExists(atPath: log.path))
+    }
+
+    func testRepairsAnExistingLifeboatServerThatLostItsBrowserLoginSetting() throws {
+        try installFakeClaude()
+        try connection.install()
+        try writeExistingBrowserServer()
+        XCTAssertEqual(connection.status(), .needsRepair)
+
+        try connection.install()
+        XCTAssertEqual(connection.status(), .installed)
+        XCTAssertEqual(try settings()["deniedMcpServers"] as? [[String: String]], [["serverName": "claude-in-chrome"]])
+
+        try connection.uninstall()
+        XCTAssertEqual(connection.status(), .notSet)
+        XCTAssertNil(try settings()["deniedMcpServers"])
+    }
+
+    func testRestoresPreviousBrowserServerIfRepairFails() throws {
+        try installFakeClaude()
+        try connection.install()
+        try writeExistingBrowserServer()
+        try installFakeClaude(rejectIsolatedAdd: true)
+
+        XCTAssertThrowsError(try connection.install()) { error in
+            XCTAssertEqual(error as? ClaudeBrowserConnection.ConnectionError, .commandFailed("isolated add failed"))
+        }
+        XCTAssertEqual(connection.status(), .needsRepair)
+        XCTAssertEqual(try settings()["deniedMcpServers"] as? [[String: String]], [["serverName": "claude-in-chrome"]])
+    }
+
+    func testDoesNotRepairAManuallyConfiguredChromeServer() throws {
+        try installFakeClaude()
+        try writeExistingBrowserServer()
+        XCTAssertEqual(connection.status(), .other(home.appendingPathComponent(".local/bin/claude").path))
+        XCTAssertThrowsError(try connection.install())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: log.path))
+    }
+
+    func testDoesNotReplaceCustomEnvironmentEvenWithAnExistingMarker() throws {
+        try installFakeClaude()
+        try connection.install()
+        try writeExistingBrowserServer(environment: ["CLAUDE_CONFIG_DIR": "/custom-chrome-login"])
+        XCTAssertEqual(connection.status(), .other(home.appendingPathComponent(".local/bin/claude").path))
+        let before = try Data(contentsOf: configURL)
+
+        XCTAssertThrowsError(try connection.install())
+        XCTAssertEqual(try Data(contentsOf: configURL), before)
     }
 
     func testAFailedAddChangesNoSettings() throws {
