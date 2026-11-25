@@ -167,6 +167,10 @@ final class AppState: ObservableObject {
     private var pendingClaudeLoginCompletion: PendingClaudeLoginCompletion?
     private var wakeObserver: NSObjectProtocol?
     private var cancellables: Set<AnyCancellable> = []
+    /// The last snapshot written for the desktop widget; see
+    /// WidgetSnapshotPublishing.swift.
+    var lastPublishedWidgetSnapshot: WidgetSnapshot?
+    var lastWidgetReloadAt: Date?
     /// Popover-open refreshes are throttled on attempts, not outcomes — an
     /// account whose fetch keeps failing must not re-trigger on every open.
     private var lastClaudeRefreshAttempt: Date?
@@ -303,6 +307,18 @@ final class AppState: ObservableObject {
             .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
             .sink { [weak self] states, accountIDs in
                 self?.persistAccountIssues(states: states, accountIDs: accountIDs)
+            }
+            .store(in: &cancellables)
+
+        // Mirror the account cards into the desktop widget's snapshot. Any
+        // published change (usage, advice, refresh state) or a widget-relevant
+        // setting can alter it; throttled so a refresh pass writes once.
+        objectWillChange
+            .merge(with: self.settings.objectWillChange)
+            .throttle(for: .seconds(2), scheduler: RunLoop.main, latest: true)
+            .sink { [weak self] _ in
+                // objectWillChange fires before the new value lands.
+                Task { @MainActor [weak self] in self?.publishWidgetSnapshot() }
             }
             .store(in: &cancellables)
     }

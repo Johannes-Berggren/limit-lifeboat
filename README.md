@@ -203,6 +203,41 @@ What changes:
   stays for next time; `CLAUDE_CONFIG_DIR="$HOME/.claude-browser" claude auth logout`
   removes it.
 
+## Desktop widget
+
+Limit Lifeboat includes a macOS widget that shows every saved account on the
+desktop or in Notification Center. To add it, right-click the desktop, choose
+**Edit Widgets**, and search for Limit Lifeboat.
+
+- **Small** shows the active account's headline limit as a ring, and the
+  account the app would suggest switching to next.
+- **Medium** lists up to four accounts, each with how much of its session and
+  week is left.
+- **Large** groups accounts by provider, draws the same runway curves as the
+  menu (when Usage curves are on), and repeats the suggested switch target.
+
+When a model-specific weekly limit (such as Opus) has less left than the
+all-models week, it takes the Week column and is named there, so an empty
+model limit is never hidden.
+
+Each limit also shows the time until it resets, in hours and minutes
+(`2h 30m`), or days and hours for weekly windows more than a day out
+(`3d 4h`). The countdown ticks every minute.
+
+The widget only displays usage. It cannot switch accounts, and clicking it
+opens the app's menu. While the app runs, the widget updates when the numbers
+change; otherwise macOS refreshes it about every 15 minutes. Readings older
+than 30 minutes are greyed out with their age, and a window whose reset has
+passed shows **Reset** rather than its old numbers.
+
+The widget runs in the App Sandbox. Its only file access is read-only access
+to `~/Library/Application Support/LimitLifeboat/Widget/`. The app keeps a
+display copy there of each account's name as the menu shows it (an email
+address until you rename the account), plus its plan, percentages, reset
+times and status note. The copy contains no credentials, tokens or
+organization details, and the widget cannot read anything else the app
+stores.
+
 ## Command-line companion
 
 The app ships `limit-lifeboat`, a CLI that prints what the app last recorded
