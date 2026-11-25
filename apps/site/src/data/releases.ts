@@ -15,6 +15,13 @@ export interface Release {
 
 export const releases: readonly Release[] = [
   {
+    version: "1.3.2",
+    date: "2026-11-25",
+    highlights: [
+      "Fixed the disabled Claude in Chrome toggle when the existing browser server lost its separate login setting. Turn the setting on to repair the server and keep using the same browser tools across Claude Code account switches.",
+    ],
+  },
+  {
     version: "1.3.1",
     date: "2026-11-24",
     highlights: [
